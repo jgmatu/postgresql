@@ -1,0 +1,117 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    name: build, unit, db and e2e tests (Ubuntu 26.04, PostgreSQL 18)
+    runs-on: ubuntu-latest
+    container: ubuntu:26.04
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_PASSWORD: ci-only-postgres
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s --health-timeout 3s --health-retries 30
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      PGHOST: postgres
+      PGUSER: postgres
+      PGPASSWORD: ci-only-postgres
+      PGDEMO_PGHOST: postgres
+    steps:
+      - name: Install packages
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build git ca-certificates patch pkg-config \
+            libpq-dev libbotan-3-dev libboost-json-dev libgtest-dev \
+            postgresql-client openssl curl jq
+
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DPGDEMO_BUILD_TESTS=ON
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Unit tests
+        run: ctest --test-dir build -LE db --output-on-failure
+
+      - name: Initialise the database
+        run: scripts/db-init.sh --reset
+
+      - name: Database integration tests
+        run: |
+          . run/demo.env
+          export PGDEMO_TEST_SERVER_CONNINFO="host=postgres dbname=pgdemo user=demo_server password=${DEMO_SERVER_DB_PASSWORD}"
+          export PGDEMO_TEST_CONTROLLER_CONNINFO="host=postgres dbname=pgdemo user=demo_controller password=${DEMO_CONTROLLER_DB_PASSWORD}"
+          ctest --test-dir build -L db --output-on-failure
+
+      - name: End-to-end
+        run: tests/e2e.sh
+
+      - name: Logs
+        if: failure()
+        run: tail -n 100 run/logs/*.log || true
+
+  compose:
+    name: docker compose (two network zones)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Secrets for this run
+        run: |
+          {
+            echo "POSTGRES_PASSWORD=$(openssl rand -hex 16)"
+            echo "DEMO_ADMIN_PASSWORD=$(openssl rand -hex 16)"
+          } > docker/.env
+
+      - name: Up
+        run: docker compose -f docker/compose.yaml --env-file docker/.env up -d --build
+
+      - name: Wait for the server
+        run: |
+          for _ in $(seq 1 60); do
+            curl -fsS http://127.0.0.1:8080/api/health && exit 0
+            sleep 2
+          done
+          exit 1
+
+      - name: Configuration loop across the zones
+        run: |
+          . docker/.env
+          export PGDEMO_TOKEN="$RUNNER_TEMP/token"
+          PGDEMO_PASSWORD="$DEMO_ADMIN_PASSWORD" client/pgdemo.sh login admin
+          test "$(client/pgdemo.sh config set dummy1 rate_ms=250 | jq -r .status)" = SUCCESS
+          test "$(client/pgdemo.sh data dummy2 | jq length)" -ge 1
+
+      - name: Zones are isolated
+        run: |
+          # The controller (zone_b) cannot reach the server (zone_a); only PostgreSQL is shared.
+          if docker compose -f docker/compose.yaml --env-file docker/.env exec -T controller \
+               timeout 3 bash -c 'exec 3<>/dev/tcp/172.28.10.20/8080'; then
+            echo "controller reached the server" >&2
+            exit 1
+          fi
+          docker compose -f docker/compose.yaml --env-file docker/.env exec -T controller \
+            timeout 3 bash -c 'exec 3<>/dev/tcp/172.28.20.10/5432'
+
+      - name: Logs
+        if: always()
+        run: docker compose -f docker/compose.yaml --env-file docker/.env logs --no-color | tail -n 200
+
+      - name: Down
+        if: always()
+        run: docker compose -f docker/compose.yaml --env-file docker/.env down -v

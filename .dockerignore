@@ -1,0 +1,7 @@
+.git
+build*
+out
+run
+docker/.env
+docs
+tests

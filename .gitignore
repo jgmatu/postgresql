@@ -1,0 +1,14 @@
+# Build trees
+/build*/
+/out/
+compile_commands.json
+
+# Runtime state: JWT keys, generated passwords, logs, pid files
+/run/
+/docker/.env
+
+# Editors and language servers
+.cache/
+.vscode/
+.idea/
+*.swp

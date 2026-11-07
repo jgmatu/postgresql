@@ -1,0 +1,125 @@
+diff -ruN libpqxx-8.0.0/include/pqxx/connection.hxx libpqxx-patched/include/pqxx/connection.hxx
+--- libpqxx-8.0.0/include/pqxx/connection.hxx	2026-02-23 17:52:37.000000000 +0100
++++ libpqxx-patched/include/pqxx/connection.hxx	2026-03-21 21:00:00.758260996 +0100
+@@ -708,6 +708,24 @@
+   int get_notifs(sl = sl::current());
+ 
+   /// Wait for a notification to come in.
++  /**
++   * This function blocks indefinitely until a message is received, behaving
++   * similarly to a select() call with a NULL timeout or poll() with a -1 timeout.
++   *
++   * Other events, such as a backend failure, may also terminate the wait.
++   * When a notification arrives, this function will process it along with
++   * any other pending notifications before returning.
++   *
++   * To integrate notifications into your own event loop, monitor the
++   * connection's socket for read readiness. Once data is available,
++   * call @ref get_notifs() repeatedly until it returns zero.
++   *
++   * @return Number of notifications processed.
++   */
++  int wait_notification(sl = sl::current());
++
++
++  /// Wait for a notification to come in.
+   /** There are other events that will also cancel the wait, such as the
+    * backend failing.  Also, _the function will wake up by itself from time to
+    * time._  Your code must be ready to handle this; don't assume after waking
+diff -ruN libpqxx-8.0.0/include/pqxx/internal/wait.hxx libpqxx-patched/include/pqxx/internal/wait.hxx
+--- libpqxx-8.0.0/include/pqxx/internal/wait.hxx	2026-02-23 17:52:37.000000000 +0100
++++ libpqxx-patched/include/pqxx/internal/wait.hxx	2026-03-21 21:00:00.777257380 +0100
+@@ -15,7 +15,7 @@
+ 
+ /// Wait for a socket to be ready for reading/writing, or timeout.
+ PQXX_LIBEXPORT void wait_fd(
+-  int fd, bool for_read, bool for_write, unsigned seconds = 1,
++  int fd, bool for_read, bool for_write, int seconds = -1,
+   unsigned microseconds = 0, sl = sl::current());
+ } // namespace pqxx::internal
+ #endif
+diff -ruN libpqxx-8.0.0/src/connection.cxx libpqxx-patched/src/connection.cxx
+--- libpqxx-8.0.0/src/connection.cxx	2026-02-23 17:52:37.000000000 +0100
++++ libpqxx-patched/src/connection.cxx	2026-03-21 21:00:00.768259093 +0100
+@@ -1250,6 +1250,18 @@
+ }
+ 
+ 
++int pqxx::connection::wait_notification(sl loc)
++{
++  int notifs = get_notifs(loc);
++  if (notifs == 0)
++  {
++    [[likely]] internal::wait_fd(socket_of(m_conn), true, false, -1, 0);
++    notifs = get_notifs(loc);
++  }
++  return notifs;
++}
++
++
+ int pqxx::connection::await_notification(sl loc)
+ {
+   int notifs = get_notifs(loc);
+diff -ruN libpqxx-8.0.0/src/wait.cxx libpqxx-patched/src/wait.cxx
+--- libpqxx-8.0.0/src/wait.cxx	2026-02-23 17:52:37.000000000 +0100
++++ libpqxx-patched/src/wait.cxx	2026-03-21 21:00:00.787255476 +0100
+@@ -92,7 +92,7 @@
+ 
+ 
+ void pqxx::internal::wait_fd(
+-  int fd, bool for_read, bool for_write, unsigned seconds,
++  int fd, bool for_read, bool for_write, int seconds,
+   unsigned microseconds, [[maybe_unused]] sl loc)
+ {
+ // WSAPoll is available in winsock2.h only for versions of Windows >= 0x0600
+@@ -101,16 +101,26 @@
+   short const events{static_cast<short>(
+     (for_read ? POLLRDNORM : 0) | (for_write ? POLLWRNORM : 0))};
+   WSAPOLLFD fdarray{SOCKET(fd), events, 0};
+-  int const code{WSAPoll(
+-    &fdarray, 1u,
+-    check_cast<int>(
+-      to_milli<unsigned>(seconds, microseconds, loc), "Timeout too large."))};
++  int timeout_ms{-1};
++  if (seconds >= 0)
++    timeout_ms = check_cast<int>(
++      to_milli<unsigned>(static_cast<unsigned>(seconds), microseconds, loc),
++      "Timeout too large.");
++  int const code{WSAPoll(&fdarray, 1u, timeout_ms)};
+ #elif defined(PQXX_HAVE_POLL)
+   auto const events{static_cast<short>(
+     POLLERR | POLLHUP | POLLNVAL | (for_read ? POLLIN : 0) |
+     (for_write ? POLLOUT : 0))};
+   pollfd pfd{fd, events, 0};
+-  int const code{poll(&pfd, 1, to_milli<int>(seconds, microseconds, loc))};
++  int code = 0;
++  if (seconds < 0)
++  {
++    code = poll(&pfd, 1, -1);
++  }
++  else
++  {
++    code = poll(&pfd, 1, to_milli<int>(seconds, microseconds, loc));
++  }
+ #else
+   // No poll()?  Our last option is select().
+   fd_set read_fds;
+@@ -127,8 +137,16 @@
+   FD_ZERO(&except_fds);
+   set_fdbit(except_fds, fd);
+ 
+-  timeval tv = {seconds, microseconds};
+-  int const code{select(fd + 1, &read_fds, &write_fds, &except_fds, &tv)};
++  int code = 0;
++  if (seconds < 0)
++  {
++    code = select(fd + 1, &read_fds, &write_fds, &except_fds, NULL);
++  }
++  else
++  {
++    timeval tv = {seconds, microseconds};
++    code = select(fd + 1, &read_fds, &write_fds, &except_fds, &tv);
++  }
+ #endif
+ 
+   if (code == -1)

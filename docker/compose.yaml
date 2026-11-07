@@ -1,0 +1,98 @@
+# Two network zones that share nothing but PostgreSQL.
+#
+#   zone_a (172.28.10.0/24)  server      <- the only port published, on host loopback
+#   zone_b (172.28.20.0/24)  controller  internal: no route out, not even to zone_a
+#   postgres is attached to both zones and is the only path between them.
+#
+# Usage (from the repository root):
+#   cp docker/.env.example docker/.env      # then set real passwords
+#   docker compose -f docker/compose.yaml --env-file docker/.env up --build
+#   PGDEMO_PASSWORD=<DEMO_ADMIN_PASSWORD> client/pgdemo.sh login admin
+
+name: pgdemo
+
+x-app: &app
+  build:
+    context: ..
+    dockerfile: docker/Dockerfile
+  image: pgdemo:latest
+  init: true
+  volumes:
+    - demo-run:/app/run
+
+services:
+  postgres:
+    image: postgres:18
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in docker/.env}
+    volumes:
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    networks:
+      zone_a:
+        ipv4_address: 172.28.10.10
+      zone_b:
+        ipv4_address: 172.28.20.10
+
+  # One-shot: roles, schema, partitions, first admin; writes run/demo.env.
+  init:
+    <<: *app
+    command: ["scripts/db-init.sh"]
+    environment:
+      PGHOST: postgres
+      PGUSER: postgres
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      PGDEMO_PGHOST: postgres
+      PGDEMO_PGPORT: "5432"
+      DEMO_ADMIN_PASSWORD: ${DEMO_ADMIN_PASSWORD:?set DEMO_ADMIN_PASSWORD in docker/.env}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - zone_a
+
+  server:
+    <<: *app
+    command: ["scripts/run-all.sh", "server"]
+    environment:
+      PGDEMO_LISTEN_ADDR: 0.0.0.0
+      PGDEMO_PORT: "8080"
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    networks:
+      zone_a:
+        ipv4_address: 172.28.10.20
+
+  controller:
+    <<: *app
+    command: ["scripts/run-all.sh", "controller"]
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    networks:
+      zone_b:
+        ipv4_address: 172.28.20.20
+
+volumes:
+  pgdata:
+  demo-run:
+
+networks:
+  zone_a:
+    ipam:
+      config:
+        - subnet: 172.28.10.0/24
+  zone_b:
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.28.20.0/24
