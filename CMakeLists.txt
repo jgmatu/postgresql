@@ -15,6 +15,7 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
 endif()
 
 option(PGDEMO_BUILD_TESTS "Build the GoogleTest suites" ON)
+option(PGDEMO_BUILD_DOCS "Add the docs target (Doxygen)" ON)
 
 include(cmake/Dependencies.cmake)
 
@@ -29,4 +30,8 @@ add_subdirectory(server)
 if(PGDEMO_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
+endif()
+
+if(PGDEMO_BUILD_DOCS)
+    include(cmake/Docs.cmake)
 endif()

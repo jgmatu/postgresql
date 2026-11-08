@@ -15,7 +15,7 @@
 namespace pgdemo::server {
 
 /**
- * User management, admin only.
+ * @brief User management, admin only.
  *
  * Two independent checks: the HTTP layer rejects a non-admin token with 403, and
  * the statement runs under `SET LOCAL ROLE demo_admin`, the only group with
@@ -29,12 +29,17 @@ namespace pgdemo::server {
 class UsersController : public oatpp::web::server::api::ApiController
 {
 public:
+    /**
+     * @param services shared server state
+     * @param mapper   Oat++ object mapper for the controller
+     */
     UsersController(std::shared_ptr<Services> services, const std::shared_ptr<ObjectMapper>& mapper)
         : oatpp::web::server::api::ApiController(mapper)
         , s_(std::move(services))
     {
     }
 
+    /// `GET /api/users` (admin): 200 with the user directory, 403 otherwise.
     ENDPOINT("GET", "/api/users", list, REQUEST(std::shared_ptr<IncomingRequest>, request))
     {
         return http::guarded("list users", [&] {
@@ -44,6 +49,7 @@ public:
         });
     }
 
+    /// `POST /api/users` (admin): 201 created, 400 bad body, 403 not admin, 409 name taken.
     ENDPOINT("POST", "/api/users", create, REQUEST(std::shared_ptr<IncomingRequest>, request),
              BODY_STRING(String, body))
     {
@@ -78,6 +84,7 @@ public:
         });
     }
 
+    /// `DELETE /api/users/{username}` (admin): 200 deleted, 403 not admin, 404 unknown, 422 last admin.
     ENDPOINT("DELETE", "/api/users/{username}", remove, REQUEST(std::shared_ptr<IncomingRequest>, request),
              PATH(String, username))
     {

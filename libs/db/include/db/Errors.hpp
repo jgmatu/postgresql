@@ -11,13 +11,21 @@ enum class DbErrorKind {
     Constraint,   ///< check / not-null / foreign-key violation, bad input (23xxx, 22xxx)
     Forbidden,    ///< insufficient_privilege (42501): the PostgreSQL role refused it
     Unavailable,  ///< connection lost or not open
-    Other,
+    Other,        ///< anything else; reported as an internal error
 };
 
-/// Classify the exception currently being handled.
+/**
+ * @brief Classify the exception currently being handled.
+ * @param e any exception; non-libpqxx exceptions give `Other`
+ * @return the category used to pick the HTTP status
+ */
 DbErrorKind classify(const std::exception& e) noexcept;
 
-/// SQLSTATE of a libpqxx failure, or an empty view.
+/**
+ * @brief SQLSTATE of a libpqxx failure.
+ * @param e any exception
+ * @return the five-character code, or an empty view when `e` carries none
+ */
 std::string_view sqlstate_of(const std::exception& e) noexcept;
 
 } // namespace pgdemo::db

@@ -30,8 +30,10 @@ enum class ResponseStatus {
 class Dispatcher
 {
 public:
+    /// Default limit of concurrent waiters; beyond it requests get `SYSTEM_FULL`.
     static constexpr std::size_t MAX_PENDING = 500;
 
+    /// @param max_pending concurrent waiters accepted before `SYSTEM_FULL`
     explicit Dispatcher(std::size_t max_pending = MAX_PENDING);
 
     /**
@@ -55,6 +57,7 @@ public:
     /// Number of registered waiters.
     std::size_t pending() const;
 
+    /// Enumerator name, e.g. `"SUCCESS"`, for logs and JSON replies.
     static std::string_view status_to_string(ResponseStatus status) noexcept;
 
 private:

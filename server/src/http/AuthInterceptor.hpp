@@ -12,8 +12,9 @@
 
 namespace pgdemo::server::http {
 
-/// Bundle keys set by `AuthInterceptor` for the controllers.
+/// Request-bundle key holding the verified `sub` claim.
 inline constexpr const char* kBundleSubject = "auth.sub";
+/// Request-bundle key holding the verified `role` claim.
 inline constexpr const char* kBundleRole = "auth.role";
 
 /**
@@ -28,11 +29,16 @@ inline constexpr const char* kBundleRole = "auth.role";
 class AuthInterceptor : public oatpp::web::server::interceptor::RequestInterceptor
 {
 public:
+    /// @param jwt verifier for the bearer tokens
     explicit AuthInterceptor(std::shared_ptr<auth::JwtManager> jwt)
         : jwt_(std::move(jwt))
     {
     }
 
+    /**
+     * @brief Let a public route through, or verify the bearer token.
+     * @return `nullptr` to continue routing, or a `401` response
+     */
     std::shared_ptr<OutgoingResponse> intercept(const std::shared_ptr<IncomingRequest>& request) override
     {
         std::string path = request->getStartingLine().path.std_str();

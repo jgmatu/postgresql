@@ -16,6 +16,7 @@ namespace pgdemo::auth {
 class PasswordHasher
 {
 public:
+    /// Argon2id cost parameters, written into every hash.
     struct Params
     {
         std::size_t memory_kib{65536}; ///< m: 64 MiB
@@ -25,6 +26,7 @@ public:
 
     /// Hash with a fresh 16-byte random salt.
     static std::string hash(std::string_view password, const Params& params);
+    /// Hash with the default `Params`.
     static std::string hash(std::string_view password) { return hash(password, Params{}); }
 
     /// False for a wrong password or a malformed hash. Never throws.

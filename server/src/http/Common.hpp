@@ -17,6 +17,7 @@
 
 namespace pgdemo::server::http {
 
+/// Incoming Oat++ request.
 using IncomingRequest = oatpp::web::protocol::http::incoming::Request;
 
 /// Invalid client input; becomes `400 bad_request` with the message.
@@ -28,12 +29,17 @@ struct BadRequest : std::runtime_error
 /// Authenticated identity of the request, from the bundle set by `AuthInterceptor`.
 struct Caller
 {
-    std::string username;
-    db::DbRole role;
+    std::string username; ///< verified `sub` claim
+    db::DbRole role;      ///< verified `role` claim; also the PostgreSQL group for the request
 
+    /// True for the admin role.
     [[nodiscard]] bool is_admin() const noexcept { return role == db::DbRole::Admin; }
 };
 
+/**
+ * @brief Identity stored by `AuthInterceptor` in the request bundle.
+ * @throws std::logic_error on a public route, where no identity was stored
+ */
 inline Caller caller_of(const std::shared_ptr<IncomingRequest>& request)
 {
     const auto sub = request->getBundleData<oatpp::String>(kBundleSubject);
@@ -43,12 +49,16 @@ inline Caller caller_of(const std::shared_ptr<IncomingRequest>& request)
     return {*sub, *parsed};
 }
 
+/// `403 forbidden` with `message`.
 inline std::shared_ptr<Response> forbidden(std::string_view message = "admin role required")
 {
     return error_response(Status::CODE_403, "forbidden", message);
 }
 
-/// Optional integer query parameter in `[lo, hi]`.
+/**
+ * @brief Optional integer query parameter in `[lo, hi]`.
+ * @throws BadRequest when present but not an integer in range
+ */
 inline std::optional<int> int_param(const std::shared_ptr<IncomingRequest>& request, const char* name,
                                     int lo, int hi)
 {
@@ -65,6 +75,7 @@ inline std::optional<int> int_param(const std::shared_ptr<IncomingRequest>& requ
     return v;
 }
 
+/// Optional string query parameter, unvalidated.
 inline std::optional<std::string> str_param(const std::shared_ptr<IncomingRequest>& request,
                                             const char* name)
 {
@@ -73,6 +84,10 @@ inline std::optional<std::string> str_param(const std::shared_ptr<IncomingReques
     return std::string(*raw);
 }
 
+/**
+ * @brief `dummy1` or `dummy2` from a path or query value.
+ * @throws BadRequest for any other name
+ */
 inline db::DummyTable table_param(std::string_view name)
 {
     const auto t = db::parse_dummy_table(name);

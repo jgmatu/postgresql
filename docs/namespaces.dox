@@ -1,0 +1,49 @@
+/**
+ * @namespace pgdemo
+ * @brief Root namespace of the PostgreSQL reactive architecture demo.
+ *
+ * Two processes, `pgdemo-server` and `pgdemo-controller`, never talk to each
+ * other. PostgreSQL is the only channel: a durable queue, LISTEN/NOTIFY wake-ups,
+ * partitioned history, and role-based authorization enforced by the database.
+ */
+
+/**
+ * @namespace pgdemo::db
+ * @brief PostgreSQL access layer shared by both processes.
+ *
+ * `DatabaseManager` owns a pool of query connections and one listener
+ * connection. The other headers hold the table whitelist, row types and
+ * SQLSTATE classification.
+ */
+
+/**
+ * @namespace pgdemo::db::channel
+ * @brief NOTIFY channel names of the control plane (see `sql/04_triggers.sql`).
+ */
+
+/**
+ * @namespace pgdemo::auth
+ * @brief Password hashing (Argon2id) and token signing (ES384 JWT), both on Botan 3.
+ */
+
+/**
+ * @namespace pgdemo::log
+ * @brief Header-only, thread-safe line logger to `std::clog`.
+ */
+
+/**
+ * @namespace pgdemo::server
+ * @brief `pgdemo-server`: Oat++ HTTP API, request/completion `Dispatcher`, and
+ * the `EventHub` that fans notifications out to Server-Sent Events.
+ */
+
+/**
+ * @namespace pgdemo::server::http
+ * @brief HTTP plumbing for the controllers: JSON responses, authentication,
+ * error mapping, query-parameter parsing, and the SSE body.
+ */
+
+/**
+ * @namespace pgdemo::controller
+ * @brief `pgdemo-controller`: data-plane producers and the configuration queue worker.
+ */

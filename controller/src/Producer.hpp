@@ -24,18 +24,28 @@ namespace pgdemo::controller {
 class Producer
 {
 public:
+    /**
+     * @param db      shared manager; must outlive the producer
+     * @param table   table this producer writes
+     * @param initial applied configuration to start from
+     * @param items   rows written per tick, `item_id` 1..items
+     */
     Producer(db::DatabaseManager& db, db::DummyTable table, const db::AppliedConfig& initial, int items);
+    /// Calls `stop()`.
     ~Producer();
 
     Producer(const Producer&) = delete;
     Producer& operator=(const Producer&) = delete;
 
+    /// Start the writer thread. A second call is a no-op.
     void start();
+    /// Wake the writer thread, ask it to stop, and join it. Idempotent.
     void stop();
 
     /// Thread-safe. Called from the listener thread after a commit.
     void apply(const db::AppliedConfig& config);
 
+    /// Rows committed by this producer.
     [[nodiscard]] std::int64_t samples_written() const noexcept { return written_.load(); }
 
 private:

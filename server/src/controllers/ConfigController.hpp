@@ -16,7 +16,7 @@
 namespace pgdemo::server {
 
 /**
- * Control plane: desired vs applied configuration.
+ * @brief Control plane: desired vs applied configuration.
  *
  * GET  /api/config                      v_dummy_config_sync_status
  * POST /api/config                      admin; {"target", "rate_ms"?, "amplitude"?, "is_active"?}
@@ -39,12 +39,17 @@ namespace pgdemo::server {
 class ConfigController : public oatpp::web::server::api::ApiController
 {
 public:
+    /**
+     * @param services shared server state
+     * @param mapper   Oat++ object mapper for the controller
+     */
     ConfigController(std::shared_ptr<Services> services, const std::shared_ptr<ObjectMapper>& mapper)
         : oatpp::web::server::api::ApiController(mapper)
         , s_(std::move(services))
     {
     }
 
+    /// `GET /api/config` (any role): 200 with `v_dummy_config_sync_status`.
     ENDPOINT("GET", "/api/config", status, REQUEST(std::shared_ptr<IncomingRequest>, request))
     {
         return http::guarded("config status", [&] {
@@ -53,6 +58,8 @@ public:
         });
     }
 
+    /// `POST /api/config` (admin): 200 applied, 202 still queued, 400 bad body, 403 not admin,
+    /// 422 rejected or expired, 503 too many requests in flight.
     ENDPOINT("POST", "/api/config", submit, REQUEST(std::shared_ptr<IncomingRequest>, request),
              BODY_STRING(String, body))
     {
@@ -122,6 +129,7 @@ public:
         });
     }
 
+    /// `GET /api/config/requests/{id}` (any role): 200 with the request and its error, 400 bad id, 404 unknown.
     ENDPOINT("GET", "/api/config/requests/{id}", request_by_id,
              REQUEST(std::shared_ptr<IncomingRequest>, request), PATH(String, id))
     {
@@ -138,6 +146,7 @@ public:
         });
     }
 
+    /// `GET /api/config/history?target=&limit=` (any role): 200 with the applied-configuration audit.
     ENDPOINT("GET", "/api/config/history", history, REQUEST(std::shared_ptr<IncomingRequest>, request))
     {
         return http::guarded("config history", [&] {

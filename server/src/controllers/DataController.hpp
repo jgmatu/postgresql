@@ -17,7 +17,7 @@
 namespace pgdemo::server {
 
 /**
- * Data plane, any authenticated role (reads run as demo_normal or demo_admin).
+ * @brief Data plane, any authenticated role (reads run as demo_normal or demo_admin).
  *
  * GET /api/health                     public liveness
  * GET /api/db/info                    PostgreSQL / libpqxx / listener details
@@ -28,12 +28,17 @@ namespace pgdemo::server {
 class DataController : public oatpp::web::server::api::ApiController
 {
 public:
+    /**
+     * @param services shared server state
+     * @param mapper   Oat++ object mapper for the controller
+     */
     DataController(std::shared_ptr<Services> services, const std::shared_ptr<ObjectMapper>& mapper)
         : oatpp::web::server::api::ApiController(mapper)
         , s_(std::move(services))
     {
     }
 
+    /// `GET /api/health` (public): 200 while the listener is alive, 503 otherwise.
     ENDPOINT("GET", "/api/health", health)
     {
         const bool alive = s_->db->listener_alive();
@@ -42,6 +47,7 @@ public:
                                                        {"listener_alive", alive}});
     }
 
+    /// `GET /api/db/info` (any role): 200 with database, pool, listener, SSE and Dispatcher state.
     ENDPOINT("GET", "/api/db/info", info)
     {
         return http::guarded("db info", [&] {
@@ -53,6 +59,7 @@ public:
         });
     }
 
+    /// `GET /api/data/{table}` (any role): 200 with the live rows, 400 unknown table.
     ENDPOINT("GET", "/api/data/{table}", data, REQUEST(std::shared_ptr<IncomingRequest>, request),
              PATH(String, table))
     {
@@ -62,6 +69,7 @@ public:
         });
     }
 
+    /// `GET /api/history/{table}?from=&to=&item_id=&limit=` (any role): 200 with history rows, 400 bad parameter.
     ENDPOINT("GET", "/api/history/{table}", history, REQUEST(std::shared_ptr<IncomingRequest>, request),
              PATH(String, table))
     {
@@ -77,6 +85,7 @@ public:
         });
     }
 
+    /// `GET /api/stream?channels=` (any role): 200 `text/event-stream`, 400 unknown channel.
     ENDPOINT("GET", "/api/stream", stream, REQUEST(std::shared_ptr<IncomingRequest>, request))
     {
         return http::guarded("stream", [&]() -> std::shared_ptr<OutgoingResponse> {

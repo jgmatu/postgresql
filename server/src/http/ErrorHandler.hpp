@@ -14,6 +14,7 @@ namespace pgdemo::server::http {
 class JsonErrorHandler : public oatpp::web::server::handler::ErrorHandler
 {
 public:
+    /// Uncaught exception from a handler: log it, reply `500 internal`.
     std::shared_ptr<Response> handleError(const std::exception_ptr& error) override
     {
         try
@@ -31,6 +32,7 @@ public:
         return error_response(Status::CODE_500, "internal", "internal server error");
     }
 
+    /// Framework error such as 404: `{"error": "http_<code>", "message"}`, keeping its headers.
     std::shared_ptr<Response> handleError(const Status& status, const oatpp::String& message,
                                           const Headers& headers) override
     {

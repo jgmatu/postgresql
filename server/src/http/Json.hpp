@@ -11,10 +11,14 @@
 
 namespace pgdemo::server::http {
 
+/// HTTP status code and reason phrase.
 using Status = oatpp::web::protocol::http::Status;
+/// Outgoing Oat++ response.
 using Response = oatpp::web::protocol::http::outgoing::Response;
+/// Oat++ factory for outgoing responses.
 using ResponseFactory = oatpp::web::protocol::http::outgoing::ResponseFactory;
 
+/// `body` serialized, with `Content-Type: application/json`.
 inline std::shared_ptr<Response> json_response(const Status& status, const boost::json::value& body)
 {
     auto r = ResponseFactory::createResponse(status, oatpp::String(boost::json::serialize(body)));

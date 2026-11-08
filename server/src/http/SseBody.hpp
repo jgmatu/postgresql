@@ -24,8 +24,13 @@ namespace pgdemo::server::http {
 class SseReadCallback : public oatpp::data::stream::ReadCallback
 {
 public:
+    /// Idle time before a `: keepalive` comment line is sent.
     static constexpr std::chrono::seconds kKeepalive{15};
 
+    /**
+     * @param hub hub to unsubscribe from when the stream ends
+     * @param sub subscription this stream drains
+     */
     SseReadCallback(std::shared_ptr<EventHub> hub, std::shared_ptr<EventHub::Subscription> sub)
         : hub_(std::move(hub))
         , sub_(std::move(sub))
@@ -33,8 +38,13 @@ public:
         pending_ = "retry: 3000\n: connected\n\n";
     }
 
+    /// Removes the subscription from the hub.
     ~SseReadCallback() override { hub_->unsubscribe(sub_); }
 
+    /**
+     * @brief Copy the next SSE frame into `buffer`, blocking until there is one.
+     * @return bytes written, or 0 to end the stream after `EventHub::close_all()`
+     */
     oatpp::v_io_size read(void* buffer, v_buff_size count, oatpp::async::Action&) override
     {
         while (offset_ >= pending_.size())

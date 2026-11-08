@@ -15,18 +15,25 @@
 namespace pgdemo::server {
 
 /**
+ * @brief Login and identity.
+ *
  * POST /api/auth/login  {"username","password"} -> {"token","token_type","expires_in","role"}
  * GET  /api/auth/me     identity carried by the token
  */
 class AuthController : public oatpp::web::server::api::ApiController
 {
 public:
+    /**
+     * @param services shared server state
+     * @param mapper   Oat++ object mapper for the controller
+     */
     AuthController(std::shared_ptr<Services> services, const std::shared_ptr<ObjectMapper>& mapper)
         : oatpp::web::server::api::ApiController(mapper)
         , s_(std::move(services))
     {
     }
 
+    /// `POST /api/auth/login` (public): 200 with an ES384 token, 400 bad body, 401 bad credentials.
     ENDPOINT("POST", "/api/auth/login", login, BODY_STRING(String, body))
     {
         return http::guarded("login", [&] {
@@ -68,6 +75,7 @@ public:
         });
     }
 
+    /// `GET /api/auth/me` (any role): 200 with username, role and PostgreSQL group.
     ENDPOINT("GET", "/api/auth/me", me, REQUEST(std::shared_ptr<IncomingRequest>, request))
     {
         return http::guarded("me", [&] {
