@@ -55,7 +55,7 @@ Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design: sequence diagr
 
 ```bash
 sudo apt install build-essential cmake ninja-build git pkg-config patch \
-    libpq-dev libbotan-3-dev libboost-json-dev libgtest-dev \
+    libpq-dev libbotan-3-dev libboost-json-dev libgtest-dev libgmock-dev \
     postgresql-18 postgresql-client curl jq openssl
 
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release

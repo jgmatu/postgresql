@@ -1,5 +1,5 @@
 # System packages (Ubuntu 26.04):
-#   libpq-dev libbotan-3-dev libboost-json-dev libgtest-dev
+#   libpq-dev libbotan-3-dev libboost-json-dev libgtest-dev libgmock-dev
 # Fetched and built from source:
 #   libpqxx 8.0.0 with patches/libpqxx.patch.full (blocking wait_notification)
 #   Oat++ 1.3.1

@@ -34,7 +34,7 @@ jobs:
           apt-get update
           apt-get install -y --no-install-recommends \
             build-essential cmake ninja-build git ca-certificates patch pkg-config \
-            libpq-dev libbotan-3-dev libboost-json-dev libgtest-dev \
+            libpq-dev libbotan-3-dev libboost-json-dev libgtest-dev libgmock-dev \
             postgresql-client openssl curl jq
 
       - uses: actions/checkout@v4
