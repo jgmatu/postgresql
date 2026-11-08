@@ -49,7 +49,7 @@ Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design: sequence diagr
 | [`client/pgdemo.sh`](client/pgdemo.sh) | Command-line client: login, users, data, history, configuration, live monitor. |
 | [`patches/`](patches) | libpqxx 8.0.0 patch that adds a truly blocking `wait_notification()`. |
 | [`docker/`](docker) | Image and compose file with two isolated network zones. |
-| [`tests/`](tests) | GoogleTest (auth, dispatcher, database) and an end-to-end script. |
+| [`tests/`](tests) | GoogleTest (auth, dispatcher, database) and a Robot Framework end-to-end suite on docker compose. |
 
 ## Quick start (Ubuntu 26.04)
 
@@ -107,7 +107,7 @@ docker compose -f docker/compose.yaml --env-file docker/.env up --build
 . docker/.env && PGDEMO_PASSWORD="$DEMO_ADMIN_PASSWORD" client/pgdemo.sh login admin
 ```
 
-The server sits on `zone_a` (172.28.10.0/24) and is published on `127.0.0.1:8080` only. The controller sits on `zone_b` (172.28.20.0/24, `internal`, no outbound route). PostgreSQL is attached to both zones and is the only path between them. CI checks that the controller cannot open a TCP connection to the server.
+The server sits on `zone_a` (172.28.10.0/24) and is published on `127.0.0.1:8080` only. The controller sits on `zone_b` (172.28.20.0/24, `internal`, no outbound route). PostgreSQL is attached to both zones and is the only path between them. The end-to-end suite checks that the controller cannot open a TCP connection to the server.
 
 ## HTTP API
 
@@ -141,10 +141,16 @@ export PGDEMO_TEST_SERVER_CONNINFO="host=127.0.0.1 dbname=pgdemo user=demo_serve
 export PGDEMO_TEST_CONTROLLER_CONNINFO="host=127.0.0.1 dbname=pgdemo user=demo_controller password=$DEMO_CONTROLLER_DB_PASSWORD"
 ctest --test-dir build -L db
 
-tests/e2e.sh                                   # fresh database, both processes, 38 checks
+python3 -m venv .venv && .venv/bin/pip install -r tests/e2e/requirements.txt
+.venv/bin/robot --outputdir build/e2e tests/e2e                       # docker compose stack, 40 checks
+.venv/bin/robot --variable E2E_DEBUG:true --outputdir build/e2e tests/e2e  # same, with live command output
 ```
 
-The database tests cover channel multiplexing, the registration and shutdown rules of the listener, concurrent checkouts from the query pool, partition routing, role enforcement inside PostgreSQL, the full NOTIFY-driven configuration loop through the Dispatcher, and request expiry. CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs everything on `ubuntu:26.04` against `postgres:18`, then brings up the compose stack.
+The database tests cover channel multiplexing, the registration and shutdown rules of the listener, concurrent checkouts from the query pool, partition routing, role enforcement inside PostgreSQL, the full NOTIFY-driven configuration loop through the Dispatcher, and request expiry.
+
+The end-to-end suite ([`tests/e2e`](tests/e2e)) needs Docker with compose v2, `curl` and `jq`. Its `__init__.robot` builds the image and brings up a throwaway compose project, `pgdemo-e2e`, with fresh volumes and random passwords. It starts the server alone, then the controller, and runs authentication, role enforcement, the queue that persists while the controller is down, live data and SSE, the configuration loop with controller-side rejection, network-zone isolation and a clean shutdown. At the end it runs `down -v`, which only removes the volumes of `pgdemo-e2e`, never those of the development stack. The development stack must be stopped first, because both publish `127.0.0.1:8080` and use the `172.28.*` subnets. The console shows Robot's own progress. `--variable E2E_DEBUG:true` (also `1` or `yes`) echoes every `docker compose` command, image build included, plus each client call, `curl` and HTTP request with its output as it happens. A command that fails is printed either way. Reports and container logs are written to the `--outputdir`.
+
+CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs the unit and database tests on `ubuntu:26.04` against `postgres:18`, and the end-to-end suite in a separate job on the compose stack.
 
 ## Documentation
 

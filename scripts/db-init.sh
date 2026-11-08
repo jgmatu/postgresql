@@ -10,7 +10,7 @@
 # switches into demo_owner to create the schema.
 #
 # Secrets are never committed. If these are unset, random values are generated
-# and stored in run/demo.env (mode 0600), which run-all.sh and the e2e tests read:
+# and stored in run/demo.env (mode 0600), which run-all.sh reads:
 #   DEMO_SERVER_DB_PASSWORD      password of the demo_server login role
 #   DEMO_CONTROLLER_DB_PASSWORD  password of the demo_controller login role
 #   DEMO_ADMIN_PASSWORD          password of the API user "admin"

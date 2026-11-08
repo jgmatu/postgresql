@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   build-test:
-    name: build, unit, db and e2e tests (Ubuntu 26.04, PostgreSQL 18)
+    name: build, unit and db tests (Ubuntu 26.04, PostgreSQL 18)
     runs-on: ubuntu-latest
     container: ubuntu:26.04
     services:
@@ -58,60 +58,26 @@ jobs:
           export PGDEMO_TEST_CONTROLLER_CONNINFO="host=postgres dbname=pgdemo user=demo_controller password=${DEMO_CONTROLLER_DB_PASSWORD}"
           ctest --test-dir build -L db --output-on-failure
 
-      - name: End-to-end
-        run: tests/e2e.sh
-
-      - name: Logs
-        if: failure()
-        run: tail -n 100 run/logs/*.log || true
-
-  compose:
-    name: docker compose (two network zones)
+  e2e:
+    name: end-to-end on docker compose (Robot Framework, two network zones)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Secrets for this run
-        run: |
-          {
-            echo "POSTGRES_PASSWORD=$(openssl rand -hex 16)"
-            echo "DEMO_ADMIN_PASSWORD=$(openssl rand -hex 16)"
-          } > docker/.env
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
 
-      - name: Up
-        run: docker compose -f docker/compose.yaml --env-file docker/.env up -d --build
+      - name: Install Robot Framework
+        run: pip install -r tests/e2e/requirements.txt
 
-      - name: Wait for the server
-        run: |
-          for _ in $(seq 1 60); do
-            curl -fsS http://127.0.0.1:8080/api/health && exit 0
-            sleep 2
-          done
-          exit 1
+      # The suite builds the image, brings the stack up and tears it down (down -v).
+      - name: End-to-end
+        run: robot --outputdir e2e-results tests/e2e
 
-      - name: Configuration loop across the zones
-        run: |
-          . docker/.env
-          export PGDEMO_TOKEN="$RUNNER_TEMP/token"
-          PGDEMO_PASSWORD="$DEMO_ADMIN_PASSWORD" client/pgdemo.sh login admin
-          test "$(client/pgdemo.sh config set dummy1 rate_ms=250 | jq -r .status)" = SUCCESS
-          test "$(client/pgdemo.sh data dummy2 | jq length)" -ge 1
-
-      - name: Zones are isolated
-        run: |
-          # The controller (zone_b) cannot reach the server (zone_a); only PostgreSQL is shared.
-          if docker compose -f docker/compose.yaml --env-file docker/.env exec -T controller \
-               timeout 3 bash -c 'exec 3<>/dev/tcp/172.28.10.20/8080'; then
-            echo "controller reached the server" >&2
-            exit 1
-          fi
-          docker compose -f docker/compose.yaml --env-file docker/.env exec -T controller \
-            timeout 3 bash -c 'exec 3<>/dev/tcp/172.28.20.10/5432'
-
-      - name: Logs
+      - name: Results
         if: always()
-        run: docker compose -f docker/compose.yaml --env-file docker/.env logs --no-color | tail -n 200
-
-      - name: Down
-        if: always()
-        run: docker compose -f docker/compose.yaml --env-file docker/.env down -v
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-results
+          path: e2e-results

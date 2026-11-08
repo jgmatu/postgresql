@@ -7,6 +7,11 @@ compile_commands.json
 /run/
 /docker/.env
 
+# Python virtual environment for the Robot Framework e2e suite
+/.venv/
+__pycache__/
+*.pyc
+
 # Editors and language servers
 .cache/
 .vscode/
