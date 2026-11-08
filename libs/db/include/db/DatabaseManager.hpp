@@ -97,12 +97,34 @@ public:
      * Runs `LISTEN "<channel>"` on the listener connection, stores the callback in
      * `callbacks_` and installs the libpqxx handler for the channel.
      *
+     * Every channel is registered here, one call after another, and only then may
+     * `run_listener_loop()` start. libpqxx keeps its handler table inside the
+     * connection object, and that table is not thread-safe. Registering another
+     * channel while the listener thread is blocked in `wait_notification()` races
+     * with that wait and can deadlock or corrupt the connection. This method
+     * therefore refuses the call once the loop is running.
+     *
+     * @param channel PostgreSQL notification channel, for example `dummy1_events`.
+     * @param callback invoked on the listener thread with the decoded payload.
      * @throws std::logic_error if the listener loop is already running.
      * @throws std::runtime_error if `connect()` has not been called.
      */
     void register_listen_async(const std::string& channel, NotificationCallback callback);
 
-    /// Starts the listener thread. A second call is a no-op.
+    /**
+     * @brief Start the listener thread. Activation phase; a second call is a no-op.
+     *
+     * The thread blocks in `wait_notification()` and dispatches each notification
+     * to the handler installed for its channel.
+     *
+     * Call this only after every `register_listen_async()`. Those calls run on the
+     * caller thread and mutate the same libpqxx connection this thread is about to
+     * own. libpqxx is not thread-safe, so the two phases stay strictly ordered:
+     * register every channel first, then start the thread. A registration attempted
+     * afterwards is rejected; it is not applied concurrently with the wait.
+     *
+     * @throws std::runtime_error if `connect()` has not been called.
+     */
     void run_listener_loop();
 
     /// Blocks until the listener thread has finished. Shutdown phase only.
