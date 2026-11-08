@@ -34,16 +34,18 @@ std::string_view target_sql(ConfigTarget t) { return table_name(t); }
 
 } // namespace
 
-DatabaseManager::DatabaseManager(std::string conninfo, std::string application_name)
+DatabaseManager::DatabaseManager(std::string conninfo, std::string application_name, std::size_t pool_size)
     : conninfo_(std::move(conninfo))
     , application_name_(std::move(application_name))
+    , pool_size_(pool_size)
 {
+    if (pool_size_ == 0) throw std::invalid_argument("DatabaseManager pool_size must be at least 1");
 }
 
 DatabaseManager::~DatabaseManager()
 {
     // 1. disconnect() ends the listener loop (broken_connection), joins the
-    //    thread and closes both physical connections.
+    //    thread and closes the listener connection and the query pool.
     disconnect();
 
     // 2. Nothing left to stop, but keep the jthread contract explicit.
@@ -54,27 +56,47 @@ DatabaseManager::~DatabaseManager()
     }
 
     connection_listener_.reset();
-    connection_queries_.reset();
 }
 
 void DatabaseManager::connect()
 {
-    std::lock_guard lock(conn_mutex_);
+    // close() waits for outstanding leases and must not run under listener_mutex_.
+    pool_.close();
+    {
+        std::lock_guard lock(listener_mutex_);
+        connection_listener_.reset();
+        listener_fd_ = -1;
+    }
 
     try
     {
-        connection_listener_ = std::make_unique<pqxx::connection>(
+        auto listener = std::make_unique<pqxx::connection>(
             build_conninfo(conninfo_, application_name_ + "-listener"));
-        connection_queries_ =
-            std::make_unique<pqxx::connection>(build_conninfo(conninfo_, application_name_));
-        listener_backend_pid_ = connection_listener_->backendpid();
-        log::info(kLog, std::format("connected to database '{}' as '{}' (queries pid {}, listener pid {})",
-                                    connection_queries_->dbname(), connection_queries_->username(),
-                                    connection_queries_->backendpid(),
-                                    connection_listener_->backendpid()));
+        pool_.open(build_conninfo(conninfo_, application_name_), pool_size_);
+        const int listener_pid = listener->backendpid();
+
+        {
+            auto lease = pool_.acquire();
+            std::string pid_list;
+            for (const int pid : pool_.backend_pids())
+            {
+                if (!pid_list.empty()) pid_list += ", ";
+                pid_list += std::to_string(pid);
+            }
+            log::info(kLog, std::format(
+                                "connected to database '{}' as '{}' (pool {}, query pids [{}], listener pid {})",
+                                lease.get().dbname(), lease.get().username(), pool_.size(), pid_list, listener_pid));
+        }
+
+        std::lock_guard lock(listener_mutex_);
+        connection_listener_ = std::move(listener);
+        listener_backend_pid_ = listener_pid;
     }
-    catch (const pqxx::broken_connection& e)
+    catch (const std::exception& e)
     {
+        pool_.close();
+        std::lock_guard lock(listener_mutex_);
+        connection_listener_.reset();
         log::error(kLog, std::string("connection failed: ") + e.what());
         throw;
     }
@@ -96,11 +118,13 @@ void DatabaseManager::disconnect()
         listener_thread_->join();
     }
 
-    std::lock_guard lock(conn_mutex_);
+    // Join finished, so no listener callback still holds a lease.
+    pool_.close();
+
+    std::lock_guard lock(listener_mutex_);
     try
     {
         if (connection_listener_ && connection_listener_->is_open()) connection_listener_->close();
-        if (connection_queries_ && connection_queries_->is_open()) connection_queries_->close();
     }
     catch (const std::exception& e)
     {
@@ -109,22 +133,13 @@ void DatabaseManager::disconnect()
     listener_fd_ = -1;
 }
 
-pqxx::connection& DatabaseManager::queries()
-{
-    if (!connection_queries_ || !connection_queries_->is_open())
-    {
-        throw pqxx::broken_connection("query connection is not open");
-    }
-    return *connection_queries_;
-}
-
 // ---------------------------------------------------------------------------
 // Listener
 // ---------------------------------------------------------------------------
 
 void DatabaseManager::register_listen_async(const std::string& channel, NotificationCallback callback)
 {
-    std::lock_guard lock(conn_mutex_);
+    std::lock_guard lock(listener_mutex_);
 
     if (listening_.load())
     {
@@ -170,7 +185,7 @@ void DatabaseManager::run_listener_loop()
     if (listener_thread_) return;
 
     {
-        std::lock_guard lock(conn_mutex_);
+        std::lock_guard lock(listener_mutex_);
         if (!connection_listener_ || !connection_listener_->is_open())
         {
             throw std::runtime_error("run_listener_loop: database connection is not established");
@@ -234,9 +249,9 @@ void DatabaseManager::parser_notify(const pqxx::notification& n, boost::json::ob
 
 boost::json::object DatabaseManager::get_sanity_info()
 {
-    std::lock_guard lock(conn_mutex_);
+    auto lease = pool_.acquire();
     boost::json::object info;
-    pqxx::nontransaction nt(queries());
+    pqxx::nontransaction nt(lease.get());
     const auto row = nt.exec("SELECT version(), (now() - pg_postmaster_start_time())::text, "
                              "current_database(), current_user")
                          .one_row();
@@ -244,7 +259,12 @@ boost::json::object DatabaseManager::get_sanity_info()
     info["uptime"] = row[1].view();
     info["database"] = row[2].view();
     info["user"] = row[3].view();
-    info["queries_backend_pid"] = connection_queries_->backendpid();
+    info["queries_backend_pid"] = lease.backend_pid();
+    info["pool_size"] = static_cast<std::int64_t>(pool_.size());
+    info["pool_in_use"] = static_cast<std::int64_t>(pool_.in_use());
+    boost::json::array pids;
+    for (const int pid : pool_.backend_pids()) pids.emplace_back(static_cast<std::int64_t>(pid));
+    info["query_backend_pids"] = std::move(pids);
     info["listener_backend_pid"] = listener_backend_pid_;
     info["pqxx_version"] = PQXX_VERSION;
     info["listener_alive"] = listener_alive_.load();
@@ -272,8 +292,8 @@ void DatabaseManager::upsert_dummy_with_history(DummyTable table, const DummySam
         " SELECT item_id, value, seq, updated_at FROM up",
         live, hist);
 
-    std::lock_guard lock(conn_mutex_);
-    pqxx::work txn(queries());
+    auto lease = pool_.acquire();
+    pqxx::work txn(lease.get());
     txn.exec(sql, pqxx::params{sample.item_id, sample.value, sample.seq}).no_rows();
     txn.commit();
 }
@@ -311,8 +331,8 @@ boost::json::value DatabaseManager::fetch_history(DbRole role, DummyTable table,
 
 std::vector<std::string> DatabaseManager::ensure_history_partitions(DummyTable table, int months_ahead)
 {
-    std::lock_guard lock(conn_mutex_);
-    pqxx::work txn(queries());
+    auto lease = pool_.acquire();
+    pqxx::work txn(lease.get());
     const auto res = txn.exec("SELECT ensure_monthly_partitions($1::regclass, NULL, $2)",
                               pqxx::params{std::string(history_table_name(table)), months_ahead});
     txn.commit();
@@ -352,8 +372,8 @@ void DatabaseManager::add_pending_config(DbRole role, const ConfigRequest& r)
 
 std::vector<AppliedConfig> DatabaseManager::fetch_applied_config()
 {
-    std::lock_guard lock(conn_mutex_);
-    pqxx::work txn(queries());
+    auto lease = pool_.acquire();
+    pqxx::work txn(lease.get());
     const auto res = txn.exec(
         "SELECT target, rate_ms, amplitude, is_active, request_id FROM dummy_config ORDER BY target");
     txn.commit();
@@ -379,11 +399,11 @@ DrainStats DatabaseManager::drain_pending(
     const std::function<void(const AppliedConfig&)>& on_applied, std::chrono::seconds max_age)
 {
     DrainStats stats;
-    std::lock_guard lock(conn_mutex_);
+    auto lease = pool_.acquire();
 
     for (;;)
     {
-        pqxx::work txn(queries());
+        pqxx::work txn(lease.get());
         const auto res = txn.exec(
             "SELECT request_id, target, requested_rate_ms, requested_amplitude, requested_is_active,"
             " requested_by, extract(epoch FROM clock_timestamp() - requested_at)::float8"
@@ -532,8 +552,8 @@ boost::json::value DatabaseManager::fetch_config_history(DbRole role, std::optio
 
 std::optional<UserLoginRow> DatabaseManager::fetch_user_for_login(const std::string& username)
 {
-    std::lock_guard lock(conn_mutex_);
-    pqxx::work txn(queries());
+    auto lease = pool_.acquire();
+    pqxx::work txn(lease.get());
     const auto res = txn.exec("SELECT password_hash, role FROM auth_fetch_user($1)",
                               pqxx::params{username});
     txn.commit();

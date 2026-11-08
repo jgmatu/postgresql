@@ -21,10 +21,10 @@ This document explains how two processes that never talk to each other run a rea
 
 Neither process knows the other's address, port or existence. Each owns its side of the contract: the server owns *desired* state, and the controller owns *applied* state and the data. The schema in [`sql/`](../sql) is the interface between them.
 
-Each process holds two connections:
+Each process holds a pool of query connections plus one listener connection:
 
-- **query connection.** Every transaction, guarded by a mutex.
-- **listener connection.** Only `LISTEN` and a thread blocked on its socket.
+- **query pool.** A fixed set of connections opened at `connect()` (8 by default, `--pool-size`). Every transaction checks one out and returns it when the transaction ends. The pool mutex guards only the free list; the connection itself is used by one thread until the checkout ends. Callers block when the pool is exhausted.
+- **listener connection.** Only `LISTEN` and a thread blocked on its socket. It is not part of the pool: `LISTEN` state and `wait_notification()` belong to one session.
 
 ```mermaid
 flowchart TB
@@ -154,11 +154,11 @@ const auto status = dispatcher->wait_for_response(id, timeout_ms, [&] {
 
 ## 5. Listener lifecycle in `libs/db`
 
-`DatabaseManager` keeps the threading rules of libpqxx explicit. A `pqxx::connection` is not thread-safe, so the listener connection has a strict lifecycle:
+`DatabaseManager` keeps the threading rules of libpqxx explicit. A `pqxx::connection` is not thread-safe, which is why query connections are checked out of a pool instead of shared, and why the listener connection has a strict lifecycle:
 
 1. **Registration** (single-threaded). `register_listen_async(channel, callback)` runs `LISTEN "<channel>"` (quoted), stores the callback, and installs a libpqxx handler for the channel. The handler parses the payload as JSON and calls the callback inside `try/catch`, so a throwing callback is logged and does not kill the listener. Call it once per channel.
 2. **Activation.** `run_listener_loop()` sets `listening_` and starts one `std::jthread` that loops on `connection::wait_notification()`. Registering after this point throws `std::logic_error`, because the handler table must not change while another thread reads it.
-3. **Shutdown.** `disconnect()` requests the stop and calls `shutdown(fd, SHUT_RDWR)` on the listener socket. `poll()` returns, the read hits EOF, and libpqxx throws `pqxx::broken_connection`, which the thread treats as its exit signal. The thread is joined, and only then are both connections closed. The socket is never `close()`d from another thread while `poll()` uses it.
+3. **Shutdown.** `disconnect()` requests the stop and calls `shutdown(fd, SHUT_RDWR)` on the listener socket. `poll()` returns, the read hits EOF, and libpqxx throws `pqxx::broken_connection`, which the thread treats as its exit signal. The thread is joined, and only then are the listener connection and every pooled query connection closed. The socket is never `close()`d from another thread while `poll()` uses it.
 
 ```mermaid
 stateDiagram-v2
@@ -174,7 +174,9 @@ stateDiagram-v2
 
 `wait_notification()` comes from [`patches/libpqxx.patch.full`](../patches/README.md). Upstream `await_notification()` wakes up every second by default. The patched call blocks in `poll(fd, -1)`, so an idle listener costs nothing.
 
-Callbacks run on the listener thread. They may use the query connection (the listener never holds its mutex), and must stay short: the controller's queue drain and the server's `dispatch` + `publish` are both bounded.
+A query checkout is a `Lease`: `acquire()` blocks until a connection is free, and the destructor returns it, including when the transaction throws. `SET LOCAL ROLE` is transaction-scoped, so a role cannot leak into the next checkout of that connection. `disconnect()` joins the listener first, then waits until every lease is back before closing the sockets.
+
+Callbacks run on the listener thread. They may call query methods (that thread does not already hold a lease) and must stay short: the controller's queue drain and the server's `dispatch` + `publish` are both bounded. `drain_pending` holds its lease across `decide` and `on_applied`; those two callbacks must not call back into `DatabaseManager`.
 
 ## 6. Monthly partitioning
 

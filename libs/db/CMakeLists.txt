@@ -1,4 +1,5 @@
 add_library(pgdemo_db STATIC
+    src/ConnectionPool.cpp
     src/DatabaseManager.cpp
     src/Errors.cpp
 )

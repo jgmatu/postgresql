@@ -8,6 +8,7 @@
 //                                                  \--> Producer::apply()
 
 #include <csignal>
+#include <cstddef>
 #include <cstdlib>
 #include <format>
 #include <iostream>
@@ -37,6 +38,7 @@ struct ScopeExit
 struct Options
 {
     std::string conninfo;
+    std::size_t pool_size = db::DatabaseManager::kDefaultPoolSize;
     int items = 2;
     int pending_max_age_s = 600;
     int maintenance_interval_s = 3600;
@@ -46,6 +48,7 @@ void usage()
 {
     std::cout << "Usage: pgdemo-controller [options]\n"
                  "  --conninfo STR             libpq connection string (default: PG* environment)\n"
+                 "  --pool-size N              query connections (default 8)\n"
                  "  --items N                  items per table, 1..16 (default 2)\n"
                  "  --pending-max-age-s N      PENDING requests older than this become TIMEOUT (default 600)\n"
                  "  --maintenance-interval-s N partition maintenance period (default 3600)\n";
@@ -62,12 +65,14 @@ Options parse(int argc, char** argv)
             return argv[++i];
         };
         if (a == "--conninfo") o.conninfo = next();
+        else if (a == "--pool-size") o.pool_size = std::stoul(next());
         else if (a == "--items") o.items = std::stoi(next());
         else if (a == "--pending-max-age-s") o.pending_max_age_s = std::stoi(next());
         else if (a == "--maintenance-interval-s") o.maintenance_interval_s = std::stoi(next());
         else if (a == "-h" || a == "--help") { usage(); std::exit(0); }
         else throw std::invalid_argument("unknown option " + std::string(a));
     }
+    if (o.pool_size < 1) throw std::invalid_argument("--pool-size must be at least 1");
     if (o.items < 1 || o.items > 16) throw std::invalid_argument("--items must be in 1..16");
     if (o.pending_max_age_s < 1) throw std::invalid_argument("--pending-max-age-s must be positive");
     if (o.maintenance_interval_s < 1) throw std::invalid_argument("--maintenance-interval-s must be positive");
@@ -121,7 +126,7 @@ int main(int argc, char** argv)
 
     try
     {
-        db::DatabaseManager db(opt.conninfo, "pgdemo-controller");
+        db::DatabaseManager db(opt.conninfo, "pgdemo-controller", opt.pool_size);
         db.connect();
 
         ensure_partitions(db);

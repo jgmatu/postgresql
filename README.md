@@ -42,7 +42,7 @@ Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design: sequence diagr
 | Path | What it is |
 |---|---|
 | [`sql/`](sql) | Roles, schema, partition maintenance, triggers, views and grants (`00`–`05`, loaded in order). |
-| [`libs/db`](libs/db) | `DatabaseManager`: query connection, listener connection and thread, callback registry, role-scoped transactions. |
+| [`libs/db`](libs/db) | `DatabaseManager`: query connection pool, listener connection and thread, callback registry, role-scoped transactions. |
 | [`libs/auth`](libs/auth) | `PasswordHasher` (Argon2id) and `JwtManager` (ES384), both on Botan 3. |
 | [`server/`](server) | `pgdemo-server`: Oat++ API, `AuthInterceptor`, `Dispatcher`, `EventHub` for Server-Sent Events. |
 | [`controller/`](controller) | `pgdemo-controller`: one producer thread per table and the configuration queue worker. |
@@ -144,7 +144,7 @@ ctest --test-dir build -L db
 tests/e2e.sh                                   # fresh database, both processes, 38 checks
 ```
 
-The database tests cover channel multiplexing, the registration and shutdown rules of the listener, partition routing, role enforcement inside PostgreSQL, the full NOTIFY-driven configuration loop through the Dispatcher, and request expiry. CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs everything on `ubuntu:26.04` against `postgres:18`, then brings up the compose stack.
+The database tests cover channel multiplexing, the registration and shutdown rules of the listener, concurrent checkouts from the query pool, partition routing, role enforcement inside PostgreSQL, the full NOTIFY-driven configuration loop through the Dispatcher, and request expiry. CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs everything on `ubuntu:26.04` against `postgres:18`, then brings up the compose stack.
 
 ## Scope
 

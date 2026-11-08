@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -16,6 +17,7 @@ struct ServerConfig
     std::string listen_addr = "127.0.0.1";
     std::uint16_t port = 8080;
     std::string conninfo;
+    std::size_t pool_size = db::DatabaseManager::kDefaultPoolSize;
     std::string jwt_key = "run/keys/jwt.key";
     std::string jwt_cert = "run/keys/jwt.crt";
     std::uint64_t token_ttl_s = 900;

@@ -54,6 +54,7 @@ void usage()
                  "  --listen-addr ADDR        bind address (default 127.0.0.1)\n"
                  "  --port N                  TCP port (default 8080)\n"
                  "  --conninfo STR            libpq connection string (default: PG* environment)\n"
+                 "  --pool-size N             query connections (default 8)\n"
                  "  --jwt-key PATH            ES384 PKCS#8 private key (default run/keys/jwt.key)\n"
                  "  --jwt-cert PATH           X.509 certificate of that key (default run/keys/jwt.crt)\n"
                  "  --token-ttl-s N           token lifetime (default 900)\n"
@@ -73,6 +74,7 @@ ServerConfig parse(int argc, char** argv)
         if (a == "--listen-addr") c.listen_addr = next();
         else if (a == "--port") c.port = static_cast<std::uint16_t>(std::stoul(next()));
         else if (a == "--conninfo") c.conninfo = next();
+        else if (a == "--pool-size") c.pool_size = std::stoul(next());
         else if (a == "--jwt-key") c.jwt_key = next();
         else if (a == "--jwt-cert") c.jwt_cert = next();
         else if (a == "--token-ttl-s") c.token_ttl_s = std::stoull(next());
@@ -80,6 +82,7 @@ ServerConfig parse(int argc, char** argv)
         else if (a == "-h" || a == "--help") { usage(); std::exit(0); }
         else throw std::invalid_argument("unknown option " + std::string(a));
     }
+    if (c.pool_size < 1) throw std::invalid_argument("--pool-size must be at least 1");
     if (c.token_ttl_s < 60 || c.token_ttl_s > 86400) throw std::invalid_argument("--token-ttl-s must be in [60, 86400]");
     if (c.config_timeout_ms < 100 || c.config_timeout_ms > 60000)
         throw std::invalid_argument("--config-timeout-ms must be in [100, 60000]");
@@ -156,7 +159,7 @@ int run(const ServerConfig& cfg)
     services->jwt = std::make_shared<auth::JwtManager>(cfg.jwt_key, cfg.jwt_cert);
     services->dispatcher = std::make_shared<Dispatcher>();
     services->hub = std::make_shared<EventHub>();
-    services->db = std::make_shared<db::DatabaseManager>(cfg.conninfo, "pgdemo-server");
+    services->db = std::make_shared<db::DatabaseManager>(cfg.conninfo, "pgdemo-server", cfg.pool_size);
     services->db->connect();
 
     // Registration phase, then activation (see DatabaseManager).

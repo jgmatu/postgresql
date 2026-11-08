@@ -13,6 +13,7 @@
 #include <ctime>
 #include <format>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -267,4 +268,55 @@ TEST_F(DbTest, StaleRequestsExpireInsteadOfApplying)
     EXPECT_GE(stats.expired, 1u);
     EXPECT_EQ(status_of(id), "TIMEOUT");
     EXPECT_FALSE(decided);
+}
+
+TEST(DatabaseManagerPool, ZeroSizeIsRejected)
+{
+    EXPECT_THROW(db::DatabaseManager("dbname=postgres", "pgdemo-test-pool", 0), std::invalid_argument);
+}
+
+// More callers than connections: checkout blocks instead of sharing a session.
+TEST_F(DbTest, QueryPoolServesConcurrentCheckouts)
+{
+    const char* conninfo = std::getenv("PGDEMO_TEST_CONTROLLER_CONNINFO");
+    ASSERT_NE(conninfo, nullptr);
+
+    db::DatabaseManager db(conninfo, "pgdemo-test-pool", 4);
+    db.connect();
+
+    constexpr int kThreads = 8;
+    std::atomic<int> ok{0};
+    std::mutex errors_mtx;
+    std::vector<std::string> errors;
+    std::vector<std::jthread> threads;
+    threads.reserve(static_cast<std::size_t>(kThreads));
+    for (int i = 0; i < kThreads; ++i)
+    {
+        threads.emplace_back([&] {
+            try
+            {
+                for (int n = 0; n < 20; ++n)
+                {
+                    const auto info = db.get_sanity_info();
+                    if (info.at("pool_size").as_int64() != 4) throw std::runtime_error("pool_size");
+                    if (info.at("query_backend_pids").as_array().size() != 4)
+                        throw std::runtime_error("query_backend_pids");
+                    const auto in_use = info.at("pool_in_use").as_int64();
+                    if (in_use < 1 || in_use > 4) throw std::runtime_error("pool_in_use");
+                    db.fetch_applied_config();
+                }
+                ok.fetch_add(1);
+            }
+            catch (const std::exception& e)
+            {
+                std::lock_guard lock(errors_mtx);
+                errors.emplace_back(e.what());
+            }
+        });
+    }
+    threads.clear();
+
+    for (const auto& error : errors) ADD_FAILURE() << error;
+    EXPECT_EQ(ok.load(), kThreads);
+    db.disconnect();
 }
