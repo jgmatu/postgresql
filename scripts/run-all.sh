@@ -3,15 +3,18 @@
 #
 # Usage: scripts/run-all.sh [--https|--http] [server|controller|all]
 #
-#   --https   TLS 1.3 on PGDEMO_PORT (default)
-#   --http    plain HTTP on the same port
+#   --https   HTTPS, TLS 1.3 only, on port 8443 (default)
+#   --http    plain HTTP on port 8080
+#
+# TLS 1.3 and the key-exchange groups come from build/server/openssl-oqs.cnf,
+# which pgdemo-server loads before oatpp-openssl creates its SSL_CTX.
 #
 # Each process logs in with its own PostgreSQL role (demo_server, demo_controller)
 # and knows nothing about the other one. Logs go to run/logs/. Ctrl-C stops both.
 #
 # Variables (defaults from run/demo.env):
 #   PGDEMO_PGHOST, PGDEMO_PGPORT, PGDEMO_DB   database location
-#   PGDEMO_LISTEN_ADDR (127.0.0.1), PGDEMO_PORT (8080)
+#   PGDEMO_LISTEN_ADDR (127.0.0.1)            bind address (Docker uses 0.0.0.0)
 #   PGDEMO_SERVER_ARGS, PGDEMO_CONTROLLER_ARGS  extra command-line options
 set -euo pipefail
 
@@ -24,7 +27,7 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --https) SCHEME=https ;;
         --http) SCHEME=http ;;
-        -h|--help) sed -n '2,15p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,18p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
         server|controller|all) WHAT="$1" ;;
         *) printf '[run-all] ERROR: unknown argument %s\n' "$1" >&2; exit 1 ;;
     esac
@@ -73,12 +76,14 @@ start_server() {
     [[ -x "${BUILD}/server/pgdemo-server" ]] || die "build first: cmake --build build"
     "${ROOT}/scripts/gen-jwt-keys.sh" >/dev/null
     local -a tls_args=()
+    local port=8080 mode="plain HTTP"
     if [[ "${SCHEME}" == https ]]; then
         "${ROOT}/scripts/gen-tls-cert.sh" >/dev/null
         tls_args=(--tls-key "${ROOT}/run/keys/tls.key" --tls-cert "${ROOT}/run/keys/tls.crt")
+        port=8443
+        mode="TLS 1.3, openssl-oqs.cnf"
     fi
     local addr="${PGDEMO_LISTEN_ADDR:-127.0.0.1}"
-    local port="${PGDEMO_PORT:-8080}"
     : > "${LOGS}/server.log"
     logs+=("${LOGS}/server.log")
     # shellcheck disable=SC2086
@@ -91,7 +96,7 @@ start_server() {
         ${PGDEMO_SERVER_ARGS:-} \
         >> "${LOGS}/server.log" 2>&1 &
     pids+=("$!")
-    echo "[run-all] server pid $! on ${SCHEME}://${addr}:${port} (log run/logs/server.log)"
+    echo "[run-all] server pid $! on ${SCHEME}://${addr}:${port} (${mode}; log run/logs/server.log)"
 }
 
 if [[ "${WHAT}" == controller || "${WHAT}" == all ]]; then start_controller; fi

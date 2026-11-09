@@ -6,7 +6,7 @@ The suite runs the demo's own compose file as a throwaway project. Robot Framewo
 
 ## CLI
 
-From the repository root. The development stack has to be stopped first: it publishes the same `127.0.0.1:8080` and uses the same `172.28.*` subnets. Docker with compose v2, `curl` and `jq` must be on the host.
+From the repository root. The development stack has to be stopped first: it publishes the same `127.0.0.1:8080` and uses the same `172.28.*` subnets. A host `scripts/run-all.sh --http` has to be stopped too, because it listens on `127.0.0.1:8080`. Docker with compose v2, `curl` and `jq` must be on the host.
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -r tests/e2e/requirements.txt
@@ -61,7 +61,7 @@ flowchart LR
         controller["controller 172.28.20.20"]
         pgB["postgres 172.28.20.10"]
     end
-    host -->|"127.0.0.1:8080"| server
+    host -->|"127.0.0.1:8080 to 8443"| server
     server --> pgA
     controller --> pgB
     pgA --- pgB
@@ -69,13 +69,13 @@ flowchart LR
 
 | Address | Who holds it |
 |---|---|
-| `127.0.0.1:8080` | The host, mapped to `server:8080` |
+| `127.0.0.1:8080` | The host, mapped to `server:8443` (HTTPS) |
 | `172.28.10.10` | `postgres` on `zone_a` |
 | `172.28.10.20` | `server` on `zone_a` |
 | `172.28.20.10` | `postgres` on `zone_b` |
 | `172.28.20.20` | `controller` on `zone_b` |
 
-`06__network_zones.robot` checks the boundary from inside the controller container: opening `/dev/tcp/172.28.10.20/8080` fails, and opening `/dev/tcp/172.28.20.10/5432` succeeds.
+`06__network_zones.robot` checks the boundary from inside the controller container: opening `/dev/tcp/172.28.10.20/8443` fails, and opening `/dev/tcp/172.28.20.10/5432` succeeds.
 
 ## What is shared with the development stack
 

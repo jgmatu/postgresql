@@ -6,7 +6,7 @@ Suite Setup       Compose    exec    -T    controller    true
 
 *** Test Cases ***
 Controller cannot reach the server
-    ${result}=    Open TCP From Controller    172.28.10.20    8080
+    ${result}=    Open TCP From Controller    172.28.10.20    8443
     Should Not Be Equal As Integers    ${result.rc}    0    controller reached the server
 
 Controller reaches PostgreSQL

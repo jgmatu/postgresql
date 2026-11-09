@@ -49,6 +49,8 @@ Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design: sequence diagr
 | [`server/`](server) | `pgdemo-server`: Oat++ API, `AuthInterceptor`, `Dispatcher`, `EventHub` for Server-Sent Events. |
 | [`controller/`](controller) | `pgdemo-controller`: one producer thread per table and the configuration queue worker. |
 | [`client/pgdemo.sh`](client/pgdemo.sh) | Command-line client: login, users, data, history, configuration, live monitor. |
+| [`scripts/`](scripts) | `db-init.sh`, `run-all.sh` (start the processes), `capture.sh` (network captures), key and certificate generation. |
+| [`data/`](data) | Network captures of the client over HTTPS and over plain HTTP. |
 | [`patches/`](patches) | libpqxx 8.0.0 patch that adds a truly blocking `wait_notification()`. |
 | [`docker/`](docker) | Image and compose file with two isolated network zones. |
 | [`tests/`](tests) | GoogleTest (auth, dispatcher, database) and a Robot Framework end-to-end suite on docker compose. |
@@ -75,22 +77,25 @@ PGHOST=/var/run/postgresql scripts/db-init.sh       # add --reset to start over
 
 `db-init.sh` creates the roles and the `pgdemo` database, loads `sql/`, seeds the API user `admin`, and writes generated passwords to `run/demo.env` (mode 0600, gitignored). The two processes then connect over TCP to `127.0.0.1:5432` with those passwords (`scram-sha-256` in the default Ubuntu `pg_hba.conf`).
 
-Start both processes. Each one logs in with its own PostgreSQL role:
+Start both processes. Each one logs in with its own PostgreSQL role. The ports are fixed, one per scheme:
 
 ```bash
-scripts/run-all.sh                 # HTTPS on 127.0.0.1:8080
-scripts/run-all.sh --http          # plain HTTP on that same port
-PGDEMO_PORT=8443 scripts/run-all.sh --https server
+scripts/run-all.sh                 # HTTPS, TLS 1.3 only, on 127.0.0.1:8443 (default)
+scripts/run-all.sh --http          # plain HTTP on 127.0.0.1:8080
+scripts/run-all.sh server          # only the server (also: controller); combines with --http
 ```
 
-`--https` (the default) and `--http` choose the scheme. `PGDEMO_PORT` (default `8080`) and `PGDEMO_LISTEN_ADDR` (default `127.0.0.1`) choose where the server listens, in either scheme. `client/pgdemo.sh` reads the same `PGDEMO_PORT` and calls `https://127.0.0.1:$PGDEMO_PORT`, so `PGDEMO_PORT=8443` on both sides is enough when the server listens on 8443. `PGDEMO_URL` replaces that address; `--http` needs `PGDEMO_URL=http://127.0.0.1:$PGDEMO_PORT`. The client trusts `run/keys/tls.crt`. Docker and the end-to-end suite keep the default, HTTPS on port 8080.
+Logs go to `run/logs/` and are echoed to the console; Ctrl-C stops both processes. The first HTTPS start generates the self-signed certificate `run/keys/tls.crt`.
 
-In another terminal:
+In another terminal, the client talks to the same scheme. Without options it calls `https://127.0.0.1:8443` and trusts `run/keys/tls.crt`; `--http`, always the first argument, switches it to `http://127.0.0.1:8080`:
 
 ```bash
 . run/demo.env
 PGDEMO_PASSWORD="$DEMO_ADMIN_PASSWORD" client/pgdemo.sh login admin
-# server on 8443:  PGDEMO_PORT=8443 client/pgdemo.sh login admin
+client/pgdemo.sh health
+# server started with --http:
+PGDEMO_PASSWORD="$DEMO_ADMIN_PASSWORD" client/pgdemo.sh --http login admin
+client/pgdemo.sh --http health
 
 client/pgdemo.sh monitor                      # live events, including the dummy3 GPS track
 client/pgdemo.sh config set dummy1 rate_ms=200 amplitude=25
@@ -111,14 +116,70 @@ Stop the controller and post a configuration: the API answers `202` with the req
 ```bash
 cp docker/.env.example docker/.env            # set both passwords
 docker compose -f docker/compose.yaml --env-file docker/.env up --build
+mkdir -p run && docker compose -f docker/compose.yaml --env-file docker/.env cp server:/app/run/keys/tls.crt run/docker-tls.crt
+export PGDEMO_URL=https://127.0.0.1:8080 PGDEMO_CA=run/docker-tls.crt
 . docker/.env && PGDEMO_PASSWORD="$DEMO_ADMIN_PASSWORD" client/pgdemo.sh login admin
 ```
 
-The server sits on `zone_a` (172.28.10.0/24) and is published on `127.0.0.1:8080` only. The controller sits on `zone_b` (172.28.20.0/24, `internal`, no outbound route). PostgreSQL is attached to both zones and is the only path between them. The end-to-end suite checks that the controller cannot open a TCP connection to the server.
+Inside its container the server listens on HTTPS port 8443, like `scripts/run-all.sh`; compose publishes it on `127.0.0.1:8080` only. `PGDEMO_URL` and `PGDEMO_CA` point the client at that address and at the container's certificate. The server sits on `zone_a` (172.28.10.0/24). The controller sits on `zone_b` (172.28.20.0/24, `internal`, no outbound route). PostgreSQL is attached to both zones and is the only path between them. The end-to-end suite checks that the controller cannot open a TCP connection to the server.
+
+## TLS: oatpp-openssl, OpenSSL 3.5 and oqsprovider
+
+oatpp-openssl only wraps the TCP socket. `oatpp::openssl::Config::createDefaultServerConfigShared(cert, key)` loads the certificate and the private key and sets nothing else: no protocol version, no groups. Those come from OpenSSL itself. Before Oat++ creates the `SSL_CTX`, `pgdemo-server` sets `OPENSSL_CONF` and `OPENSSL_MODULES` to its own directory (`build/server/`). There the build has copied [`server/openssl-oqs.cnf`](server/openssl-oqs.cnf) and `oqsprovider.so`. When OpenSSL builds the context it reads that file, which:
+
+- activates the `default` provider and the liboqs `oqsprovider`;
+- sets `MinProtocol = TLSv1.3`, so a TLS 1.2 client gets a `protocol_version` alert;
+- sets `Groups = ?X25519MLKEM768 / ?x25519_mlkem512 / ?x25519_hqc1 / ?X25519`. `/` separates preference tiers: the server picks the hybrid `X25519MLKEM768`, native in OpenSSL 3.5, over the classic `X25519` that curl also offers. It accepts the liboqs groups when a client offers them.
+
+```mermaid
+flowchart LR
+    runAll["scripts/run-all.sh"] -->|"--tls-key --tls-cert"| server["pgdemo-server"]
+    server -->|"OPENSSL_CONF, OPENSSL_MODULES"| cnf["build/server/openssl-oqs.cnf"]
+    cnf --> providers["default + oqsprovider.so"]
+    server --> oatppSsl["oatpp-openssl ConnectionProvider"]
+    oatppSsl --> tcp["Oat++ TCP provider 127.0.0.1:8443"]
+    oatppSsl --> sslCtx["SSL_CTX: TLS 1.3, groups"]
+    cnf --> sslCtx
+    providers --> sslCtx
+```
+
+`scripts/run-all.sh --http` omits `--tls-key` and `--tls-cert`. The server then uses the plain TCP provider on port 8080 and never loads the OpenSSL config.
+
+## Network captures
+
+[`data/`](data) holds two loopback captures of `client/pgdemo.sh` making the same calls: `health`, `login`, `me`, `data dummy1` and `config status`.
+
+| File | Contents |
+|---|---|
+| `data/https.pcapng` | HTTPS on port 8443, plus one `curl --tls-max 1.2` attempt that the server refuses |
+| `data/https.keylog` | TLS session secrets written by curl (`SSLKEYLOGFILE`), valid for this capture only |
+| `data/https-summary.txt` | Each handshake (TLS 1.3, `X25519MLKEM768`, `TLS_AES_256_GCM_SHA384`), the alert 70 refusing TLS 1.2, and the HTTP decrypted with the keylog |
+| `data/http.pcapng` | Plain HTTP on port 8080 |
+| `data/http-summary.txt` | The same requests, readable on the wire, including the login body and the token |
+
+The captured calls log in as a throwaway user, `capture` / `capture-demo`, which exists only while the capture runs. The admin password never appears in the files.
+
+Inspect them with Wireshark: open `data/https.pcapng` and set Preferences, Protocols, TLS, "(Pre)-Master-Secret log filename" to `data/https.keylog`. With `tshark`:
+
+```bash
+tshark -r data/https.pcapng -Y 'tls.handshake.type == 2' -V | grep -E 'Supported Version|Key Share Entry'
+tshark -r data/https.pcapng -Y http                                     # nothing: encrypted
+tshark -r data/https.pcapng -o tls.keylog_file:data/https.keylog -Y http
+tshark -r data/http.pcapng -Y http
+```
+
+Regenerate them with `scripts/capture.sh`. It needs `dumpcap`, so your user has to be in the `wireshark` group, and `tshark` (`sudo apt install tshark`). Run it against a server already started in the matching mode:
+
+```bash
+scripts/run-all.sh            # terminal 1
+scripts/capture.sh https      # terminal 2, then Ctrl-C in terminal 1
+scripts/run-all.sh --http     # terminal 1
+scripts/capture.sh http       # terminal 2
+```
 
 ## HTTPS API
 
-Every route is TLS 1.3. A stock client negotiates `X25519MLKEM768`. A client that offers a liboqs group (`x25519_mlkem512`, `x25519_hqc1`) can negotiate that instead. `client/pgdemo.sh` trusts `run/keys/tls.crt`.
+Every route is TLS 1.3 on port 8443, or plain HTTP on port 8080 with `scripts/run-all.sh --http`. A stock client negotiates `X25519MLKEM768`. A client that offers a liboqs group (`x25519_mlkem512`, `x25519_hqc1`) can negotiate that instead. `client/pgdemo.sh` trusts `run/keys/tls.crt`.
 
 | Method and path | Role | Description |
 |---|---|---|

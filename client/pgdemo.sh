@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # pgdemo command-line client (curl + jq).
 #
-# Usage: client/pgdemo.sh <command> [args]
+# Usage: client/pgdemo.sh [--http] <command> [args]
+#
+#   (default)  https://127.0.0.1:8443, TLS 1.3   server started with scripts/run-all.sh
+#   --http     http://127.0.0.1:8080, plain     server started with scripts/run-all.sh --http
 #
 #   login [USER]                      password from $PGDEMO_PASSWORD or a prompt
 #   logout
@@ -24,8 +27,7 @@
 #   users del NAME
 #
 # Environment:
-#   PGDEMO_PORT   server port (default 8080; use 8443 when the server listens there)
-#   PGDEMO_URL    server base URL (default https://127.0.0.1:$PGDEMO_PORT)
+#   PGDEMO_URL    base URL override, for Docker and the e2e suite (host port 8080, HTTPS)
 #   PGDEMO_CA     TLS CA file (default <repo>/run/keys/tls.crt)
 #   PGDEMO_TOKEN  token file (default ${XDG_RUNTIME_DIR:-~/.cache}/pgdemo/token)
 #
@@ -35,8 +37,12 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PORT="${PGDEMO_PORT:-8080}"
-URL="${PGDEMO_URL:-https://127.0.0.1:${PORT}}"
+URL=https://127.0.0.1:8443
+if [[ "${1:-}" == --http ]]; then
+    URL=http://127.0.0.1:8080
+    shift
+fi
+URL="${PGDEMO_URL:-${URL}}"
 CA="${PGDEMO_CA:-${ROOT}/run/keys/tls.crt}"
 TOKEN_FILE="${PGDEMO_TOKEN:-${XDG_RUNTIME_DIR:-${HOME}/.cache}/pgdemo/token}"
 
@@ -45,7 +51,7 @@ need() { command -v "$1" >/dev/null || die "$1 not found (apt install $1)"; }
 need curl
 need jq
 
-usage() { sed -n '2,34p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,36p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 auth_args() {
     [[ -f "${TOKEN_FILE}" ]] || die "not logged in (client/pgdemo.sh login)"
