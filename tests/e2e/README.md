@@ -10,9 +10,18 @@ From the repository root. The development stack has to be stopped first: it publ
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -r tests/e2e/requirements.txt
-docker compose -f docker/compose.yaml down
+
+# Compose interpolates the file before it will stop anything. `down` does not
+# use these values; they only have to be set.
+POSTGRES_PASSWORD=x DEMO_ADMIN_PASSWORD=x \
+  docker compose -f docker/compose.yaml down
 
 .venv/bin/robot --outputdir build/e2e tests/e2e
+```
+
+The same run with every compose command, client call and HTTP response echoed:
+
+```bash
 .venv/bin/robot --variable E2E_DEBUG:true --outputdir build/e2e tests/e2e
 ```
 
