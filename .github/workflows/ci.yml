@@ -58,6 +58,37 @@ jobs:
           export PGDEMO_TEST_CONTROLLER_CONNINFO="host=postgres dbname=pgdemo user=demo_controller password=${DEMO_CONTROLLER_DB_PASSWORD}"
           ctest --test-dir build -L db --output-on-failure
 
+  docs:
+    name: Doxygen documentation (warnings are errors)
+    runs-on: ubuntu-latest
+    container: ubuntu:26.04
+    env:
+      DEBIAN_FRONTEND: noninteractive
+    steps:
+      # Configuring still resolves every find_package, so the build dependencies
+      # are needed even though nothing is compiled.
+      - name: Install packages
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build git ca-certificates patch pkg-config \
+            libpq-dev libbotan-3-dev libboost-json-dev libssl-dev \
+            doxygen graphviz
+
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DPGDEMO_BUILD_TESTS=OFF
+
+      - name: Build the docs target
+        run: cmake --build build --target docs
+
+      - name: Upload HTML
+        uses: actions/upload-artifact@v4
+        with:
+          name: docs-html
+          path: build/docs/html
+
   e2e:
     name: end-to-end on docker compose (Robot Framework, two network zones)
     runs-on: ubuntu-latest
