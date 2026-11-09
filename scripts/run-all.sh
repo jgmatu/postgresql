@@ -58,6 +58,7 @@ start_controller() {
 start_server() {
     [[ -x "${BUILD}/server/pgdemo-server" ]] || die "build first: cmake --build build"
     "${ROOT}/scripts/gen-jwt-keys.sh" >/dev/null
+    "${ROOT}/scripts/gen-tls-cert.sh" >/dev/null
     : > "${LOGS}/server.log"
     logs+=("${LOGS}/server.log")
     # shellcheck disable=SC2086
@@ -66,10 +67,11 @@ start_server() {
         "${BUILD}/server/pgdemo-server" \
         --listen-addr "${PGDEMO_LISTEN_ADDR:-127.0.0.1}" --port "${PGDEMO_PORT:-8080}" \
         --jwt-key "${ROOT}/run/keys/jwt.key" --jwt-cert "${ROOT}/run/keys/jwt.crt" \
+        --tls-key "${ROOT}/run/keys/tls.key" --tls-cert "${ROOT}/run/keys/tls.crt" \
         ${PGDEMO_SERVER_ARGS:-} \
         >> "${LOGS}/server.log" 2>&1 &
     pids+=("$!")
-    echo "[run-all] server pid $! on http://${PGDEMO_LISTEN_ADDR:-127.0.0.1}:${PGDEMO_PORT:-8080} (log run/logs/server.log)"
+    echo "[run-all] server pid $! on https://${PGDEMO_LISTEN_ADDR:-127.0.0.1}:${PGDEMO_PORT:-8080} (log run/logs/server.log)"
 }
 
 if [[ "${WHAT}" == controller || "${WHAT}" == all ]]; then start_controller; fi

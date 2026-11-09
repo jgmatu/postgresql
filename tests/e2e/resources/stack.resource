@@ -17,7 +17,8 @@ ${COMPOSE_FILE}       ${ROOT}${/}docker${/}compose.yaml
 ${WORK}               ${ROOT}${/}run${/}e2e
 ${ENV_FILE}           ${WORK}${/}compose.env
 ${TOKEN_FILE}         ${WORK}${/}token
-${BASE_URL}           http://127.0.0.1:8080
+${TLS_CERT}           ${WORK}${/}tls.crt
+${BASE_URL}           https://127.0.0.1:8080
 ${BUILD_TIMEOUT}      30 min
 # Live command and response output. Override: robot --variable E2E_DEBUG:true
 ${E2E_DEBUG}          ${False}
@@ -51,12 +52,14 @@ Start Stack
     Set Global Variable    ${ADMIN_PASSWORD}    ${admin_password}
     Compose    down    -v    --remove-orphans
     Compose    up    -d    --build    --wait    server    timeout=${BUILD_TIMEOUT}
+    Wait Until Keyword Succeeds    60s    0.5s
+    ...    Compose    cp    server:/app/run/keys/tls.crt    ${TLS_CERT}
     Wait For Health
 
 Wait For Health
     Console    \n> waiting for ${BASE_URL}/api/health
     Wait Until Keyword Succeeds    60s    0.5s
-    ...    GET    ${BASE_URL}/api/health    expected_status=200
+    ...    GET    ${BASE_URL}/api/health    expected_status=200    verify=${TLS_CERT}
 
 Start Service
     [Documentation]    ``init`` has already completed; ``--no-deps`` keeps compose from running it again.

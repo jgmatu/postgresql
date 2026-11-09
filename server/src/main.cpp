@@ -13,6 +13,7 @@
 
 #include <csignal>
 #include <cstdlib>
+#include <filesystem>
 #include <format>
 #include <iostream>
 #include <memory>
@@ -33,6 +34,8 @@
 #include "http/AuthInterceptor.hpp"
 #include "http/ErrorHandler.hpp"
 
+#include "oatpp-openssl/Config.hpp"
+#include "oatpp-openssl/server/ConnectionProvider.hpp"
 #include "oatpp/core/base/Environment.hpp"
 #include "oatpp/network/Server.hpp"
 #include "oatpp/network/tcp/server/ConnectionProvider.hpp"
@@ -57,6 +60,8 @@ void usage()
                  "  --pool-size N             query connections (default 8)\n"
                  "  --jwt-key PATH            ES384 PKCS#8 private key (default run/keys/jwt.key)\n"
                  "  --jwt-cert PATH           X.509 certificate of that key (default run/keys/jwt.crt)\n"
+                 "  --tls-key PATH            TLS private key (not the JWT key)\n"
+                 "  --tls-cert PATH           TLS certificate presented to clients\n"
                  "  --token-ttl-s N           token lifetime (default 900)\n"
                  "  --config-timeout-ms N     POST /api/config wait (default 2000)\n";
 }
@@ -77,11 +82,15 @@ ServerConfig parse(int argc, char** argv)
         else if (a == "--pool-size") c.pool_size = std::stoul(next());
         else if (a == "--jwt-key") c.jwt_key = next();
         else if (a == "--jwt-cert") c.jwt_cert = next();
+        else if (a == "--tls-key") c.tls_key = next();
+        else if (a == "--tls-cert") c.tls_cert = next();
         else if (a == "--token-ttl-s") c.token_ttl_s = std::stoull(next());
         else if (a == "--config-timeout-ms") c.config_timeout_ms = std::stoi(next());
         else if (a == "-h" || a == "--help") { usage(); std::exit(0); }
         else throw std::invalid_argument("unknown option " + std::string(a));
     }
+    if (c.tls_key.empty() || c.tls_cert.empty())
+        throw std::invalid_argument("--tls-key and --tls-cert are required");
     if (c.pool_size < 1) throw std::invalid_argument("--pool-size must be at least 1");
     if (c.token_ttl_s < 60 || c.token_ttl_s > 86400) throw std::invalid_argument("--token-ttl-s must be in [60, 86400]");
     if (c.config_timeout_ms < 100 || c.config_timeout_ms > 60000)
@@ -144,8 +153,27 @@ void register_channels(Services& s)
     });
 }
 
+/// Point OpenSSL at the provider and the config copied beside this executable.
+/// oatpp-openssl creates its SSL_CTX afterwards and inherits both.
+void use_openssl_beside_executable()
+{
+    const auto dir = std::filesystem::canonical("/proc/self/exe").parent_path();
+    const auto conf = dir / "openssl-oqs.cnf";
+    const auto module = dir / "oqsprovider.so";
+    if (!std::filesystem::is_regular_file(conf) || !std::filesystem::is_regular_file(module))
+    {
+        throw std::runtime_error("TLS files missing beside the executable (" + dir.string() + ")");
+    }
+    if (setenv("OPENSSL_CONF", conf.c_str(), 1) != 0 || setenv("OPENSSL_MODULES", dir.c_str(), 1) != 0)
+    {
+        throw std::runtime_error("cannot set OPENSSL_CONF / OPENSSL_MODULES");
+    }
+}
+
 int run(const ServerConfig& cfg)
 {
+    use_openssl_beside_executable();
+
     sigset_t sigs;
     sigemptyset(&sigs);
     sigaddset(&sigs, SIGINT);
@@ -177,11 +205,13 @@ int run(const ServerConfig& cfg)
     handler->setErrorHandler(std::make_shared<http::JsonErrorHandler>());
     handler->addRequestInterceptor(std::make_shared<http::AuthInterceptor>(services->jwt));
 
-    auto provider = oatpp::network::tcp::server::ConnectionProvider::createShared(
+    auto tcp = oatpp::network::tcp::server::ConnectionProvider::createShared(
         {cfg.listen_addr, cfg.port, oatpp::network::Address::IP_4});
+    auto tls = oatpp::openssl::Config::createDefaultServerConfigShared(cfg.tls_cert, cfg.tls_key);
+    auto provider = oatpp::openssl::server::ConnectionProvider::createShared(tls, tcp);
     oatpp::network::Server server(provider, handler);
 
-    log::info(kLog, std::format("listening on http://{}:{}", cfg.listen_addr, cfg.port));
+    log::info(kLog, std::format("listening on https://{}:{}", cfg.listen_addr, cfg.port));
     std::thread http_thread([&] { server.run(); });
 
     int exit_code = 0;

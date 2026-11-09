@@ -61,7 +61,7 @@ The development stack (`docker compose -p pgdemo`, the default project name) has
 
 `__init__.robot` owns setup and teardown. The child suites run in file-name order and share the containers.
 
-1. **Setup.** `down -v --remove-orphans`, then `up -d --build --wait server`. That starts `postgres`, waits for its health check, runs `init` (`scripts/db-init.sh`, which exits when the schema and the admin user exist) and starts `server`. The controller is not started. The suite then polls `GET /api/health` on `127.0.0.1:8080`.
+1. **Setup.** `down -v --remove-orphans`, then `up -d --build --wait server`. That starts `postgres`, waits for its health check, runs `init` (`scripts/db-init.sh`, which exits when the schema and the admin user exist) and starts `server`. The controller is not started. The suite then copies the server certificate out of the container and polls `GET https://127.0.0.1:8080/api/health`.
 2. **Controller.** `02__controller_drains_queue.robot` runs `up -d --no-deps --wait controller`. `--no-deps` matters because `init` has already completed; asking compose for its dependencies would run it again.
 3. **Shutdown check.** `07__shutdown.robot` runs `compose stop server controller`. The services set `init: true`, so tini is pid 1 and delivers `SIGTERM` to `scripts/run-all.sh`, which stops the process and leaves `listener exiting` in its log. `compose cp server:/app/run/logs` then copies those logs out of the `demo-run` volume. `server` and `controller` share that volume, and `cp` works while the container is stopped.
 4. **Teardown.** `compose logs` is saved as `compose.log` in the Robot `--outputdir`, then `down -v --remove-orphans` runs again and `run/e2e` is removed.

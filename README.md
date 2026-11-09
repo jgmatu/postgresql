@@ -10,12 +10,13 @@ The demo runs on dummy data with three tables, `dummy1`, `dummy2` and `dummy3` (
 - **Desired vs applied configuration.** An admin posts a desired configuration. The controller validates it and applies or rejects it. The HTTP request waits for the outcome through a request-id **Dispatcher**, so a concurrent, synchronous API sits on top of an asynchronous queue.
 - **Monthly-partitioned history.** Every sample is appended to a `RANGE`-partitioned history table. Partitions are created ahead of time, rows that landed in `DEFAULT` are moved, and retention drops whole months.
 - **Secure authentication and authorization.** Passwords are stored as Argon2id hashes and requests carry ES384 JWTs. Each request runs under `SET LOCAL ROLE demo_admin | demo_normal`, so PostgreSQL enforces the role a second time, independently of the HTTP check.
+- **TLS 1.3.** The Oat++ listener terminates HTTPS. OpenSSL 3.5's `X25519MLKEM768` is the group a stock client negotiates. liboqs, loaded as the `oqsprovider` module from the config beside the binary, is also accepted when the client offers one of its groups.
 
 ```mermaid
 flowchart LR
     client["client/pgdemo.sh<br/>(curl + jq)"]
     subgraph zoneA["zone A"]
-        server["pgdemo-server<br/>Oat++ HTTP API"]
+        server["pgdemo-server<br/>Oat++ HTTPS"]
     end
     subgraph db["PostgreSQL 18 + PostGIS"]
         queue[("dummy_config_pending<br/>(queue)")]
@@ -26,7 +27,7 @@ flowchart LR
         controller["pgdemo-controller<br/>producers + queue worker"]
     end
 
-    client -- "HTTP + Bearer JWT" --> server
+    client -- "HTTPS + Bearer JWT" --> server
     server -- "INSERT desired" --> queue
     queue -. "NOTIFY config_requested" .-> controller
     controller -- "UPSERT applied / errors" --> applied
@@ -56,7 +57,7 @@ Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design: sequence diagr
 
 ```bash
 sudo apt install build-essential cmake ninja-build git pkg-config patch \
-    libpq-dev libbotan-3-dev libboost-json-dev libgtest-dev libgmock-dev \
+    libpq-dev libbotan-3-dev libboost-json-dev libssl-dev libgtest-dev libgmock-dev \
     postgresql-18 postgresql-18-postgis-3 postgresql-client curl jq openssl
 
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
@@ -110,7 +111,9 @@ docker compose -f docker/compose.yaml --env-file docker/.env up --build
 
 The server sits on `zone_a` (172.28.10.0/24) and is published on `127.0.0.1:8080` only. The controller sits on `zone_b` (172.28.20.0/24, `internal`, no outbound route). PostgreSQL is attached to both zones and is the only path between them. The end-to-end suite checks that the controller cannot open a TCP connection to the server.
 
-## HTTP API
+## HTTPS API
+
+Every route is TLS 1.3. A stock client negotiates `X25519MLKEM768`. A client that offers a liboqs group (`x25519_mlkem512`, `x25519_hqc1`) can negotiate that instead. `client/pgdemo.sh` trusts `run/keys/tls.crt`.
 
 | Method and path | Role | Description |
 |---|---|---|
@@ -169,7 +172,7 @@ The target fails on any undocumented class or public member. Configure with `-DP
 
 This is a demonstration of database architecture, not a product:
 
-- **No TLS.** The HTTP API binds to loopback by default. Put it behind a TLS-terminating proxy before exposing it.
+- **Self-signed TLS.** The API is TLS 1.3 and binds to loopback by default. `run/keys/tls.crt` is the trust anchor; replace it before exposing the port.
 - **No reconnect.** If the listener connection drops, each process exits with status 1 so that a supervisor (compose `restart: unless-stopped`, systemd) restarts it. Queued work is not lost, because it lives in tables.
 - **Small payloads.** NOTIFY payloads are limited to 8000 bytes, and these stay well below that.
 

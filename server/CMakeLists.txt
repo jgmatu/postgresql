@@ -16,5 +16,17 @@ target_link_libraries(pgdemo-server PRIVATE
     pgdemo::auth
     pgdemo::log
     oatpp
+    oatpp-openssl
 )
 target_compile_options(pgdemo-server PRIVATE ${PGDEMO_WARNINGS})
+
+# The process loads these by path: OPENSSL_CONF and OPENSSL_MODULES are the
+# directory of the executable. The provider is a MODULE, not a linked library.
+add_custom_command(TARGET pgdemo-server POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_FILE:oqsprovider>"
+            "$<TARGET_FILE_DIR:pgdemo-server>/oqsprovider.so"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_CURRENT_SOURCE_DIR}/openssl-oqs.cnf"
+            "$<TARGET_FILE_DIR:pgdemo-server>/openssl-oqs.cnf"
+    VERBATIM)

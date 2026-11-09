@@ -7,7 +7,7 @@ ARG DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       build-essential cmake ninja-build git ca-certificates patch pkg-config \
-      libpq-dev libbotan-3-dev libboost-json-dev \
+      libpq-dev libbotan-3-dev libboost-json-dev libssl-dev \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
@@ -19,7 +19,7 @@ COPY controller controller
 COPY server server
 RUN cmake -S . -B /build -G Ninja -DCMAKE_BUILD_TYPE=Release -DPGDEMO_BUILD_TESTS=OFF \
  && cmake --build /build \
- && strip /build/server/pgdemo-server /build/controller/pgdemo-controller
+ && strip /build/server/pgdemo-server /build/server/oqsprovider.so /build/controller/pgdemo-controller
 
 FROM ubuntu:26.04
 ARG DEBIAN_FRONTEND=noninteractive
@@ -33,6 +33,8 @@ RUN apt-get update \
 
 WORKDIR /app
 COPY --from=build /build/server/pgdemo-server build/server/pgdemo-server
+COPY --from=build /build/server/oqsprovider.so build/server/oqsprovider.so
+COPY --from=build /build/server/openssl-oqs.cnf build/server/openssl-oqs.cnf
 COPY --from=build /build/controller/pgdemo-controller build/controller/pgdemo-controller
 COPY sql sql
 COPY scripts scripts

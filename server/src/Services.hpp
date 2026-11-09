@@ -21,6 +21,8 @@ struct ServerConfig
     std::size_t pool_size = db::DatabaseManager::kDefaultPoolSize; ///< `--pool-size`: query connections
     std::string jwt_key = "run/keys/jwt.key";   ///< `--jwt-key`: PKCS#8 signing key
     std::string jwt_cert = "run/keys/jwt.crt";  ///< `--jwt-cert`: certificate of that key
+    std::string tls_key;                        ///< `--tls-key`: TLS private key, not the JWT key
+    std::string tls_cert;                       ///< `--tls-cert`: TLS certificate presented to clients
     std::uint64_t token_ttl_s = 900;            ///< `--token-ttl-s`: token lifetime, 60..86400
     int config_timeout_ms = 2000;               ///< `--config-timeout-ms`: POST /api/config wait
 };

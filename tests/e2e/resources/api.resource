@@ -16,6 +16,7 @@ HTTP Status Should Be
     ...                Extra arguments (``headers``, ``json``, ``data``) go to RequestsLibrary.
     [Arguments]    ${expected}    ${method}    ${path}    &{kwargs}
     Console    \n> ${method} ${path} (expecting ${expected})
+    Set To Dictionary    ${kwargs}    verify=${TLS_CERT}
     ${response}=    Run Keyword    ${method}    ${BASE_URL}${path}    expected_status=any    &{kwargs}
     Console    ${SPACE}${SPACE}| HTTP ${response.status_code} ${response.text}
     Should Be Equal As Integers    ${response.status_code}    ${expected}
@@ -38,7 +39,7 @@ Run Client With
     [Documentation]    Run ``client/pgdemo.sh`` with ``extra`` (a dictionary) added to its environment.
     [Arguments]    ${extra}    @{args}
     ${env}=    Evaluate
-    ...    {**os.environ, 'PGDEMO_URL': $BASE_URL, 'PGDEMO_TOKEN': $TOKEN_FILE, **$extra}
+    ...    {**os.environ, 'PGDEMO_URL': $BASE_URL, 'PGDEMO_TOKEN': $TOKEN_FILE, 'PGDEMO_CA': $TLS_CERT, **$extra}
     ...    modules=os
     ${result}=    Run Live    ${ROOT}${/}client${/}pgdemo.sh    @{args}    env=${env}    timeout=60s
     RETURN    ${result}
@@ -87,5 +88,5 @@ Capture SSE
     ...                ``timeout`` exits 124 when it stops curl, and that is the expected outcome.
     [Arguments]    ${channels}
     ${result}=    Run Live    bash    -c
-    ...    timeout 3 curl -sN -H @${TOKEN_FILE} '${BASE_URL}/api/stream?channels=${channels}'; test $? -eq 124
+    ...    timeout 3 curl -sN --cacert '${TLS_CERT}' -H @${TOKEN_FILE} '${BASE_URL}/api/stream?channels=${channels}'; test $? -eq 124
     RETURN    ${result.stdout}

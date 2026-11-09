@@ -17,9 +17,11 @@ This document explains how two processes that never talk to each other run a rea
 |---|---|---|---|---|
 | `pgdemo-server` | A | `demo_server` (NOINHERIT) | `dummy_config_pending`, `app_users` | `dummy1_events`, `dummy2_events`, `dummy3_events`, `config_events`, `error_events` |
 | `pgdemo-controller` | B | `demo_controller` | `dummy1`, `dummy2`, `dummy3`, histories, `dummy_config`, `dummy_config_errors` | `config_requested` |
-| `client/pgdemo.sh` | host | none | over HTTP only | SSE `/api/stream` |
+| `client/pgdemo.sh` | host | none | over HTTPS only | SSE `/api/stream` |
 
 Neither process knows the other's address, port or existence. Each owns its side of the contract: the server owns *desired* state, and the controller owns *applied* state and the data. The schema in [`sql/`](../sql) is the interface between them.
+
+The HTTP listener is TLS 1.3. oatpp-openssl creates the context; [`server/openssl-oqs.cnf`](../server/openssl-oqs.cnf), loaded from beside the executable, activates OpenSSL's default provider and `oqsprovider`. Ordinary clients use `X25519MLKEM768`. liboqs groups in that file are accepted when the client offers them. The TLS certificate is not the JWT key.
 
 Each process holds a pool of query connections plus one listener connection:
 

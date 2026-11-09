@@ -24,7 +24,8 @@
 #   users del NAME
 #
 # Environment:
-#   PGDEMO_URL    server base URL (default http://127.0.0.1:8080)
+#   PGDEMO_URL    server base URL (default https://127.0.0.1:8080)
+#   PGDEMO_CA     TLS CA file (default <repo>/run/keys/tls.crt)
 #   PGDEMO_TOKEN  token file (default ${XDG_RUNTIME_DIR:-~/.cache}/pgdemo/token)
 #
 # The token is stored as a ready-made "Authorization:" header in a 0600 file
@@ -32,7 +33,9 @@
 # Passwords are piped to jq on stdin for the same reason.
 set -euo pipefail
 
-URL="${PGDEMO_URL:-http://127.0.0.1:8080}"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+URL="${PGDEMO_URL:-https://127.0.0.1:8080}"
+CA="${PGDEMO_CA:-${ROOT}/run/keys/tls.crt}"
 TOKEN_FILE="${PGDEMO_TOKEN:-${XDG_RUNTIME_DIR:-${HOME}/.cache}/pgdemo/token}"
 
 die() { printf 'pgdemo: %s\n' "$*" >&2; exit 1; }
@@ -40,7 +43,7 @@ need() { command -v "$1" >/dev/null || die "$1 not found (apt install $1)"; }
 need curl
 need jq
 
-usage() { sed -n '2,32p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,33p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 auth_args() {
     [[ -f "${TOKEN_FILE}" ]] || die "not logged in (client/pgdemo.sh login)"
@@ -54,7 +57,7 @@ api() {
     shift 2
     local out code
     out="$(mktemp)"
-    code="$(curl -sS -o "${out}" -w '%{http_code}' -X "${method}" "$@" "${URL}${path}")" || {
+    code="$(curl -sS --cacert "${CA}" -o "${out}" -w '%{http_code}' -X "${method}" "$@" "${URL}${path}")" || {
         rm -f "${out}"
         die "cannot reach ${URL}"
     }
@@ -162,7 +165,7 @@ cmd_burst() {
         # Every 5th request is out of range, so the controller rejects it.
         local rate=$((100 + i * 10))
         ((i % 5 == 4)) && rate=5
-        (curl -sS -o "${dir}/${i}.json" -w '%{http_code}\n' -X POST "${a[@]}" \
+        (curl -sS --cacert "${CA}" -o "${dir}/${i}.json" -w '%{http_code}\n' -X POST "${a[@]}" \
             -H 'Content-Type: application/json' \
             --data-binary "{\"target\":\"${target}\",\"rate_ms\":${rate}}" \
             "${URL}/api/config" > "${dir}/${i}.code") &
@@ -181,7 +184,7 @@ cmd_monitor() {
     mapfile -t a < <(auth_args)
     echo "streaming ${channels} (Ctrl-C to stop)" >&2
     local event=""
-    curl -sSN "${a[@]}" "${URL}/api/stream?channels=${channels}" | while IFS= read -r line; do
+    curl -sSN --cacert "${CA}" "${a[@]}" "${URL}/api/stream?channels=${channels}" | while IFS= read -r line; do
         case "${line}" in
             event:*) event="${line#event: }" ;;
             data:*) printf '%-7s %s\n' "${event}" "$(jq -c . <<<"${line#data: }")" ;;
