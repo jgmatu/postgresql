@@ -304,11 +304,15 @@ void DatabaseManager::upsert_dummy_with_history(DummyTable table, const TrackSam
 
     const auto live = table_name(table);
     const auto hist = history_table_name(table);
-    // PostGIS builds the point. The same geography is appended to the history.
+    // PostGIS builds the point. Distance and azimuth are cast: unbound parameters
+    // are unknown, and PostGIS has both ST_Project(geography, float8, float8)
+    // and ST_Project(geography, geography, float8). The same point is appended
+    // to the history.
     const std::string sql = std::format(
         "WITH up AS ("
         "  INSERT INTO {0} (item_id, position, seq, updated_at) VALUES ("
-        "    $1, ST_Project(ST_SetSRID(ST_MakePoint($2, $3), 4326)::geography, $4, $5),"
+        "    $1, ST_Project(ST_SetSRID(ST_MakePoint($2, $3), 4326)::geography,"
+        "      $4::double precision, $5::double precision),"
         "    $6, clock_timestamp())"
         "  ON CONFLICT (item_id) DO UPDATE SET position = EXCLUDED.position, seq = EXCLUDED.seq,"
         "    updated_at = EXCLUDED.updated_at"
