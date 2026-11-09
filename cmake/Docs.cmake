@@ -70,6 +70,8 @@ doxygen_add_docs(docs
     "${CMAKE_SOURCE_DIR}/README.md"
     "${CMAKE_SOURCE_DIR}/docs/ARCHITECTURE.md"
     "${CMAKE_SOURCE_DIR}/patches/README.md"
+    "${CMAKE_SOURCE_DIR}/sql/README.md"
+    "${CMAKE_SOURCE_DIR}/tests/e2e/README.md"
     "${CMAKE_SOURCE_DIR}/docs/namespaces.dox"
     "${CMAKE_SOURCE_DIR}/libs/log/include"
     "${CMAKE_SOURCE_DIR}/libs/db/include"

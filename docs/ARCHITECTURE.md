@@ -19,7 +19,7 @@ This document explains how two processes that never talk to each other run a rea
 | `pgdemo-controller` | B | `demo_controller` | `dummy1`, `dummy2`, `dummy3`, histories, `dummy_config`, `dummy_config_errors` | `config_requested` |
 | `client/pgdemo.sh` | host | none | over HTTPS (8443) or, with `--http`, plain HTTP (8080) | SSE `/api/stream` |
 
-Neither process knows the other's address, port or existence. Each owns its side of the contract: the server owns *desired* state, and the controller owns *applied* state and the data. The schema in [`sql/`](../sql) is the interface between them.
+Neither process knows the other's address, port or existence. Each owns its side of the contract: the server owns *desired* state, and the controller owns *applied* state and the data. The schema in [`sql/`](../sql) is the interface between them; [sql/README.md](../sql/README.md) describes every table, view, function and channel.
 
 The HTTP listener is TLS 1.3 on port 8443 (`scripts/run-all.sh --http` serves plain HTTP on 8080 instead). oatpp-openssl creates the context; [`server/openssl-oqs.cnf`](../server/openssl-oqs.cnf), loaded from beside the executable, activates OpenSSL's default provider and `oqsprovider`. Ordinary clients use `X25519MLKEM768`. liboqs groups in that file are accepted when the client offers them. The TLS certificate is not the JWT key.
 
@@ -243,7 +243,7 @@ COMMIT;                         -- the role reverts here
 | `auth_fetch_user()` | – | – | – | EXECUTE |
 | `ensure_monthly_partitions()` | – | – | EXECUTE | – |
 
-The full matrix is in [`sql/05_views.sql`](../sql/05_views.sql). Two more rules live in the schema:
+The full matrix is in [sql/README.md](../sql/README.md#roles-and-privileges) and in [`sql/05_views.sql`](../sql/05_views.sql). Two more rules live in the schema:
 
 - **The last admin cannot be removed.** The `protect_last_admin` trigger blocks deleting or demoting the last admin, which surfaces as `422`.
 - **The admin role cannot read password hashes.** `demo_admin` may write `password_hash` but has no `SELECT` on it.
