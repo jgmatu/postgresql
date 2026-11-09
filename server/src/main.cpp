@@ -60,8 +60,8 @@ void usage()
                  "  --pool-size N             query connections (default 8)\n"
                  "  --jwt-key PATH            ES384 PKCS#8 private key (default run/keys/jwt.key)\n"
                  "  --jwt-cert PATH           X.509 certificate of that key (default run/keys/jwt.crt)\n"
-                 "  --tls-key PATH            TLS private key (not the JWT key)\n"
-                 "  --tls-cert PATH           TLS certificate presented to clients\n"
+                 "  --tls-key PATH            TLS private key; with --tls-cert, listen on HTTPS\n"
+                 "  --tls-cert PATH           TLS certificate; omit both to listen on HTTP\n"
                  "  --token-ttl-s N           token lifetime (default 900)\n"
                  "  --config-timeout-ms N     POST /api/config wait (default 2000)\n";
 }
@@ -89,8 +89,8 @@ ServerConfig parse(int argc, char** argv)
         else if (a == "-h" || a == "--help") { usage(); std::exit(0); }
         else throw std::invalid_argument("unknown option " + std::string(a));
     }
-    if (c.tls_key.empty() || c.tls_cert.empty())
-        throw std::invalid_argument("--tls-key and --tls-cert are required");
+    if (c.tls_key.empty() != c.tls_cert.empty())
+        throw std::invalid_argument("--tls-key and --tls-cert must be set together");
     if (c.pool_size < 1) throw std::invalid_argument("--pool-size must be at least 1");
     if (c.token_ttl_s < 60 || c.token_ttl_s > 86400) throw std::invalid_argument("--token-ttl-s must be in [60, 86400]");
     if (c.config_timeout_ms < 100 || c.config_timeout_ms > 60000)
@@ -172,7 +172,8 @@ void use_openssl_beside_executable()
 
 int run(const ServerConfig& cfg)
 {
-    use_openssl_beside_executable();
+    const bool tls = !cfg.tls_key.empty();
+    if (tls) use_openssl_beside_executable();
 
     sigset_t sigs;
     sigemptyset(&sigs);
@@ -207,11 +208,15 @@ int run(const ServerConfig& cfg)
 
     auto tcp = oatpp::network::tcp::server::ConnectionProvider::createShared(
         {cfg.listen_addr, cfg.port, oatpp::network::Address::IP_4});
-    auto tls = oatpp::openssl::Config::createDefaultServerConfigShared(cfg.tls_cert, cfg.tls_key);
-    auto provider = oatpp::openssl::server::ConnectionProvider::createShared(tls, tcp);
+    std::shared_ptr<oatpp::network::ServerConnectionProvider> provider = tcp;
+    if (tls)
+    {
+        auto tls_cfg = oatpp::openssl::Config::createDefaultServerConfigShared(cfg.tls_cert, cfg.tls_key);
+        provider = oatpp::openssl::server::ConnectionProvider::createShared(tls_cfg, tcp);
+    }
     oatpp::network::Server server(provider, handler);
 
-    log::info(kLog, std::format("listening on https://{}:{}", cfg.listen_addr, cfg.port));
+    log::info(kLog, std::format("listening on {}://{}:{}", tls ? "https" : "http", cfg.listen_addr, cfg.port));
     std::thread http_thread([&] { server.run(); });
 
     int exit_code = 0;

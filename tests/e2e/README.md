@@ -4,6 +4,27 @@ The suite runs the demo's own compose file as a throwaway project. Robot Framewo
 
 [`docker/Dockerfile`](../../docker/Dockerfile) builds one image, `pgdemo:latest`: a build stage compiles both binaries, and the runtime stage keeps them plus `sql/` and `scripts/`. `up --build` produces that image. Compose then starts `init`, `server` and `controller` from it and picks the command of each service.
 
+## CLI
+
+From the repository root. The development stack has to be stopped first: it publishes the same `127.0.0.1:8080` and uses the same `172.28.*` subnets. Docker with compose v2, `curl` and `jq` must be on the host.
+
+```bash
+python3 -m venv .venv && .venv/bin/pip install -r tests/e2e/requirements.txt
+docker compose -f docker/compose.yaml down
+
+.venv/bin/robot --outputdir build/e2e tests/e2e
+.venv/bin/robot --variable E2E_DEBUG:true --outputdir build/e2e tests/e2e
+```
+
+The argument is the `tests/e2e` directory, so `__init__.robot` runs setup and teardown around the child suites. A path to one `.robot` file skips that and the stack never starts. Select a child suite or a single test with the directory still as the target:
+
+```bash
+.venv/bin/robot --outputdir build/e2e --suite 01__server_without_controller tests/e2e
+.venv/bin/robot --outputdir build/e2e --test "Health is public" tests/e2e
+```
+
+`--outputdir` receives `report.html`, `log.html`, `output.xml` and, after teardown, `compose.log`. `E2E_DEBUG` also accepts `1` or `yes`.
+
 ## An isolated compose project
 
 [`resources/stack.resource`](resources/stack.resource) always invokes:

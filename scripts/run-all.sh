@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # Start the controller and the server against the database set up by db-init.sh.
 #
-# Usage: scripts/run-all.sh [server|controller|all]   (default: all)
+# Usage: scripts/run-all.sh [--https|--http] [server|controller|all]
+#
+#   --https   TLS 1.3 on PGDEMO_PORT (default)
+#   --http    plain HTTP on the same port
 #
 # Each process logs in with its own PostgreSQL role (demo_server, demo_controller)
 # and knows nothing about the other one. Logs go to run/logs/. Ctrl-C stops both.
@@ -15,7 +18,18 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENV_FILE="${PGDEMO_ENV_FILE:-${ROOT}/run/demo.env}"
 BUILD="${PGDEMO_BUILD_DIR:-${ROOT}/build}"
-WHAT="${1:-all}"
+SCHEME=https
+WHAT=all
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --https) SCHEME=https ;;
+        --http) SCHEME=http ;;
+        -h|--help) sed -n '2,15p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        server|controller|all) WHAT="$1" ;;
+        *) printf '[run-all] ERROR: unknown argument %s\n' "$1" >&2; exit 1 ;;
+    esac
+    shift
+done
 
 die() { printf '[run-all] ERROR: %s\n' "$*" >&2; exit 1; }
 [[ -f "${ENV_FILE}" ]] || die "${ENV_FILE} not found; run scripts/db-init.sh first"
@@ -58,20 +72,26 @@ start_controller() {
 start_server() {
     [[ -x "${BUILD}/server/pgdemo-server" ]] || die "build first: cmake --build build"
     "${ROOT}/scripts/gen-jwt-keys.sh" >/dev/null
-    "${ROOT}/scripts/gen-tls-cert.sh" >/dev/null
+    local -a tls_args=()
+    if [[ "${SCHEME}" == https ]]; then
+        "${ROOT}/scripts/gen-tls-cert.sh" >/dev/null
+        tls_args=(--tls-key "${ROOT}/run/keys/tls.key" --tls-cert "${ROOT}/run/keys/tls.crt")
+    fi
+    local addr="${PGDEMO_LISTEN_ADDR:-127.0.0.1}"
+    local port="${PGDEMO_PORT:-8080}"
     : > "${LOGS}/server.log"
     logs+=("${LOGS}/server.log")
     # shellcheck disable=SC2086
     PGHOST="${PGHOST_}" PGPORT="${PGPORT_}" PGDATABASE="${DB_}" \
     PGUSER=demo_server PGPASSWORD="${DEMO_SERVER_DB_PASSWORD}" \
         "${BUILD}/server/pgdemo-server" \
-        --listen-addr "${PGDEMO_LISTEN_ADDR:-127.0.0.1}" --port "${PGDEMO_PORT:-8080}" \
+        --listen-addr "${addr}" --port "${port}" \
         --jwt-key "${ROOT}/run/keys/jwt.key" --jwt-cert "${ROOT}/run/keys/jwt.crt" \
-        --tls-key "${ROOT}/run/keys/tls.key" --tls-cert "${ROOT}/run/keys/tls.crt" \
+        "${tls_args[@]}" \
         ${PGDEMO_SERVER_ARGS:-} \
         >> "${LOGS}/server.log" 2>&1 &
     pids+=("$!")
-    echo "[run-all] server pid $! on https://${PGDEMO_LISTEN_ADDR:-127.0.0.1}:${PGDEMO_PORT:-8080} (log run/logs/server.log)"
+    echo "[run-all] server pid $! on ${SCHEME}://${addr}:${port} (log run/logs/server.log)"
 }
 
 if [[ "${WHAT}" == controller || "${WHAT}" == all ]]; then start_controller; fi

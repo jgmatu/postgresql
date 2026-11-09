@@ -1,9 +1,11 @@
 # Loaded by pgdemo-server (OPENSSL_CONF). OpenSSL applies it when oatpp-openssl
 # creates the SSL_CTX, so the server never names groups itself.
 #
-# X25519MLKEM768 and X25519 come from OpenSSL 3.5's default provider, so a
-# stock client still connects. The later names are liboqs groups that OpenSSL
-# 3.5 does not implement; a client that offers one of them can negotiate it.
+# '/' is an OpenSSL 3.5 preference tier. A colon list is a single tier, and
+# inside one tier the server keeps the client's first key share, so curl's
+# X25519 share wins over the X25519MLKEM768 share sent in the same hello.
+# The first tier is the native hybrid. The next two are liboqs groups that
+# OpenSSL 3.5 does not implement. X25519 is last, for a client that has neither.
 openssl_conf = openssl_init
 
 [openssl_init]
@@ -25,4 +27,4 @@ system_default = tls_sect
 
 [tls_sect]
 MinProtocol = TLSv1.3
-Groups = X25519MLKEM768:X25519:x25519_mlkem512:x25519_hqc1
+Groups = ?X25519MLKEM768 / ?x25519_mlkem512 / ?x25519_hqc1 / ?X25519

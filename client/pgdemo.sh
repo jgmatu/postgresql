@@ -24,7 +24,8 @@
 #   users del NAME
 #
 # Environment:
-#   PGDEMO_URL    server base URL (default https://127.0.0.1:8080)
+#   PGDEMO_PORT   server port (default 8080; use 8443 when the server listens there)
+#   PGDEMO_URL    server base URL (default https://127.0.0.1:$PGDEMO_PORT)
 #   PGDEMO_CA     TLS CA file (default <repo>/run/keys/tls.crt)
 #   PGDEMO_TOKEN  token file (default ${XDG_RUNTIME_DIR:-~/.cache}/pgdemo/token)
 #
@@ -34,7 +35,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-URL="${PGDEMO_URL:-https://127.0.0.1:8080}"
+PORT="${PGDEMO_PORT:-8080}"
+URL="${PGDEMO_URL:-https://127.0.0.1:${PORT}}"
 CA="${PGDEMO_CA:-${ROOT}/run/keys/tls.crt}"
 TOKEN_FILE="${PGDEMO_TOKEN:-${XDG_RUNTIME_DIR:-${HOME}/.cache}/pgdemo/token}"
 
@@ -43,7 +45,7 @@ need() { command -v "$1" >/dev/null || die "$1 not found (apt install $1)"; }
 need curl
 need jq
 
-usage() { sed -n '2,33p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,34p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 auth_args() {
     [[ -f "${TOKEN_FILE}" ]] || die "not logged in (client/pgdemo.sh login)"
@@ -183,13 +185,17 @@ cmd_monitor() {
     local -a a
     mapfile -t a < <(auth_args)
     echo "streaming ${channels} (Ctrl-C to stop)" >&2
-    local event=""
-    curl -sSN --cacert "${CA}" "${a[@]}" "${URL}/api/stream?channels=${channels}" | while IFS= read -r line; do
+    local event="" line
+    # Process substitution, not a pipe: curl's HTTPS stdout is block-buffered
+    # when piped, so data frames never reached this loop.
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+        line="${line%$'\r'}"
         case "${line}" in
             event:*) event="${line#event: }" ;;
-            data:*) printf '%-7s %s\n' "${event}" "$(jq -c . <<<"${line#data: }")" ;;
+            data:*) printf '%-7s %s\n' "${event}" "$(jq -c . <<<"${line#data: }")" || true ;;
         esac
-    done
+    done < <(curl --http1.1 -sSN --cacert "${CA}" "${a[@]}" \
+        "${URL}/api/stream?channels=${channels}")
 }
 
 cmd_users() {

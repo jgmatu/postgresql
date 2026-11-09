@@ -78,14 +78,19 @@ PGHOST=/var/run/postgresql scripts/db-init.sh       # add --reset to start over
 Start both processes. Each one logs in with its own PostgreSQL role:
 
 ```bash
-scripts/run-all.sh          # or: scripts/run-all.sh server | controller
+scripts/run-all.sh                 # HTTPS on 127.0.0.1:8080
+scripts/run-all.sh --http          # plain HTTP on that same port
+PGDEMO_PORT=8443 scripts/run-all.sh --https server
 ```
+
+`--https` (the default) and `--http` choose the scheme. `PGDEMO_PORT` (default `8080`) and `PGDEMO_LISTEN_ADDR` (default `127.0.0.1`) choose where the server listens, in either scheme. `client/pgdemo.sh` reads the same `PGDEMO_PORT` and calls `https://127.0.0.1:$PGDEMO_PORT`, so `PGDEMO_PORT=8443` on both sides is enough when the server listens on 8443. `PGDEMO_URL` replaces that address; `--http` needs `PGDEMO_URL=http://127.0.0.1:$PGDEMO_PORT`. The client trusts `run/keys/tls.crt`. Docker and the end-to-end suite keep the default, HTTPS on port 8080.
 
 In another terminal:
 
 ```bash
 . run/demo.env
 PGDEMO_PASSWORD="$DEMO_ADMIN_PASSWORD" client/pgdemo.sh login admin
+# server on 8443:  PGDEMO_PORT=8443 client/pgdemo.sh login admin
 
 client/pgdemo.sh monitor                      # live events, including the dummy3 GPS track
 client/pgdemo.sh config set dummy1 rate_ms=200 amplitude=25
