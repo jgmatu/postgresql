@@ -90,6 +90,11 @@ file(WRITE "${CMAKE_BINARY_DIR}/liboqs-config/liboqsConfig.cmake"
 set(liboqs_DIR "${CMAKE_BINARY_DIR}/liboqs-config" CACHE PATH "" FORCE)
 
 set(OQS_PROVIDER_BUILD_STATIC OFF CACHE BOOL "" FORCE)
+# test/CMakeLists.txt returns immediately when this is off. Left on, the suite
+# is registered into this project's CTest run. oqs_signatures, oqs_kems and
+# oqs_libctx are invoked with ${CMAKE_SOURCE_DIR}/test/oqs.cnf; FetchContent
+# makes that path this tree, the file is absent, and OPENSSL_die aborts them.
+set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(oqs-provider
     GIT_REPOSITORY https://github.com/open-quantum-safe/oqs-provider.git
     GIT_TAG ${PGDEMO_OQS_PROVIDER_VERSION}
