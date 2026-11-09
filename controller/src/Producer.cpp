@@ -13,11 +13,18 @@ namespace {
 constexpr std::string_view kLog = "producer";
 }
 
-Producer::Producer(db::DatabaseManager& db, db::DummyTable table, const db::AppliedConfig& initial,
-                   int items)
+Producer::Generator Producer::generator_for(const db::Device& device) noexcept
+{
+    if (device.payload == db::Payload::Gps) return Generator::GpsOrbit;
+    if (device.type_id == "sawtooth") return Generator::Sawtooth;
+    return Generator::Sine;
+}
+
+Producer::Producer(db::DatabaseManager& db, db::Device device, const db::AppliedConfig& initial)
     : db_(db)
-    , table_(table)
-    , items_(items)
+    , device_(std::move(device))
+    , generator_(generator_for(device_))
+    , phase_(static_cast<double>(device_.device_id % 8) * std::numbers::pi / 4.0)
     , rate_ms_(initial.rate_ms)
     , amplitude_(initial.amplitude)
     , active_(initial.is_active)
@@ -51,25 +58,38 @@ void Producer::apply(const db::AppliedConfig& config)
         ++generation_;
     }
     wake_cv_.notify_all();
-    log::info(kLog, std::format("{}: rate_ms={} amplitude={} active={}", db::table_name(table_),
-                                config.rate_ms, config.amplitude, config.is_active));
+    log::info(kLog, std::format("{}: rate_ms={} amplitude={} active={}", device_.name, config.rate_ms,
+                                config.amplitude, config.is_active));
 }
 
-double Producer::sample(int item_id, std::int64_t seq)
+void Producer::write_tick(std::int64_t seq)
 {
     const double a = amplitude_.load();
-    if (table_ == db::DummyTable::Dummy1)
+    const double angle = 2.0 * std::numbers::pi * static_cast<double>(seq) / 40.0 + phase_;
+    switch (generator_)
     {
-        const double phase = (item_id - 1) * std::numbers::pi / 4.0;
-        return a * std::sin(2.0 * std::numbers::pi * static_cast<double>(seq) / 40.0 + phase);
+    case Generator::GpsOrbit:
+    {
+        // Madrid. Bearing 0 is north.
+        constexpr double kOriginLon = -3.7038;
+        constexpr double kOriginLat = 40.4168;
+        db_.write_gps_sample(db::TrackSample{device_.device_id, kOriginLon, kOriginLat, a, angle, seq});
+        break;
     }
-    return a * static_cast<double>(seq % 50) / 50.0 + 0.05 * a * noise_(rng_);
+    case Generator::Sawtooth:
+        db_.write_scalar_sample(db::DummySample{
+            device_.device_id, a * static_cast<double>(seq % 50) / 50.0 + 0.05 * a * noise_(rng_), seq});
+        break;
+    case Generator::Sine:
+        db_.write_scalar_sample(db::DummySample{device_.device_id, a * std::sin(angle), seq});
+        break;
+    }
 }
 
 void Producer::run(std::stop_token st)
 {
-    const auto name = db::table_name(table_);
-    log::info(kLog, std::format("{}: producer started ({} item(s))", name, items_));
+    log::info(kLog, std::format("{}: producer started (device_id {}, type {})", device_.name,
+                                device_.device_id, device_.type_id));
 
     std::int64_t seq = 0;
     while (!st.stop_requested())
@@ -77,31 +97,14 @@ void Producer::run(std::stop_token st)
         if (active_.load())
         {
             ++seq;
-            for (int item = 1; item <= items_ && !st.stop_requested(); ++item)
+            try
             {
-                try
-                {
-                    if (table_ == db::DummyTable::Dummy3)
-                    {
-                        // Madrid. Bearing 0 is north; each item is offset by pi/4.
-                        constexpr double kOriginLon = -3.7038;
-                        constexpr double kOriginLat = 40.4168;
-                        const double phase = (item - 1) * std::numbers::pi / 4.0;
-                        const double bearing =
-                            2.0 * std::numbers::pi * static_cast<double>(seq) / 40.0 + phase;
-                        db_.upsert_dummy_with_history(
-                            table_, db::TrackSample{item, kOriginLon, kOriginLat, amplitude_.load(), bearing, seq});
-                    }
-                    else
-                    {
-                        db_.upsert_dummy_with_history(table_, db::DummySample{item, sample(item, seq), seq});
-                    }
-                    written_.fetch_add(1);
-                }
-                catch (const std::exception& e)
-                {
-                    log::error(kLog, std::format("{}: write failed: {}", name, e.what()));
-                }
+                write_tick(seq);
+                written_.fetch_add(1);
+            }
+            catch (const std::exception& e)
+            {
+                log::error(kLog, std::format("{}: write failed: {}", device_.name, e.what()));
             }
         }
 
@@ -111,7 +114,7 @@ void Producer::run(std::stop_token st)
         wake_cv_.wait_for(lock, st, std::chrono::milliseconds(rate_ms_.load()),
                           [&] { return generation_ != seen; });
     }
-    log::info(kLog, std::format("{}: producer stopped after {} sample(s)", name, written_.load()));
+    log::info(kLog, std::format("{}: producer stopped after {} sample(s)", device_.name, written_.load()));
 }
 
 } // namespace pgdemo::controller

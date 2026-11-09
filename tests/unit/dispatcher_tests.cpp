@@ -1,7 +1,9 @@
 #include <atomic>
 #include <chrono>
 #include <random>
+#include <set>
 #include <stdexcept>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -110,24 +112,51 @@ TEST(Dispatcher, ConcurrentWaitersGetTheirOwnCompletion)
 
 // ------------------------------------------------------------------- EventHub
 
+TEST(EventHub, ChannelsArePerTopicNotPerDevice)
+{
+    const std::set<std::string> expected{"telemetry_scalar", "telemetry_gps", "device", "config", "error"};
+    EXPECT_EQ(EventHub::all_channels(), expected);
+}
+
 TEST(EventHub, DeliversOnlySubscribedChannels)
 {
     EventHub hub;
-    auto s = hub.subscribe({"dummy1"});
-    hub.publish("dummy2", "{}");
-    hub.publish("dummy1", R"({"v":1})");
+    auto s = hub.subscribe({"telemetry_scalar"});
+    hub.publish("telemetry_gps", "dummy3", "{}");
+    hub.publish("telemetry_scalar", "dummy1", R"({"v":1})");
     const auto e = s->pop(100ms);
     ASSERT_TRUE(e);
-    EXPECT_EQ(e->channel, "dummy1");
+    EXPECT_EQ(e->channel, "telemetry_scalar");
+    EXPECT_EQ(e->device, "dummy1");
     EXPECT_EQ(e->data, R"({"v":1})");
     EXPECT_FALSE(s->pop(10ms));
+}
+
+// One channel carries every device; the device filter narrows it per stream.
+TEST(EventHub, DeviceFilterSelectsDevices)
+{
+    EventHub hub;
+    auto only_a = hub.subscribe({"telemetry_scalar", "config"}, {"sensor-a"});
+    auto every = hub.subscribe({"telemetry_scalar"});
+    hub.publish("telemetry_scalar", "dummy1", "1");
+    hub.publish("telemetry_scalar", "sensor-a", "2");
+    hub.publish("config", "sensor-a", "3");
+    hub.publish("config", "dummy1", "4");
+
+    EXPECT_EQ(only_a->pop(10ms)->data, "2");
+    EXPECT_EQ(only_a->pop(10ms)->data, "3");
+    EXPECT_FALSE(only_a->pop(10ms));
+
+    EXPECT_EQ(every->pop(10ms)->data, "1");
+    EXPECT_EQ(every->pop(10ms)->data, "2");
+    EXPECT_FALSE(every->pop(10ms));
 }
 
 TEST(EventHub, SlowSubscriberDropsOldest)
 {
     EventHub hub;
-    auto s = hub.subscribe({"dummy1"}, 2);
-    for (int i = 1; i <= 5; ++i) hub.publish("dummy1", std::to_string(i));
+    auto s = hub.subscribe({"telemetry_scalar"}, {}, 2);
+    for (int i = 1; i <= 5; ++i) hub.publish("telemetry_scalar", "dummy1", std::to_string(i));
     EXPECT_EQ(s->dropped(), 3u);
     EXPECT_EQ(s->pop(10ms)->data, "4");
     EXPECT_EQ(s->pop(10ms)->data, "5");
@@ -150,6 +179,6 @@ TEST(EventHub, UnsubscribeStopsDelivery)
     auto s = hub.subscribe({"config"});
     hub.unsubscribe(s);
     EXPECT_EQ(hub.subscribers(), 0u);
-    hub.publish("config", "{}");
+    hub.publish("config", "dummy1", "{}");
     EXPECT_FALSE(s->pop(10ms));
 }

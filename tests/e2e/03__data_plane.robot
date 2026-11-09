@@ -1,57 +1,74 @@
 *** Settings ***
-Documentation     Live rows, monthly-partitioned history and the SSE stream of the data tables.
+Documentation     Seeded devices, monthly-partitioned telemetry and the SSE stream of both telemetry channels.
 Resource          resources/api.resource
 Suite Setup       Wait For Data And Capture SSE
 
 
 *** Test Cases ***
-Dummy1 has live rows
-    ${rows}=    Client Json    data    dummy1
-    Should Not Be Empty    ${rows}
+The three seeded devices are listed
+    ${devices}=    Client Json    devices
+    ${names}=    Evaluate    [d['device'] for d in $devices]
+    Should Contain    ${names}    dummy1
+    Should Contain    ${names}    dummy2
+    Should Contain    ${names}    dummy3
 
-Dummy2 has live rows
-    ${rows}=    Client Json    data    dummy2
-    Should Not Be Empty    ${rows}
+Dummy1 has a last sample
+    ${dev}=    Client Json    data    dummy1
+    Should Be Equal    ${dev}[payload]    scalar
+    Should Not Be Equal    ${dev}[value]    ${None}
 
-Dummy3 has live rows
-    ${rows}=    Client Json    data    dummy3
-    Should Not Be Empty    ${rows}
-    Should Be True    ${rows}[0][lat] > 40
+Dummy3 has a last position
+    ${dev}=    Client Json    data    dummy3
+    Should Be Equal    ${dev}[payload]    gps
+    Should Be True    ${dev}[lat] > 40
 
-History rows name their monthly partition
+Device carries its config sync state
+    ${dev}=    Client Json    data    dummy2
+    Should Be Equal    ${dev}[config][sync]    SYNC
+
+Scalar telemetry names its monthly partition
     ${rows}=    Client Json    history    dummy1    limit=1
-    Should Match Regexp    ${rows}[0][partition]    ^dummy1_history_y[0-9]{4}m[0-9]{2}$
+    Should Match Regexp    ${rows}[0][partition]    ^telemetry_scalar_y\\d{4}m\\d{2}$
 
-Dummy3 history names its monthly partition
+GPS telemetry names its monthly partition
     ${rows}=    Client Json    history    dummy3    limit=1
-    Should Match Regexp    ${rows}[0][partition]    ^dummy3_history_y[0-9]{4}m[0-9]{2}$
+    Should Match Regexp    ${rows}[0][partition]    ^telemetry_gps_y\\d{4}m\\d{2}$
 
-Unknown table is 400
+Unknown device is 404
     ${headers}=    Auth Headers
-    HTTP Status Should Be    400    GET    /api/data/nope    headers=${headers}
+    HTTP Status Should Be    404    GET    /api/devices/nope    headers=${headers}
 
-SSE carries dummy1 events
-    Should Match Regexp    ${SSE}    (?m)^event: dummy1
+Malformed device name is 400
+    ${headers}=    Auth Headers
+    HTTP Status Should Be    400    GET    /api/devices/9bad    headers=${headers}
 
-SSE carries dummy2 events
-    Should Match Regexp    ${SSE}    (?m)^event: dummy2
+Unknown SSE channel is 400
+    ${headers}=    Auth Headers
+    HTTP Status Should Be    400    GET    /api/stream?channels\=dummy1    headers=${headers}
 
-SSE carries dummy3 events
-    Should Match Regexp    ${SSE}    (?m)^event: dummy3
+SSE carries telemetry_scalar events
+    Should Match Regexp    ${SSE}    (?m)^event: telemetry_scalar
+
+SSE carries telemetry_gps events
+    Should Match Regexp    ${SSE}    (?m)^event: telemetry_gps
+
+SSE payload names the device
+    Should Contain    ${SSE}    "device":"dummy1"
+    Should Contain    ${SSE}    "device":"dummy3"
 
 SSE filter excludes config
     Should Not Match Regexp    ${SSE}    (?m)^event: config
 
 
 *** Keywords ***
-Live Rows Should Exist
-    [Arguments]    ${table}
-    ${rows}=    Client Json    data    ${table}
-    Should Not Be Empty    ${rows}
+Device Should Have A Sample
+    [Arguments]    ${device}
+    ${dev}=    Client Json    data    ${device}
+    Should Not Be Equal    ${dev}[seq]    ${None}
 
 Wait For Data And Capture SSE
-    Wait Until Keyword Succeeds    15s    0.5s    Live Rows Should Exist    dummy1
-    Wait Until Keyword Succeeds    15s    0.5s    Live Rows Should Exist    dummy2
-    Wait Until Keyword Succeeds    15s    0.5s    Live Rows Should Exist    dummy3
-    ${sse}=    Capture SSE    dummy1,dummy2,dummy3
+    Wait Until Keyword Succeeds    15s    0.5s    Device Should Have A Sample    dummy1
+    Wait Until Keyword Succeeds    15s    0.5s    Device Should Have A Sample    dummy2
+    Wait Until Keyword Succeeds    15s    0.5s    Device Should Have A Sample    dummy3
+    ${sse}=    Capture SSE    channels=telemetry_scalar,telemetry_gps
     Set Suite Variable    ${SSE}    ${sse}

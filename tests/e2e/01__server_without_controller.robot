@@ -7,12 +7,12 @@ Resource          resources/api.resource
 Health is public
     HTTP Status Should Be    200    GET    /api/health
 
-Data without token is 401
-    HTTP Status Should Be    401    GET    /api/data/dummy1
+Devices without token is 401
+    HTTP Status Should Be    401    GET    /api/devices/dummy1
 
 Garbage token is 401
     &{headers}=    Create Dictionary    Authorization=Bearer x.y.z
-    HTTP Status Should Be    401    GET    /api/data/dummy1    headers=${headers}
+    HTTP Status Should Be    401    GET    /api/devices/dummy1    headers=${headers}
 
 Wrong password is 401
     &{body}=    Create Dictionary    username=admin    password=wrong-password

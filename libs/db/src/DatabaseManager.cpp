@@ -30,7 +30,24 @@ boost::json::value parse_json_field(const pqxx::field& f)
     return boost::json::parse(f.view());
 }
 
-std::string_view target_sql(ConfigTarget t) { return table_name(t); }
+/// Row `(device_id, name, type_id, payload)`.
+Device device_from_row(const pqxx::row& row)
+{
+    return Device{row[0].as<int>(), row[1].as<std::string>(), row[2].as<std::string>(),
+                  parse_payload(row[3].view()).value_or(Payload::Scalar)};
+}
+
+AppliedConfig applied_from_row(const pqxx::row& row)
+{
+    AppliedConfig c;
+    c.device_id = row[0].as<int>();
+    c.device = row[1].as<std::string>();
+    c.rate_ms = row[2].as<int>();
+    c.amplitude = row[3].as<double>();
+    c.is_active = row[4].as<bool>();
+    if (!row[5].is_null()) c.request_id = row[5].as<std::int64_t>();
+    return c;
+}
 
 } // namespace
 
@@ -276,109 +293,170 @@ boost::json::object DatabaseManager::get_sanity_info()
 // Data plane
 // ---------------------------------------------------------------------------
 
-void DatabaseManager::upsert_dummy_with_history(DummyTable table, const DummySample& sample)
+void DatabaseManager::write_scalar_sample(const DummySample& sample)
 {
-    const auto live = table_name(table);
-    const auto hist = history_table_name(table);
     // One statement: the CTE writes the snapshot, the outer INSERT appends the
-    // same values to the partitioned history. Both commit (and notify) together.
-    const std::string sql = std::format(
-        "WITH up AS ("
-        "  INSERT INTO {0} (item_id, value, seq, updated_at) VALUES ($1, $2, $3, clock_timestamp())"
-        "  ON CONFLICT (item_id) DO UPDATE SET value = EXCLUDED.value, seq = EXCLUDED.seq,"
-        "    updated_at = EXCLUDED.updated_at"
-        "  RETURNING item_id, value, seq, updated_at)"
-        " INSERT INTO {1} (item_id, value, seq, recorded_at)"
-        " SELECT item_id, value, seq, updated_at FROM up",
-        live, hist);
-
+    // same values to the partitioned telemetry. Both commit (and notify) together.
     auto lease = pool_.acquire();
     pqxx::work txn(lease.get());
-    txn.exec(sql, pqxx::params{sample.item_id, sample.value, sample.seq}).no_rows();
-    txn.commit();
-}
-
-void DatabaseManager::upsert_dummy_with_history(DummyTable table, const TrackSample& sample)
-{
-    if (table != DummyTable::Dummy3) throw std::invalid_argument("track samples are written only to dummy3");
-
-    const auto live = table_name(table);
-    const auto hist = history_table_name(table);
-    // PostGIS builds the point. Distance and azimuth are cast: unbound parameters
-    // are unknown, and PostGIS has both ST_Project(geography, float8, float8)
-    // and ST_Project(geography, geography, float8). The same point is appended
-    // to the history.
-    const std::string sql = std::format(
-        "WITH up AS ("
-        "  INSERT INTO {0} (item_id, position, seq, updated_at) VALUES ("
-        "    $1, ST_Project(ST_SetSRID(ST_MakePoint($2, $3), 4326)::geography,"
-        "      $4::double precision, $5::double precision),"
-        "    $6, clock_timestamp())"
-        "  ON CONFLICT (item_id) DO UPDATE SET position = EXCLUDED.position, seq = EXCLUDED.seq,"
-        "    updated_at = EXCLUDED.updated_at"
-        "  RETURNING item_id, position, seq, updated_at)"
-        " INSERT INTO {1} (item_id, position, seq, recorded_at)"
-        " SELECT item_id, position, seq, updated_at FROM up",
-        live, hist);
-
-    auto lease = pool_.acquire();
-    pqxx::work txn(lease.get());
-    txn.exec(sql, pqxx::params{sample.item_id, sample.origin_lon, sample.origin_lat, sample.radius_m,
-                               sample.bearing_rad, sample.seq})
+    txn.exec("WITH up AS ("
+             "  INSERT INTO device_state (device_id, value, seq, updated_at)"
+             "  VALUES ($1, $2, $3, clock_timestamp())"
+             "  ON CONFLICT (device_id) DO UPDATE SET value = EXCLUDED.value, seq = EXCLUDED.seq,"
+             "    updated_at = EXCLUDED.updated_at"
+             "  RETURNING device_id, value, seq, updated_at)"
+             " INSERT INTO telemetry_scalar (device_id, value, seq, recorded_at)"
+             " SELECT device_id, value, seq, updated_at FROM up",
+             pqxx::params{sample.device_id, sample.value, sample.seq})
         .no_rows();
     txn.commit();
 }
 
-boost::json::value DatabaseManager::fetch_dummy(DbRole role, DummyTable table)
+void DatabaseManager::write_gps_sample(const TrackSample& sample)
 {
-    const std::string sql =
-        table == DummyTable::Dummy3
-            ? std::format(
-                  "SELECT COALESCE(json_agg(json_build_object('item_id', item_id,"
-                  " 'lon', ST_X(position::geometry), 'lat', ST_Y(position::geometry),"
-                  " 'seq', seq, 'updated_at', updated_at) ORDER BY item_id), '[]'::json)::text FROM {}",
-                  table_name(table))
-            : std::format(
-                  "SELECT COALESCE(json_agg(json_build_object('item_id', item_id, 'value', value,"
-                  " 'seq', seq, 'updated_at', updated_at) ORDER BY item_id), '[]'::json)::text FROM {}",
-                  table_name(table));
-    return with_role(role, [&](pqxx::work& txn) {
-        return parse_json_field(txn.exec(sql).one_field());
+    // PostGIS builds the point. Distance and azimuth are cast: unbound parameters
+    // are unknown, and PostGIS has both ST_Project(geography, float8, float8)
+    // and ST_Project(geography, geography, float8).
+    auto lease = pool_.acquire();
+    pqxx::work txn(lease.get());
+    txn.exec("WITH up AS ("
+             "  INSERT INTO device_state (device_id, position, seq, updated_at) VALUES ("
+             "    $1, ST_Project(ST_SetSRID(ST_MakePoint($2, $3), 4326)::geography,"
+             "      $4::double precision, $5::double precision),"
+             "    $6, clock_timestamp())"
+             "  ON CONFLICT (device_id) DO UPDATE SET position = EXCLUDED.position, seq = EXCLUDED.seq,"
+             "    updated_at = EXCLUDED.updated_at"
+             "  RETURNING device_id, position, seq, updated_at)"
+             " INSERT INTO telemetry_gps (device_id, position, seq, recorded_at)"
+             " SELECT device_id, position, seq, updated_at FROM up",
+             pqxx::params{sample.device_id, sample.origin_lon, sample.origin_lat, sample.radius_m,
+                          sample.bearing_rad, sample.seq})
+        .no_rows();
+    txn.commit();
+}
+
+std::vector<Device> DatabaseManager::load_devices()
+{
+    auto lease = pool_.acquire();
+    pqxx::work txn(lease.get());
+    const auto res = txn.exec("SELECT d.device_id, d.name, d.type_id, t.payload"
+                              " FROM device d JOIN device_type t USING (type_id)"
+                              " ORDER BY d.device_id");
+    txn.commit();
+    std::vector<Device> out;
+    for (const auto& row : res) out.push_back(device_from_row(row));
+    return out;
+}
+
+std::optional<Device> DatabaseManager::load_device(int device_id)
+{
+    auto lease = pool_.acquire();
+    pqxx::work txn(lease.get());
+    const auto res = txn.exec("SELECT d.device_id, d.name, d.type_id, t.payload"
+                              " FROM device d JOIN device_type t USING (type_id)"
+                              " WHERE d.device_id = $1",
+                              pqxx::params{device_id});
+    txn.commit();
+    if (res.empty()) return std::nullopt;
+    return device_from_row(res[0]);
+}
+
+boost::json::value DatabaseManager::fetch_devices(DbRole role)
+{
+    return with_role(role, [](pqxx::work& txn) {
+        return parse_json_field(
+            txn.exec("SELECT COALESCE(json_agg(v ORDER BY v.device_id), '[]'::json)::text FROM v_devices v")
+                .one_field());
     });
 }
 
-boost::json::value DatabaseManager::fetch_history(DbRole role, DummyTable table,
-                                                  const std::optional<std::string>& from,
-                                                  const std::optional<std::string>& to,
-                                                  std::optional<int> item_id, int limit)
+std::optional<boost::json::value> DatabaseManager::fetch_device(DbRole role, const std::string& name)
 {
-    const std::string columns = table == DummyTable::Dummy3
-                                     ? "history_id, item_id, ST_X(position::geometry) AS lon,"
-                                       " ST_Y(position::geometry) AS lat, seq, recorded_at,"
-                                       " tableoid::regclass::text AS partition"
-                                     : "history_id, item_id, value, seq, recorded_at,"
-                                       " tableoid::regclass::text AS partition";
-    const std::string sql = std::format(
-        "SELECT COALESCE(json_agg(r ORDER BY r.recorded_at DESC), '[]'::json)::text FROM ("
-        "  SELECT {}"
-        "  FROM {}"
-        "  WHERE recorded_at >= COALESCE($1::timestamptz, now() - interval '1 hour')"
-        "    AND recorded_at <  COALESCE($2::timestamptz, now() + interval '1 second')"
-        "    AND ($3::int IS NULL OR item_id = $3::int)"
-        "  ORDER BY recorded_at DESC"
-        "  LIMIT $4) r",
-        columns, history_table_name(table));
-    return with_role(role, [&](pqxx::work& txn) {
-        return parse_json_field(txn.exec(sql, pqxx::params{from, to, item_id, limit}).one_field());
+    return with_role(role, [&](pqxx::work& txn) -> std::optional<boost::json::value> {
+        const auto res = txn.exec(
+            "SELECT (to_jsonb(v) || jsonb_build_object('config', to_jsonb(s)"
+            "        - 'device_id' - 'device' - 'type_id'))::text"
+            " FROM v_devices v JOIN v_device_config_sync_status s USING (device_id)"
+            " WHERE v.device = $1",
+            pqxx::params{name});
+        if (res.empty()) return std::nullopt;
+        return parse_json_field(res[0][0]);
     });
 }
 
-std::vector<std::string> DatabaseManager::ensure_history_partitions(DummyTable table, int months_ahead)
+std::optional<boost::json::value> DatabaseManager::fetch_telemetry(DbRole role, const std::string& name,
+                                                                   const std::optional<std::string>& from,
+                                                                   const std::optional<std::string>& to,
+                                                                   int limit)
+{
+    return with_role(role, [&](pqxx::work& txn) -> std::optional<boost::json::value> {
+        const auto dev = txn.exec("SELECT d.device_id, t.payload FROM device d JOIN device_type t USING (type_id)"
+                                  " WHERE d.name = $1",
+                                  pqxx::params{name});
+        if (dev.empty()) return std::nullopt;
+        const int device_id = dev[0][0].as<int>();
+        const auto payload = parse_payload(dev[0][1].view()).value_or(Payload::Scalar);
+
+        const std::string_view columns =
+            payload == Payload::Gps
+                ? "history_id, device_id, ST_X(position::geometry) AS lon, ST_Y(position::geometry) AS lat,"
+                  " seq, recorded_at, tableoid::regclass::text AS partition"
+                : "history_id, device_id, value, seq, recorded_at, tableoid::regclass::text AS partition";
+        const std::string sql = std::format(
+            "SELECT COALESCE(json_agg(r ORDER BY r.recorded_at DESC), '[]'::json)::text FROM ("
+            "  SELECT {}"
+            "  FROM {}"
+            "  WHERE device_id = $1"
+            "    AND recorded_at >= COALESCE($2::timestamptz, now() - interval '1 hour')"
+            "    AND recorded_at <  COALESCE($3::timestamptz, now() + interval '1 second')"
+            "  ORDER BY recorded_at DESC"
+            "  LIMIT $4) r",
+            columns, telemetry_table(payload));
+        return parse_json_field(txn.exec(sql, pqxx::params{device_id, from, to, limit}).one_field());
+    });
+}
+
+boost::json::value DatabaseManager::fetch_device_types(DbRole role)
+{
+    return with_role(role, [](pqxx::work& txn) {
+        return parse_json_field(
+            txn.exec("SELECT COALESCE(json_agg(t ORDER BY t.type_id), '[]'::json)::text FROM device_type t")
+                .one_field());
+    });
+}
+
+std::optional<boost::json::value> DatabaseManager::create_device(DbRole role, const std::string& name,
+                                                                 const std::string& type_id)
+{
+    return with_role(role, [&](pqxx::work& txn) -> std::optional<boost::json::value> {
+        // INSERT ... SELECT: an unknown type inserts nothing instead of raising 23503.
+        const auto res = txn.exec(
+            "WITH ins AS ("
+            "  INSERT INTO device (name, type_id)"
+            "  SELECT $1, t.type_id FROM device_type t WHERE t.type_id = $2"
+            "  RETURNING device_id, name, type_id, created_at)"
+            " SELECT json_build_object('device_id', i.device_id, 'device', i.name, 'type_id', i.type_id,"
+            "   'payload', t.payload, 'created_at', i.created_at)::text"
+            " FROM ins i JOIN device_type t USING (type_id)",
+            pqxx::params{name, type_id});
+        if (res.empty()) return std::nullopt;
+        return parse_json_field(res[0][0]);
+    });
+}
+
+bool DatabaseManager::delete_device(DbRole role, const std::string& name)
+{
+    return with_role(role, [&](pqxx::work& txn) {
+        return !txn.exec("DELETE FROM device WHERE name = $1 RETURNING device_id", pqxx::params{name}).empty();
+    });
+}
+
+std::vector<std::string> DatabaseManager::ensure_history_partitions(Payload payload, int months_ahead)
 {
     auto lease = pool_.acquire();
     pqxx::work txn(lease.get());
     const auto res = txn.exec("SELECT ensure_monthly_partitions($1::regclass, NULL, $2)",
-                              pqxx::params{std::string(history_table_name(table)), months_ahead});
+                              pqxx::params{std::string(telemetry_table(payload)), months_ahead});
     txn.commit();
     std::vector<std::string> created;
     for (const auto& row : res) created.emplace_back(row[0].view());
@@ -399,14 +477,14 @@ std::int64_t DatabaseManager::generate_request_id(DbRole role)
 void DatabaseManager::add_pending_config(DbRole role, const ConfigRequest& r)
 {
     with_role(role, [&](pqxx::work& txn) {
-        const pqxx::params p{r.request_id, std::string(target_sql(r.target)), r.rate_ms,
-                             r.amplitude,  r.is_active,                        r.requested_by};
-        txn.exec("INSERT INTO dummy_config_pending (request_id, target, requested_rate_ms,"
+        const pqxx::params p{r.request_id, r.device_id,   r.rate_ms,
+                             r.amplitude,  r.is_active,   r.requested_by};
+        txn.exec("INSERT INTO device_config_pending (request_id, device_id, requested_rate_ms,"
                  " requested_amplitude, requested_is_active, requested_by, status)"
                  " VALUES ($1, $2, $3, $4, $5, $6, 'PENDING')",
                  p)
             .no_rows();
-        txn.exec("INSERT INTO dummy_config_pending_history (request_id, target, requested_rate_ms,"
+        txn.exec("INSERT INTO device_config_pending_history (request_id, device_id, requested_rate_ms,"
                  " requested_amplitude, requested_is_active, requested_by)"
                  " VALUES ($1, $2, $3, $4, $5, $6)",
                  p)
@@ -418,24 +496,38 @@ std::vector<AppliedConfig> DatabaseManager::fetch_applied_config()
 {
     auto lease = pool_.acquire();
     pqxx::work txn(lease.get());
-    const auto res = txn.exec(
-        "SELECT target, rate_ms, amplitude, is_active, request_id FROM dummy_config ORDER BY target");
+    const auto res = txn.exec("SELECT c.device_id, d.name, c.rate_ms, c.amplitude, c.is_active, c.request_id"
+                              " FROM device_config c JOIN device d USING (device_id)"
+                              " ORDER BY c.device_id");
     txn.commit();
 
     std::vector<AppliedConfig> out;
-    for (const auto& row : res)
-    {
-        const auto target = parse_dummy_table(row[0].view());
-        if (!target) continue;
-        AppliedConfig c;
-        c.target = *target;
-        c.rate_ms = row[1].as<int>();
-        c.amplitude = row[2].as<double>();
-        c.is_active = row[3].as<bool>();
-        if (!row[4].is_null()) c.request_id = row[4].as<std::int64_t>();
-        out.push_back(c);
-    }
+    for (const auto& row : res) out.push_back(applied_from_row(row));
     return out;
+}
+
+std::optional<AppliedConfig> DatabaseManager::init_device_config(int device_id)
+{
+    auto lease = pool_.acquire();
+    pqxx::work txn(lease.get());
+    txn.exec("WITH ins AS ("
+             "  INSERT INTO device_config (device_id, rate_ms, amplitude, is_active)"
+             "  SELECT d.device_id, t.default_rate_ms, t.default_amplitude, TRUE"
+             "  FROM device d JOIN device_type t USING (type_id)"
+             "  WHERE d.device_id = $1"
+             "  ON CONFLICT (device_id) DO NOTHING"
+             "  RETURNING device_id, rate_ms, amplitude, is_active)"
+             " INSERT INTO device_config_history (device_id, rate_ms, amplitude, is_active)"
+             " SELECT device_id, rate_ms, amplitude, is_active FROM ins",
+             pqxx::params{device_id})
+        .no_rows();
+    const auto res = txn.exec("SELECT c.device_id, d.name, c.rate_ms, c.amplitude, c.is_active, c.request_id"
+                              " FROM device_config c JOIN device d USING (device_id)"
+                              " WHERE c.device_id = $1",
+                              pqxx::params{device_id});
+    txn.commit();
+    if (res.empty()) return std::nullopt;
+    return applied_from_row(res[0]);
 }
 
 DrainStats DatabaseManager::drain_pending(
@@ -448,14 +540,17 @@ DrainStats DatabaseManager::drain_pending(
     for (;;)
     {
         pqxx::work txn(lease.get());
+        // FOR UPDATE OF p: the controller may not lock rows of `device`. A device
+        // removed meanwhile takes its PENDING rows with it (ON DELETE CASCADE).
         const auto res = txn.exec(
-            "SELECT request_id, target, requested_rate_ms, requested_amplitude, requested_is_active,"
-            " requested_by, extract(epoch FROM clock_timestamp() - requested_at)::float8"
-            " FROM dummy_config_pending"
-            " WHERE status = 'PENDING'"
-            " ORDER BY requested_at, request_id"
+            "SELECT p.request_id, p.device_id, d.name, p.requested_rate_ms, p.requested_amplitude,"
+            " p.requested_is_active, p.requested_by,"
+            " extract(epoch FROM clock_timestamp() - p.requested_at)::float8"
+            " FROM device_config_pending p JOIN device d USING (device_id)"
+            " WHERE p.status = 'PENDING'"
+            " ORDER BY p.requested_at, p.request_id"
             " LIMIT 1"
-            " FOR UPDATE SKIP LOCKED");
+            " FOR UPDATE OF p SKIP LOCKED");
         if (res.empty())
         {
             txn.commit();
@@ -465,21 +560,17 @@ DrainStats DatabaseManager::drain_pending(
         const auto row = res[0];
         ConfigRequest req;
         req.request_id = row[0].as<std::int64_t>();
-        const auto target = parse_dummy_table(row[1].view());
-        req.target = target.value_or(ConfigTarget::Dummy1);
-        req.rate_ms = row[2].as<int>();
-        req.amplitude = row[3].as<double>();
-        req.is_active = row[4].as<bool>();
-        req.requested_by = row[5].as<std::string>();
-        const double age_s = row[6].as<double>();
+        req.device_id = row[1].as<int>();
+        req.device = row[2].as<std::string>();
+        req.rate_ms = row[3].as<int>();
+        req.amplitude = row[4].as<double>();
+        req.is_active = row[5].as<bool>();
+        req.requested_by = row[6].as<std::string>();
+        const double age_s = row[7].as<double>();
 
         ConfigOutcome outcome;
         bool expired = false;
-        if (!target)
-        {
-            outcome = ConfigOutcome::failure("UNKNOWN_TARGET", "target is not dummy1, dummy2 or dummy3");
-        }
-        else if (age_s > static_cast<double>(max_age.count()))
+        if (age_s > static_cast<double>(max_age.count()))
         {
             expired = true;
             outcome = ConfigOutcome::failure(
@@ -492,20 +583,19 @@ DrainStats DatabaseManager::drain_pending(
 
         if (outcome.ok)
         {
-            const pqxx::params p{std::string(target_sql(req.target)), req.rate_ms, req.amplitude,
-                                 req.is_active, req.request_id};
-            txn.exec("INSERT INTO dummy_config (target, rate_ms, amplitude, is_active, request_id, applied_at)"
+            const pqxx::params p{req.device_id, req.rate_ms, req.amplitude, req.is_active, req.request_id};
+            txn.exec("INSERT INTO device_config (device_id, rate_ms, amplitude, is_active, request_id, applied_at)"
                      " VALUES ($1, $2, $3, $4, $5, clock_timestamp())"
-                     " ON CONFLICT (target) DO UPDATE SET rate_ms = EXCLUDED.rate_ms,"
+                     " ON CONFLICT (device_id) DO UPDATE SET rate_ms = EXCLUDED.rate_ms,"
                      " amplitude = EXCLUDED.amplitude, is_active = EXCLUDED.is_active,"
                      " request_id = EXCLUDED.request_id, applied_at = EXCLUDED.applied_at",
                      p)
                 .no_rows();
-            txn.exec("INSERT INTO dummy_config_history (target, rate_ms, amplitude, is_active, request_id)"
+            txn.exec("INSERT INTO device_config_history (device_id, rate_ms, amplitude, is_active, request_id)"
                      " VALUES ($1, $2, $3, $4, $5)",
                      p)
                 .no_rows();
-            txn.exec("UPDATE dummy_config_pending SET status = 'SUCCESS', completed_at = clock_timestamp()"
+            txn.exec("UPDATE device_config_pending SET status = 'SUCCESS', completed_at = clock_timestamp()"
                      " WHERE request_id = $1",
                      pqxx::params{req.request_id})
                 .no_rows();
@@ -513,22 +603,21 @@ DrainStats DatabaseManager::drain_pending(
 
             ++stats.applied;
             log::info(kLog, std::format("request {} applied to {} (rate_ms={} amplitude={} active={})",
-                                        req.request_id, target_sql(req.target), req.rate_ms,
-                                        req.amplitude, req.is_active));
+                                        req.request_id, req.device, req.rate_ms, req.amplitude,
+                                        req.is_active));
             if (on_applied)
             {
-                on_applied(AppliedConfig{req.target, req.rate_ms, req.amplitude, req.is_active,
-                                         req.request_id});
+                on_applied(AppliedConfig{req.device_id, req.device, req.rate_ms, req.amplitude,
+                                         req.is_active, req.request_id});
             }
         }
         else
         {
-            txn.exec("INSERT INTO dummy_config_errors (request_id, target, error_code, error_detail)"
+            txn.exec("INSERT INTO device_config_errors (request_id, device_id, error_code, error_detail)"
                      " VALUES ($1, $2, $3, $4)",
-                     pqxx::params{req.request_id, row[1].as<std::string>(), outcome.error_code,
-                                  outcome.error_detail})
+                     pqxx::params{req.request_id, req.device_id, outcome.error_code, outcome.error_detail})
                 .no_rows();
-            txn.exec(std::format("UPDATE dummy_config_pending SET status = '{}',"
+            txn.exec(std::format("UPDATE device_config_pending SET status = '{}',"
                                  " completed_at = clock_timestamp() WHERE request_id = $1",
                                  expired ? "TIMEOUT" : "ERROR"),
                      pqxx::params{req.request_id})
@@ -548,9 +637,20 @@ boost::json::value DatabaseManager::fetch_sync_status(DbRole role)
 {
     return with_role(role, [](pqxx::work& txn) {
         return parse_json_field(
-            txn.exec("SELECT COALESCE(json_agg(v ORDER BY v.target), '[]'::json)::text"
-                     " FROM v_dummy_config_sync_status v")
+            txn.exec("SELECT COALESCE(json_agg(v ORDER BY v.device_id), '[]'::json)::text"
+                     " FROM v_device_config_sync_status v")
                 .one_field());
+    });
+}
+
+std::optional<boost::json::value> DatabaseManager::fetch_device_sync(DbRole role, const std::string& name)
+{
+    return with_role(role, [&](pqxx::work& txn) -> std::optional<boost::json::value> {
+        const auto res = txn.exec("SELECT row_to_json(v)::text FROM v_device_config_sync_status v"
+                                  " WHERE v.device = $1",
+                                  pqxx::params{name});
+        if (res.empty()) return std::nullopt;
+        return parse_json_field(res[0][0]);
     });
 }
 
@@ -559,11 +659,12 @@ std::optional<boost::json::value> DatabaseManager::fetch_request(DbRole role, st
     return with_role(role, [&](pqxx::work& txn) -> std::optional<boost::json::value> {
         const auto res = txn.exec(
             "SELECT row_to_json(r)::text FROM ("
-            "  SELECT p.request_id, p.target, p.requested_rate_ms, p.requested_amplitude,"
-            "         p.requested_is_active, p.status, p.requested_by, p.requested_at, p.completed_at,"
-            "         e.error_code, e.error_detail"
-            "  FROM dummy_config_pending p"
-            "  LEFT JOIN dummy_config_errors e ON e.request_id = p.request_id"
+            "  SELECT p.request_id, p.device_id, d.name AS device, p.requested_rate_ms,"
+            "         p.requested_amplitude, p.requested_is_active, p.status, p.requested_by,"
+            "         p.requested_at, p.completed_at, e.error_code, e.error_detail"
+            "  FROM device_config_pending p"
+            "  JOIN device d USING (device_id)"
+            "  LEFT JOIN device_config_errors e ON e.request_id = p.request_id"
             "  WHERE p.request_id = $1) r",
             pqxx::params{request_id});
         if (res.empty()) return std::nullopt;
@@ -571,21 +672,21 @@ std::optional<boost::json::value> DatabaseManager::fetch_request(DbRole role, st
     });
 }
 
-boost::json::value DatabaseManager::fetch_config_history(DbRole role, std::optional<ConfigTarget> target,
+boost::json::value DatabaseManager::fetch_config_history(DbRole role, const std::optional<std::string>& device,
                                                          int limit)
 {
-    std::optional<std::string> t;
-    if (target) t = std::string(target_sql(*target));
     return with_role(role, [&](pqxx::work& txn) {
         return parse_json_field(
             txn.exec("SELECT COALESCE(json_agg(h ORDER BY h.recorded_at DESC, h.history_id DESC),"
                      " '[]'::json)::text FROM ("
-                     "  SELECT history_id, target, rate_ms, amplitude, is_active, request_id, recorded_at"
-                     "  FROM dummy_config_history"
-                     "  WHERE ($1::text IS NULL OR target = $1::text)"
-                     "  ORDER BY recorded_at DESC, history_id DESC"
+                     "  SELECT h.history_id, h.device_id, d.name AS device, h.rate_ms, h.amplitude,"
+                     "         h.is_active, h.request_id, h.recorded_at"
+                     "  FROM device_config_history h"
+                     "  LEFT JOIN device d USING (device_id)"
+                     "  WHERE ($1::text IS NULL OR d.name = $1::text)"
+                     "  ORDER BY h.recorded_at DESC, h.history_id DESC"
                      "  LIMIT $2) h",
-                     pqxx::params{t, limit})
+                     pqxx::params{device, limit})
                 .one_field());
     });
 }

@@ -44,7 +44,7 @@ docker compose -p pgdemo-e2e -f docker/compose.yaml --env-file run/e2e/compose.e
 
 The file is the demo's [`docker/compose.yaml`](../../docker/compose.yaml). The project name prefixes every network and volume with `pgdemo-e2e_`, so `down -v` removes `pgdemo-e2e_pgdata` and `pgdemo-e2e_demo-run` and leaves `pgdemo_pgdata` and `pgdemo_demo-run` alone.
 
-Each run generates `POSTGRES_PASSWORD` and `DEMO_ADMIN_PASSWORD` with `secrets.token_hex` and writes them to `run/e2e/compose.env`. That directory lives inside the repository, not in `/tmp`: a snap-packaged Docker CLI cannot see the host's `/tmp`. `run/` is gitignored, and the suite teardown deletes `run/e2e`.
+Each run generates `POSTGRES_PASSWORD` and `DEMO_ADMIN_PASSWORD` with `secrets.token_hex` and writes them to `run/e2e/compose.env`. That directory lives inside the repository, not in `/tmp`: a snap-packaged Docker CLI cannot see the host's `/tmp`. `run/` is gitignored, and the suite teardown deletes `run/e2e`. Compose would let a variable exported in the shell override that file, so the suite removes both names from the environment it passes to `docker compose`.
 
 ## Networks
 
@@ -93,8 +93,9 @@ The development stack (`docker compose -p pgdemo`, the default project name) has
 
 1. **Setup.** `down -v --remove-orphans`, then `up -d --build --wait server`. That starts `postgres`, waits for its health check, runs `init` (`scripts/db-init.sh`, which exits when the schema and the admin user exist) and starts `server`. The controller is not started. The suite then copies the server certificate out of the container and polls `GET https://127.0.0.1:8080/api/health`.
 2. **Controller.** `02__controller_drains_queue.robot` runs `up -d --no-deps --wait controller`. `--no-deps` matters because `init` has already completed; asking compose for its dependencies would run it again.
-3. **Shutdown check.** `07__shutdown.robot` runs `compose stop server controller`. The services set `init: true`, so tini is pid 1 and delivers `SIGTERM` to `scripts/run-all.sh`, which stops the process and leaves `listener exiting` in its log. `compose cp server:/app/run/logs` then copies those logs out of the `demo-run` volume. `server` and `controller` share that volume, and `cp` works while the container is stopped.
-4. **Teardown.** `compose logs` is saved as `compose.log` in the Robot `--outputdir`, then `down -v --remove-orphans` runs again and `run/e2e` is removed.
+3. **Device lifecycle.** `08__device_lifecycle.robot` registers `sensor-a` through the API with an SSE stream already filtered to it, waits for the controller to write its type defaults and its telemetry, reconfigures it and removes it.
+4. **Shutdown check.** `09__shutdown.robot` runs `compose stop server controller`. The services set `init: true`, so tini is pid 1 and delivers `SIGTERM` to `scripts/run-all.sh`, which stops the process and leaves `listener exiting` in its log. `compose cp server:/app/run/logs` then copies those logs out of the `demo-run` volume. `server` and `controller` share that volume, and `cp` works while the container is stopped.
+5. **Teardown.** `compose logs` is saved as `compose.log` in the Robot `--outputdir`, then `down -v --remove-orphans` runs again and `run/e2e` is removed.
 
 ## Console output
 

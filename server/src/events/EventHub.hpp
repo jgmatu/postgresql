@@ -17,7 +17,8 @@ namespace pgdemo::server {
 struct Event
 {
     std::uint64_t id{0}; ///< SSE `id:`; increases by one per published event, starting at 1
-    std::string channel; ///< SSE `event:` name: dummy1 | dummy2 | dummy3 | config | error
+    std::string channel; ///< SSE `event:` name: telemetry_scalar | telemetry_gps | device | config | error
+    std::string device;  ///< device name the event is about; empty when it concerns none
     std::string data;    ///< JSON text
 };
 
@@ -32,7 +33,7 @@ class EventHub
 {
 public:
     /**
-     * @brief Bounded queue of one SSE stream, filtered by channel.
+     * @brief Bounded queue of one SSE stream, filtered by channel and device.
      *
      * Created by `EventHub::subscribe`. The stream thread pops; the listener
      * thread pushes through `publish`. All members are thread-safe.
@@ -48,14 +49,19 @@ public:
         [[nodiscard]] std::uint64_t dropped() const;
         /// Channels this subscription receives.
         [[nodiscard]] const std::set<std::string>& channels() const { return channels_; }
+        /// Devices this subscription receives; empty means every device.
+        [[nodiscard]] const std::set<std::string>& devices() const { return devices_; }
+        /// True when an event on `channel` about `device` belongs in this stream.
+        [[nodiscard]] bool wants(const std::string& channel, const std::string& device) const;
 
     private:
         friend class EventHub;
-        Subscription(std::set<std::string> channels, std::size_t capacity);
+        Subscription(std::set<std::string> channels, std::set<std::string> devices, std::size_t capacity);
         void push(const Event& e);
         void close();
 
         const std::set<std::string> channels_;
+        const std::set<std::string> devices_;
         const std::size_t capacity_;
         mutable std::mutex mtx_;
         std::condition_variable cv_;
@@ -64,21 +70,28 @@ public:
         bool closed_{false};
     };
 
-    /// Every channel name a client may ask for: dummy1, dummy2, dummy3, config, error.
+    /// Every channel name a client may ask for: telemetry_scalar, telemetry_gps, device, config, error.
     static const std::set<std::string>& all_channels();
 
     /**
      * @brief Register a stream.
      * @param channels channel names to receive
+     * @param devices  device names to receive; empty means every device
      * @param capacity queue length before the oldest event is dropped
      * @return the subscription; already closed if `close_all()` has run
      */
-    std::shared_ptr<Subscription> subscribe(std::set<std::string> channels, std::size_t capacity = 512);
+    std::shared_ptr<Subscription> subscribe(std::set<std::string> channels, std::set<std::string> devices = {},
+                                            std::size_t capacity = 512);
     /// Stop delivering to `sub`. Called when its stream ends.
     void unsubscribe(const std::shared_ptr<Subscription>& sub);
 
-    /// Thread-safe, non-blocking.
-    void publish(const std::string& channel, std::string data);
+    /**
+     * @brief Thread-safe, non-blocking.
+     * @param channel SSE event name
+     * @param device  device the event is about, matched against each device filter
+     * @param data    JSON text
+     */
+    void publish(const std::string& channel, const std::string& device, std::string data);
 
     /// Wakes every stream so it can end (server shutdown).
     void close_all();

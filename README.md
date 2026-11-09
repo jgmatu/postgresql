@@ -2,13 +2,13 @@
 
 A small, complete reference architecture in which **PostgreSQL is the only channel between two processes that never talk to each other**. Tables are the persistent queue and the source of truth; triggers and `LISTEN/NOTIFY` make the exchange reactive; roles and grants enforce the same authorization as the HTTP API.
 
-The demo runs on dummy data with three tables, `dummy1`, `dummy2` and `dummy3` (a GPS track stored with PostGIS). It covers:
+The demo models a small IoT fleet of simulated devices. A device is a row of `device`, not a table: registering one through the API is an `INSERT`, and the controller starts producing for it without a schema change or a restart. Three devices are seeded: `dummy1` (sine), `dummy2` (sawtooth) and `dummy3` (a GPS track stored with PostGIS). It covers:
 
 - **Reactive IPC across network zones.** The server (zone A) and the controller (zone B) share no socket, no broker and no addresses. Each one only knows the database.
-- **Channel multiplexing on one connection.** `dummy1_events`, `dummy2_events` and `dummy3_events` (plus two control-plane channels) arrive on a single `LISTEN` socket. libpqxx routes each notification to the callback registered for its channel.
-- **PostGIS.** `dummy3` stores a `geography(Point, 4326)`. The controller passes an origin, a radius and a bearing; `ST_Project` builds the point, and the same point is appended to the monthly history.
+- **Channel multiplexing on one connection.** One channel per payload shape, `telemetry_scalar` and `telemetry_gps`, plus `device_events` and three control-plane channels, arrive on a single `LISTEN` socket, whatever the number of devices. The device travels in the payload, and SSE clients can filter by it.
+- **PostGIS.** GPS devices store a `geography(Point, 4326)`. The controller passes an origin, a radius and a bearing; `ST_Project` builds the point, and the same point is appended to the monthly telemetry.
 - **Desired vs applied configuration.** An admin posts a desired configuration. The controller validates it and applies or rejects it. The HTTP request waits for the outcome through a request-id **Dispatcher**, so a concurrent, synchronous API sits on top of an asynchronous queue.
-- **Monthly-partitioned history.** Every sample is appended to a `RANGE`-partitioned history table. Partitions are created ahead of time, rows that landed in `DEFAULT` are moved, and retention drops whole months.
+- **Monthly-partitioned telemetry.** Every sample is appended to a `RANGE`-partitioned table shared by all devices of its payload. Partitions are created ahead of time, rows that landed in `DEFAULT` are moved, and retention drops whole months.
 - **Secure authentication and authorization.** Passwords are stored as Argon2id hashes and requests carry ES384 JWTs. Each request runs under `SET LOCAL ROLE demo_admin | demo_normal`, so PostgreSQL enforces the role a second time, independently of the HTTP check.
 - **TLS 1.3.** The Oat++ listener terminates HTTPS. OpenSSL 3.5's `X25519MLKEM768` is the group a stock client negotiates. liboqs, loaded as the `oqsprovider` module from the config beside the binary, is also accepted when the client offers one of its groups.
 
@@ -19,21 +19,24 @@ flowchart LR
         server["pgdemo-server<br/>Oat++ HTTPS"]
     end
     subgraph db["PostgreSQL 18 + PostGIS"]
-        queue[("dummy_config_pending<br/>(queue)")]
-        applied[("dummy_config<br/>(applied)")]
-        data[("dummy1 / dummy2 / dummy3<br/>+ monthly history")]
+        registry[("device<br/>(registry)")]
+        queue[("device_config_pending<br/>(queue)")]
+        applied[("device_config<br/>(applied)")]
+        data[("device_state<br/>+ telemetry_scalar / telemetry_gps<br/>(monthly partitions)")]
     end
     subgraph zoneB["zone B"]
-        controller["pgdemo-controller<br/>producers + queue worker"]
+        controller["pgdemo-controller<br/>one producer per device + queue worker"]
     end
 
     client -- "HTTPS + Bearer JWT" --> server
+    server -- "INSERT / DELETE device" --> registry
+    registry -. "NOTIFY device_events" .-> controller
     server -- "INSERT desired" --> queue
     queue -. "NOTIFY config_requested" .-> controller
     controller -- "UPSERT applied / errors" --> applied
     applied -. "NOTIFY config_events / error_events" .-> server
-    controller -- "UPSERT + history" --> data
-    data -. "NOTIFY dummy1_events / dummy2_events / dummy3_events" .-> server
+    controller -- "UPSERT + append" --> data
+    data -. "NOTIFY telemetry_scalar / telemetry_gps" .-> server
     server -- "SSE /api/stream" --> client
 ```
 
@@ -47,8 +50,8 @@ Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design: sequence diagr
 | [`libs/db`](libs/db) | `DatabaseManager`: query connection pool, listener connection and thread, callback registry, role-scoped transactions. |
 | [`libs/auth`](libs/auth) | `PasswordHasher` (Argon2id) and `JwtManager` (ES384), both on Botan 3. |
 | [`server/`](server) | `pgdemo-server`: Oat++ API, `AuthInterceptor`, `Dispatcher`, `EventHub` for Server-Sent Events. |
-| [`controller/`](controller) | `pgdemo-controller`: one producer thread per table and the configuration queue worker. |
-| [`client/pgdemo.sh`](client/pgdemo.sh) | Command-line client: login, users, data, history, configuration, live monitor. |
+| [`controller/`](controller) | `pgdemo-controller`: one producer thread per device, started and stopped on `device_events`, and the configuration queue worker. |
+| [`client/pgdemo.sh`](client/pgdemo.sh) | Command-line client: login, users, devices, telemetry, configuration, live monitor. |
 | [`scripts/`](scripts) | `db-init.sh`, `run-all.sh` (start the processes), `capture.sh` (network captures), key and certificate generation. |
 | [`data/`](data) | Network captures of the client over HTTPS and over plain HTTP. |
 | [`patches/`](patches) | libpqxx 8.0.0 patch that adds a truly blocking `wait_notification()`. |
@@ -75,7 +78,7 @@ sudo -u postgres createuser --superuser "$USER"     # once
 PGHOST=/var/run/postgresql scripts/db-init.sh       # add --reset to start over
 ```
 
-`db-init.sh` creates the roles and the `pgdemo` database, loads `sql/`, seeds the API user `admin`, and writes generated passwords to `run/demo.env` (mode 0600, gitignored). The two processes then connect over TCP to `127.0.0.1:5432` with those passwords (`scram-sha-256` in the default Ubuntu `pg_hba.conf`).
+`db-init.sh` creates the roles and the `pgdemo` database, loads `sql/`, seeds the three devices and the API user `admin`, and writes generated passwords to `run/demo.env` (mode 0600, gitignored). A database created with the earlier one-table-per-dummy schema needs `--reset`; it is not migrated. The two processes then connect over TCP to `127.0.0.1:5432` with those passwords (`scram-sha-256` in the default Ubuntu `pg_hba.conf`).
 
 Start both processes. Each one logs in with its own PostgreSQL role. The ports are fixed, one per scheme:
 
@@ -97,12 +100,18 @@ client/pgdemo.sh health
 PGDEMO_PASSWORD="$DEMO_ADMIN_PASSWORD" client/pgdemo.sh --http login admin
 client/pgdemo.sh --http health
 
+client/pgdemo.sh devices                      # every device and its last sample
 client/pgdemo.sh monitor                      # live events, including the dummy3 GPS track
 client/pgdemo.sh config set dummy1 rate_ms=200 amplitude=25
 client/pgdemo.sh config set dummy1 rate_ms=5  # rejected by the controller: 422 INVALID_RATE
-client/pgdemo.sh config status                # applied vs desired, per target
+client/pgdemo.sh config status                # applied vs desired, per device
 client/pgdemo.sh burst 50                     # 50 concurrent requests through the Dispatcher
 client/pgdemo.sh history dummy2 limit=5       # each row names its monthly partition
+
+client/pgdemo.sh monitor telemetry_scalar,device,config sensor-a &   # SSE for one device
+client/pgdemo.sh devices add sensor-a sine    # admin; the controller starts producing for it
+client/pgdemo.sh data sensor-a                # last sample and config sync state
+client/pgdemo.sh devices del sensor-a         # admin; its telemetry is kept
 
 client/pgdemo.sh users add alice normal       # admin only
 PGDEMO_PASSWORD=... client/pgdemo.sh login alice
@@ -187,18 +196,22 @@ Every route is TLS 1.3 on port 8443, or plain HTTP on port 8080 with `scripts/ru
 | `GET /api/health` | public | Listener liveness |
 | `GET /api/auth/me` | any | Identity and the PostgreSQL group used for the request |
 | `GET /api/db/info` | any | Server version, backend PIDs, libpqxx version, SSE and Dispatcher counters |
-| `GET /api/data/{dummy1\|dummy2\|dummy3}` | any | Live rows (`dummy3` returns `lon` and `lat`) |
-| `GET /api/history/{table}?from=&to=&item_id=&limit=` | any | History, newest first, with the partition name |
-| `GET /api/stream?channels=dummy1,dummy2,dummy3,config,error` | any | Server-Sent Events |
-| `GET /api/config` | any | `v_dummy_config_sync_status`: applied, desired, `SYNC`/`PENDING`/`ERROR` |
-| `POST /api/config` | admin | `{"target", "rate_ms"?, "amplitude"?, "is_active"?}`, partial update |
+| `GET /api/device-types` | any | Device types: payload and default configuration |
+| `GET /api/devices` | any | Every device with its type and last sample (GPS devices return `lon` and `lat`) |
+| `GET /api/devices/{name}` | any | One device, its last sample and its configuration sync state |
+| `GET /api/devices/{name}/history?from=&to=&limit=` | any | Telemetry, newest first, with the partition name |
+| `POST /api/devices` | admin | `{"name","type"}`; `409` if the name exists, `400` for an unknown type |
+| `DELETE /api/devices/{name}` | admin | Removes the device, its state, configuration and queue; the telemetry stays |
+| `GET /api/stream?channels=&devices=` | any | Server-Sent Events. Channels: `telemetry_scalar`, `telemetry_gps`, `device`, `config`, `error` (default all); `devices` filters by name |
+| `GET /api/config` | any | `v_device_config_sync_status`: applied, desired, `SYNC`/`PENDING`/`ERROR`/`UNINITIALISED` |
+| `POST /api/config` | admin | `{"device", "rate_ms"?, "amplitude"?, "is_active"?}`, partial update |
 | `GET /api/config/requests/{id}` | any | One request and its error, if any |
-| `GET /api/config/history?target=&limit=` | any | Applied-configuration audit |
+| `GET /api/config/history?device=&limit=` | any | Applied-configuration audit |
 | `GET /api/users` | admin | User directory (no hashes) |
 | `POST /api/users` | admin | `{"username","password","role"}` |
 | `DELETE /api/users/{username}` | admin | The last admin cannot be removed |
 
-`POST /api/config` returns `200` when the request is applied, `422` when the controller rejects it (or it expired), `202` when it is still queued after `--config-timeout-ms`, and `503` when the Dispatcher already holds 500 waiters.
+`POST /api/config` returns `200` when the request is applied, `422` when the controller rejects it (or it expired), `202` when it is still queued after `--config-timeout-ms`, `404` for an unknown device, `409` for a device the controller has not initialised yet, and `503` when the Dispatcher already holds 500 waiters.
 
 ## Tests
 
@@ -212,11 +225,11 @@ export PGDEMO_TEST_CONTROLLER_CONNINFO="host=127.0.0.1 dbname=pgdemo user=demo_c
 ctest --test-dir build -L db
 
 python3 -m venv .venv && .venv/bin/pip install -r tests/e2e/requirements.txt
-.venv/bin/robot --outputdir build/e2e tests/e2e                       # docker compose stack, 43 checks
+.venv/bin/robot --outputdir build/e2e tests/e2e                       # docker compose stack, 60 checks
 .venv/bin/robot --variable E2E_DEBUG:true --outputdir build/e2e tests/e2e  # same, with live command output
 ```
 
-The database tests cover channel multiplexing, the registration and shutdown rules of the listener, concurrent checkouts from the query pool, partition routing, role enforcement inside PostgreSQL, the full NOTIFY-driven configuration loop through the Dispatcher, and request expiry.
+The database tests cover channel multiplexing, the registration and shutdown rules of the listener, concurrent checkouts from the query pool, partition routing, role enforcement inside PostgreSQL, the full NOTIFY-driven configuration loop through the Dispatcher, request expiry, and the device lifecycle (`device_events` on registration and removal, cascade, telemetry kept).
 
 The end-to-end suite ([`tests/e2e`](tests/e2e)) needs Docker with compose v2, `curl` and `jq`. [tests/e2e/README.md](tests/e2e/README.md) describes the disposable compose project, the two network zones and the lifecycle the suites drive.
 
@@ -241,6 +254,7 @@ This is a demonstration of database architecture, not a product:
 - **Self-signed TLS.** The API is TLS 1.3 and binds to loopback by default. `run/keys/tls.crt` is the trust anchor; replace it before exposing the port.
 - **No reconnect.** If the listener connection drops, each process exits with status 1 so that a supervisor (compose `restart: unless-stopped`, systemd) restarts it. Queued work is not lost, because it lives in tables.
 - **Small payloads.** NOTIFY payloads are limited to 8000 bytes, and these stay well below that.
+- **One notification per sample, one thread per device.** Right for a handful of devices; [sql/README.md](sql/README.md#scaling-notes) explains what a real fleet would change.
 
 ## Licence
 

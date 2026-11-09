@@ -29,9 +29,9 @@ Last admin cannot be deleted
 Normal user login
     Login As    alice    ${NORMAL_PASSWORD}
 
-Normal user reads data
+Normal user reads devices
     ${headers}=    Auth Headers
-    HTTP Status Should Be    200    GET    /api/data/dummy1    headers=${headers}
+    HTTP Status Should Be    200    GET    /api/devices/dummy1    headers=${headers}
 
 Normal user reads config status
     ${headers}=    Auth Headers
@@ -43,7 +43,16 @@ Normal user cannot list users (403)
 
 Normal user cannot set config (403)
     ${headers}=    Auth Headers    content_type=application/json
-    HTTP Status Should Be    403    POST    /api/config    headers=${headers}    data={"target":"dummy1"}
+    HTTP Status Should Be    403    POST    /api/config    headers=${headers}    data={"device":"dummy1"}
+
+Normal user cannot register devices (403)
+    ${headers}=    Auth Headers
+    &{body}=    Create Dictionary    name=sensor-x    type=sine
+    HTTP Status Should Be    403    POST    /api/devices    headers=${headers}    json=${body}
+
+Normal user cannot remove devices (403)
+    ${headers}=    Auth Headers
+    HTTP Status Should Be    403    DELETE    /api/devices/dummy1    headers=${headers}
 
 Me reports demo_normal
     ${me}=    Client Json    me

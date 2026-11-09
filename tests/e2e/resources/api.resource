@@ -68,14 +68,14 @@ Login As
     ${result}=    Run Client With    ${extra}    login    ${user}
     Should Be Equal As Integers    ${result.rc}    0    login ${user} failed:\n${result.stdout}    values=False
 
-Target Field
-    [Documentation]    ``field`` of ``target`` in ``config status``.
-    [Arguments]    ${target}    ${field}
+Device Field
+    [Documentation]    ``field`` of ``device`` in ``config status``.
+    [Arguments]    ${device}    ${field}
     ${status}=    Client Json    config    status
     FOR    ${row}    IN    @{status}
-        IF    $row['target'] == $target    RETURN    ${row}[${field}]
+        IF    $row['device'] == $device    RETURN    ${row}[${field}]
     END
-    Fail    target ${target} missing from config status
+    Fail    device ${device} missing from config status
 
 Request Status Should Be
     [Arguments]    ${request_id}    ${expected}
@@ -84,9 +84,9 @@ Request Status Should Be
     Should Be Equal    ${request}[status]    ${expected}
 
 Capture SSE
-    [Documentation]    Three seconds of ``/api/stream`` for ``channels``.
+    [Documentation]    Three seconds of ``/api/stream`` for ``query`` (e.g. ``channels=telemetry_gps``).
     ...                ``timeout`` exits 124 when it stops curl, and that is the expected outcome.
-    [Arguments]    ${channels}
+    [Arguments]    ${query}
     ${result}=    Run Live    bash    -c
-    ...    timeout 3 curl -sN --cacert '${TLS_CERT}' -H @${TOKEN_FILE} '${BASE_URL}/api/stream?channels=${channels}'; test $? -eq 124
+    ...    timeout 3 curl -sN --cacert '${TLS_CERT}' -H @${TOKEN_FILE} '${BASE_URL}/api/stream?${query}'; test $? -eq 124
     RETURN    ${result.stdout}

@@ -4,10 +4,17 @@
 
 namespace pgdemo::server {
 
-EventHub::Subscription::Subscription(std::set<std::string> channels, std::size_t capacity)
+EventHub::Subscription::Subscription(std::set<std::string> channels, std::set<std::string> devices,
+                                     std::size_t capacity)
     : channels_(std::move(channels))
+    , devices_(std::move(devices))
     , capacity_(capacity)
 {
+}
+
+bool EventHub::Subscription::wants(const std::string& channel, const std::string& device) const
+{
+    return channels_.contains(channel) && (devices_.empty() || devices_.contains(device));
 }
 
 std::optional<Event> EventHub::Subscription::pop(std::chrono::milliseconds timeout)
@@ -58,14 +65,14 @@ void EventHub::Subscription::close()
 
 const std::set<std::string>& EventHub::all_channels()
 {
-    static const std::set<std::string> kAll{"dummy1", "dummy2", "dummy3", "config", "error"};
+    static const std::set<std::string> kAll{"telemetry_scalar", "telemetry_gps", "device", "config", "error"};
     return kAll;
 }
 
 std::shared_ptr<EventHub::Subscription> EventHub::subscribe(std::set<std::string> channels,
-                                                            std::size_t capacity)
+                                                            std::set<std::string> devices, std::size_t capacity)
 {
-    auto sub = std::shared_ptr<Subscription>(new Subscription(std::move(channels), capacity));
+    auto sub = std::shared_ptr<Subscription>(new Subscription(std::move(channels), std::move(devices), capacity));
     std::lock_guard lock(mtx_);
     if (closed_) sub->close();
     else subs_.push_back(sub);
@@ -78,14 +85,14 @@ void EventHub::unsubscribe(const std::shared_ptr<Subscription>& sub)
     std::erase(subs_, sub);
 }
 
-void EventHub::publish(const std::string& channel, std::string data)
+void EventHub::publish(const std::string& channel, const std::string& device, std::string data)
 {
     std::lock_guard lock(mtx_);
     if (closed_) return;
-    const Event e{++next_id_, channel, std::move(data)};
+    const Event e{++next_id_, channel, device, std::move(data)};
     for (const auto& s : subs_)
     {
-        if (s->channels().contains(channel)) s->push(e);
+        if (s->wants(channel, device)) s->push(e);
     }
 }
 

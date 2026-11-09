@@ -1,26 +1,29 @@
 /*
 =============================================================================
-01_data.sql - data plane: three live tables and their monthly-partitioned history
+01_data.sql - data plane: devices, their last sample and monthly-partitioned telemetry
 =============================================================================
 
-dummy1, dummy2 and dummy3 are deliberately separate tables. Each one has its
-own trigger and its own NOTIFY channel (04_triggers.sql), so a single LISTEN
-connection can multiplex them and dispatch each event to its own callback.
+A device is a row, not a table. Registering one is an INSERT into device; the
+schema and the code do not change. Tables are per data shape instead:
 
-dummy3 stores a GPS point. PostGIS lives in schema extensions, not public,
-so the later REVOKE on public does not hide ST_Project from the demo roles.
+  device_type        what a device produces (payload scalar | gps) and its
+                     default configuration
+  device             the registered devices
+  device_state       the last sample of each device (one row per device, UPSERT)
+  telemetry_scalar   every scalar sample, range-partitioned by month
+  telemetry_gps      every GPS fix, range-partitioned by month
 
-Each live row is a snapshot (one row per item_id, UPSERT). Every write also
-appends a row to <table>_history in the same transaction. History tables are
-range-partitioned by month on recorded_at:
+Every sample UPSERTs device_state and appends to the telemetry table of its
+payload in the same transaction. The telemetry tables have no foreign key to
+device, so the history outlives a deregistered device.
 
-  dummy1_history
-    dummy1_history_y2026m11   [2026-11-01, 2026-12-01)  UTC
-    dummy1_history_y2026m12   [2026-12-01, 2027-01-01)
-    dummy1_history_default    rows outside every monthly partition
+  telemetry_scalar
+    telemetry_scalar_y2026m11   [2026-11-01, 2026-12-01)  UTC
+    telemetry_scalar_y2026m12   [2026-12-01, 2027-01-01)
+    telemetry_scalar_default    rows outside every monthly partition
 
-Queries with a recorded_at range only touch the matching partitions
-(partition pruning). Retention drops whole partitions instead of DELETE.
+PostGIS lives in schema extensions, not public, so the later REVOKE on public
+does not hide ST_Project from the demo roles.
 */
 
 -- Superuser: the extension cannot be created by demo_owner.
@@ -32,76 +35,81 @@ SET search_path = public, extensions;
 SET ROLE demo_owner;
 
 -- ---------------------------------------------------------------------------
--- Live snapshots
+-- Devices
 -- ---------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS dummy1 (
-    item_id     INT PRIMARY KEY CHECK (item_id > 0),
-    value       DOUBLE PRECISION NOT NULL,
-    seq         BIGINT NOT NULL,
-    updated_at  TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+CREATE TABLE IF NOT EXISTS device_type (
+    type_id            TEXT PRIMARY KEY,
+    payload            TEXT NOT NULL CHECK (payload IN ('scalar', 'gps')),
+    default_rate_ms    INT NOT NULL CHECK (default_rate_ms BETWEEN 50 AND 10000),
+    default_amplitude  DOUBLE PRECISION NOT NULL CHECK (default_amplitude > 0 AND default_amplitude <= 1000),
+    description        TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS dummy2 (
-    item_id     INT PRIMARY KEY CHECK (item_id > 0),
-    value       DOUBLE PRECISION NOT NULL,
-    seq         BIGINT NOT NULL,
-    updated_at  TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+CREATE TABLE IF NOT EXISTS device (
+    device_id   INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    name        TEXT NOT NULL UNIQUE CHECK (name ~ '^[a-z][a-z0-9_.-]{1,63}$'),
+    type_id     TEXT NOT NULL REFERENCES device_type (type_id),
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- GPS fix. amplitude on this target is the orbit radius in metres.
-CREATE TABLE IF NOT EXISTS dummy3 (
-    item_id     INT PRIMARY KEY CHECK (item_id > 0),
-    position    extensions.geography(Point, 4326) NOT NULL,
+CREATE INDEX IF NOT EXISTS device_type_idx ON device (type_id);
+
+-- Last sample. Exactly one of value / position, matching the device's payload.
+CREATE TABLE IF NOT EXISTS device_state (
+    device_id   INT PRIMARY KEY REFERENCES device (device_id) ON DELETE CASCADE,
+    value       DOUBLE PRECISION,
+    position    extensions.geography(Point, 4326),
     seq         BIGINT NOT NULL,
-    updated_at  TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    CHECK ((value IS NULL) <> (position IS NULL))
 );
 
-COMMENT ON TABLE dummy1 IS 'Live snapshot written by the controller producer thread for dummy1 (sine wave).';
-COMMENT ON TABLE dummy2 IS 'Live snapshot written by the controller producer thread for dummy2 (counter with noise).';
-COMMENT ON TABLE dummy3 IS 'Live GPS fix written by the controller producer thread for dummy3 (orbit around a fixed origin).';
+CREATE INDEX IF NOT EXISTS device_state_position_gix ON device_state USING GIST (position);
+
+COMMENT ON TABLE device IS 'Registered devices. Registering one is an INSERT; the controller starts producing for it on device_events.';
+COMMENT ON TABLE device_state IS 'Last sample of each device, written by the controller producer for that device.';
+
+-- amplitude: peak value for the scalar types, orbit radius in metres for gps_orbit.
+INSERT INTO device_type (type_id, payload, default_rate_ms, default_amplitude, description) VALUES
+    ('sine',      'scalar', 500,  10.0,  'Sine wave'),
+    ('sawtooth',  'scalar', 1000, 5.0,   'Sawtooth with noise'),
+    ('gps_orbit', 'gps',    1000, 250.0, 'GPS fix orbiting a fixed origin (ST_Project)')
+ON CONFLICT (type_id) DO NOTHING;
+
+INSERT INTO device (name, type_id) VALUES
+    ('dummy1', 'sine'),
+    ('dummy2', 'sawtooth'),
+    ('dummy3', 'gps_orbit')
+ON CONFLICT (name) DO NOTHING;
 
 -- ---------------------------------------------------------------------------
--- Partitioned history. The partition key must be part of the primary key.
--- History is append-only and has no foreign key to the live table, so it
--- outlives deleted items.
+-- Partitioned telemetry. The partition key must be part of the primary key.
 -- ---------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS dummy1_history (
+CREATE TABLE IF NOT EXISTS telemetry_scalar (
     history_id   BIGINT GENERATED ALWAYS AS IDENTITY,
-    item_id      INT NOT NULL,
+    device_id    INT NOT NULL,
     value        DOUBLE PRECISION NOT NULL,
     seq          BIGINT NOT NULL,
     recorded_at  TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     PRIMARY KEY (history_id, recorded_at)
 ) PARTITION BY RANGE (recorded_at);
 
-CREATE TABLE IF NOT EXISTS dummy2_history (
+CREATE TABLE IF NOT EXISTS telemetry_gps (
     history_id   BIGINT GENERATED ALWAYS AS IDENTITY,
-    item_id      INT NOT NULL,
-    value        DOUBLE PRECISION NOT NULL,
-    seq          BIGINT NOT NULL,
-    recorded_at  TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
-    PRIMARY KEY (history_id, recorded_at)
-) PARTITION BY RANGE (recorded_at);
-
-CREATE TABLE IF NOT EXISTS dummy3_history (
-    history_id   BIGINT GENERATED ALWAYS AS IDENTITY,
-    item_id      INT NOT NULL,
+    device_id    INT NOT NULL,
     position     extensions.geography(Point, 4326) NOT NULL,
     seq          BIGINT NOT NULL,
     recorded_at  TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     PRIMARY KEY (history_id, recorded_at)
 ) PARTITION BY RANGE (recorded_at);
 
-CREATE TABLE IF NOT EXISTS dummy1_history_default PARTITION OF dummy1_history DEFAULT;
-CREATE TABLE IF NOT EXISTS dummy2_history_default PARTITION OF dummy2_history DEFAULT;
-CREATE TABLE IF NOT EXISTS dummy3_history_default PARTITION OF dummy3_history DEFAULT;
+CREATE TABLE IF NOT EXISTS telemetry_scalar_default PARTITION OF telemetry_scalar DEFAULT;
+CREATE TABLE IF NOT EXISTS telemetry_gps_default PARTITION OF telemetry_gps DEFAULT;
 
 -- Declared on the parent; PostgreSQL creates it on every partition.
-CREATE INDEX IF NOT EXISTS dummy1_history_item_time_idx ON dummy1_history (item_id, recorded_at DESC);
-CREATE INDEX IF NOT EXISTS dummy2_history_item_time_idx ON dummy2_history (item_id, recorded_at DESC);
-CREATE INDEX IF NOT EXISTS dummy3_history_item_time_idx ON dummy3_history (item_id, recorded_at DESC);
-CREATE INDEX IF NOT EXISTS dummy3_position_gix ON dummy3 USING GIST (position);
-CREATE INDEX IF NOT EXISTS dummy3_history_position_gix ON dummy3_history USING GIST (position);
+CREATE INDEX IF NOT EXISTS telemetry_scalar_device_time_idx ON telemetry_scalar (device_id, recorded_at DESC);
+CREATE INDEX IF NOT EXISTS telemetry_gps_device_time_idx ON telemetry_gps (device_id, recorded_at DESC);
+CREATE INDEX IF NOT EXISTS telemetry_gps_position_gix ON telemetry_gps USING GIST (position);
 
 -- ---------------------------------------------------------------------------
 -- Partition maintenance
@@ -133,8 +141,7 @@ DECLARE
     child        text;
     moved        bigint;
 BEGIN
-    IF parent NOT IN ('public.dummy1_history'::regclass, 'public.dummy2_history'::regclass,
-                      'public.dummy3_history'::regclass) THEN
+    IF parent NOT IN ('public.telemetry_scalar'::regclass, 'public.telemetry_gps'::regclass) THEN
         RAISE EXCEPTION 'ensure_monthly_partitions: unsupported parent %', parent;
     END IF;
     IF months_ahead < 0 OR months_ahead > 24 THEN
@@ -193,8 +200,7 @@ DECLARE
     ym     text[];
     m      date;
 BEGIN
-    IF parent NOT IN ('public.dummy1_history'::regclass, 'public.dummy2_history'::regclass,
-                      'public.dummy3_history'::regclass) THEN
+    IF parent NOT IN ('public.telemetry_scalar'::regclass, 'public.telemetry_gps'::regclass) THEN
         RAISE EXCEPTION 'drop_monthly_partitions_before: unsupported parent %', parent;
     END IF;
 
@@ -219,9 +225,8 @@ END
 $$;
 
 -- Current month plus two ahead at install time. The controller calls the
--- same function at startup and once a day.
-SELECT ensure_monthly_partitions('dummy1_history');
-SELECT ensure_monthly_partitions('dummy2_history');
-SELECT ensure_monthly_partitions('dummy3_history');
+-- same function at startup and every --maintenance-interval-s.
+SELECT ensure_monthly_partitions('telemetry_scalar');
+SELECT ensure_monthly_partitions('telemetry_gps');
 
 RESET ROLE;

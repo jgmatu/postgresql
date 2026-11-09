@@ -27,10 +27,15 @@ ${E2E_DEBUG}          ${False}
 *** Keywords ***
 Run Compose
     [Documentation]    ``docker compose`` on the e2e project; returns the result without checking it.
+    ...                Compose prefers shell variables over ``--env-file``, so the generated
+    ...                passwords are removed from the inherited environment.
     [Arguments]    @{args}    ${timeout}=5 min
+    ${env}=    Evaluate
+    ...    {k: v for k, v in os.environ.items() if k not in ('POSTGRES_PASSWORD', 'DEMO_ADMIN_PASSWORD')}
+    ...    modules=os
     ${result}=    Run Live    docker    compose    --progress    plain    -p    ${PROJECT}
     ...    -f    ${COMPOSE_FILE}    --env-file    ${ENV_FILE}    @{args}
-    ...    cwd=${ROOT}    timeout=${timeout}
+    ...    cwd=${ROOT}    env=${env}    timeout=${timeout}
     RETURN    ${result}
 
 Compose

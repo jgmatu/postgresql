@@ -18,18 +18,18 @@ namespace pgdemo::server {
 /**
  * @brief Control plane: desired vs applied configuration.
  *
- * GET  /api/config                      v_dummy_config_sync_status
- * POST /api/config                      admin; {"target", "rate_ms"?, "amplitude"?, "is_active"?}
+ * GET  /api/config                      v_device_config_sync_status
+ * POST /api/config                      admin; {"device", "rate_ms"?, "amplitude"?, "is_active"?}
  * GET  /api/config/requests/{id}        one request and its error, if any
- * GET  /api/config/history?target=&limit=
+ * GET  /api/config/history?device=&limit=
  *
  * POST is synchronous for the client and asynchronous underneath:
  *
  *   1. request_id = nextval('request_id_seq')
  *   2. Dispatcher registers a waiter for request_id
- *   3. INSERT into dummy_config_pending (trigger: NOTIFY config_requested)
- *   4. the controller validates and commits: dummy_config (NOTIFY config_events)
- *      or dummy_config_errors (NOTIFY error_events)
+ *   3. INSERT into device_config_pending (trigger: NOTIFY config_requested)
+ *   4. the controller validates and commits: device_config (NOTIFY config_events)
+ *      or device_config_errors (NOTIFY error_events)
  *   5. the listener thread calls Dispatcher::dispatch(request_id, ...) and this
  *      thread wakes up
  *
@@ -49,7 +49,7 @@ public:
     {
     }
 
-    /// `GET /api/config` (any role): 200 with `v_dummy_config_sync_status`.
+    /// `GET /api/config` (any role): 200 with `v_device_config_sync_status`.
     ENDPOINT("GET", "/api/config", status, REQUEST(std::shared_ptr<IncomingRequest>, request))
     {
         return http::guarded("config status", [&] {
@@ -59,21 +59,37 @@ public:
     }
 
     /// `POST /api/config` (admin): 200 applied, 202 still queued, 400 bad body, 403 not admin,
-    /// 422 rejected or expired, 503 too many requests in flight.
+    /// 404 unknown device, 409 device not initialised yet, 422 rejected or expired,
+    /// 503 too many requests in flight.
     ENDPOINT("POST", "/api/config", submit, REQUEST(std::shared_ptr<IncomingRequest>, request),
              BODY_STRING(String, body))
     {
-        return http::guarded("config submit", [&] {
+        return http::guarded("config submit", [&]() -> std::shared_ptr<OutgoingResponse> {
             const auto c = http::caller_of(request);
             if (!c.is_admin()) return http::forbidden();
 
             const auto in = http::parse_object(body);
             if (!in) throw http::BadRequest("body must be a JSON object");
-            const auto* target_v = in->if_contains("target");
-            if (!target_v || !target_v->is_string()) throw http::BadRequest("target is required");
-            const auto target = http::table_param(target_v->as_string());
+            const auto* device_v = in->if_contains("device");
+            if (!device_v || !device_v->is_string()) throw http::BadRequest("device is required");
+            const auto device = http::device_param(device_v->as_string());
 
-            db::ConfigRequest req = current_as_request(c.role, target);
+            // A partial update starts from the applied state, which only the
+            // controller creates; until then there is nothing to update.
+            const auto sync = s_->db->fetch_device_sync(c.role, device);
+            if (!sync) return http::no_such_device(device);
+            const auto& o = sync->as_object();
+            if (o.at("applied_rate_ms").is_null())
+            {
+                return http::error_response(Status::CODE_409, "not_initialised",
+                                            "device '" + device + "' not initialised by the controller yet");
+            }
+            db::ConfigRequest req;
+            req.device_id = static_cast<int>(o.at("device_id").to_number<std::int64_t>());
+            req.device = device;
+            req.rate_ms = static_cast<int>(o.at("applied_rate_ms").to_number<std::int64_t>());
+            req.amplitude = o.at("applied_amplitude").to_number<double>();
+            req.is_active = o.at("applied_is_active").as_bool();
             req.requested_by = c.username;
             if (const auto* v = in->if_contains("rate_ms"))
             {
@@ -146,37 +162,19 @@ public:
         });
     }
 
-    /// `GET /api/config/history?target=&limit=` (any role): 200 with the applied-configuration audit.
+    /// `GET /api/config/history?device=&limit=` (any role): 200 with the applied-configuration audit.
     ENDPOINT("GET", "/api/config/history", history, REQUEST(std::shared_ptr<IncomingRequest>, request))
     {
         return http::guarded("config history", [&] {
             const auto c = http::caller_of(request);
-            std::optional<db::ConfigTarget> target;
-            if (const auto t = http::str_param(request, "target")) target = http::table_param(*t);
+            std::optional<std::string> device;
+            if (const auto d = http::str_param(request, "device")) device = http::device_param(*d);
             const int limit = http::int_param(request, "limit", 1, 1000).value_or(50);
-            return http::json_response(Status::CODE_200, s_->db->fetch_config_history(c.role, target, limit));
+            return http::json_response(Status::CODE_200, s_->db->fetch_config_history(c.role, device, limit));
         });
     }
 
 private:
-    /// The applied configuration of `target`, as the base of a partial update.
-    db::ConfigRequest current_as_request(db::DbRole role, db::ConfigTarget target)
-    {
-        const auto rows = s_->db->fetch_sync_status(role);
-        for (const auto& v : rows.as_array())
-        {
-            const auto& o = v.as_object();
-            if (o.at("target").as_string() != db::table_name(target)) continue;
-            db::ConfigRequest r;
-            r.target = target;
-            r.rate_ms = static_cast<int>(o.at("applied_rate_ms").to_number<std::int64_t>());
-            r.amplitude = o.at("applied_amplitude").to_number<double>();
-            r.is_active = o.at("applied_is_active").as_bool();
-            return r;
-        }
-        throw std::runtime_error("no applied configuration for " + std::string(db::table_name(target)));
-    }
-
     std::shared_ptr<OutgoingResponse> reply_from_row(db::DbRole role, std::int64_t id, ResponseStatus outcome)
     {
         const auto row = s_->db->fetch_request(role, id);

@@ -21,13 +21,18 @@ Out-of-range amplitude is rejected
     Should Be Equal    ${result}[request][error_code]    INVALID_AMPLITUDE
 
 Sync view shows the error
-    ${sync}=    Target Field    dummy2    sync
+    ${sync}=    Device Field    dummy2    sync
     Should Be Equal    ${sync}    ERROR
 
 Bad body is 400
     ${headers}=    Auth Headers    content_type=application/json
     HTTP Status Should Be    400    POST    /api/config    headers=${headers}
-    ...    data={"target":"dummy1","rate_ms":"fast"}
+    ...    data={"device":"dummy1","rate_ms":"fast"}
+
+Unknown device is 404
+    ${headers}=    Auth Headers    content_type=application/json
+    HTTP Status Should Be    404    POST    /api/config    headers=${headers}
+    ...    data={"device":"nope","rate_ms":500}
 
 Burst: 20 applied
     Run Burst

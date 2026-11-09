@@ -85,14 +85,40 @@ inline std::optional<std::string> str_param(const std::shared_ptr<IncomingReques
 }
 
 /**
- * @brief `dummy1`, `dummy2` or `dummy3` from a path or query value.
- * @throws BadRequest for any other name
+ * @brief A device name from a path, query or body value, checked against the
+ * `device.name` format. Whether the device exists is the query's business.
+ * @throws BadRequest for a malformed name
  */
-inline db::DummyTable table_param(std::string_view name)
+inline std::string device_param(std::string_view name)
 {
-    const auto t = db::parse_dummy_table(name);
-    if (!t) throw BadRequest("unknown table '" + std::string(name) + "' (expected dummy1, dummy2 or dummy3)");
-    return *t;
+    if (!db::valid_device_name(name))
+    {
+        throw BadRequest("invalid device name '" + std::string(name) + "' (expected ^[a-z][a-z0-9_.-]{1,63}$)");
+    }
+    return std::string(name);
+}
+
+/**
+ * @brief Comma-separated list of non-empty names, e.g. `?channels=a,b`.
+ * @param raw  query value
+ * @param each called with every name; may throw `BadRequest`
+ */
+template <typename Fn>
+void for_each_listed(std::string_view raw, Fn&& each)
+{
+    while (!raw.empty())
+    {
+        const auto comma = raw.find(',');
+        const auto name = raw.substr(0, comma);
+        if (!name.empty()) each(name);
+        raw = comma == std::string_view::npos ? std::string_view{} : raw.substr(comma + 1);
+    }
+}
+
+/// `404 not_found` for a device name that is not registered.
+inline std::shared_ptr<Response> no_such_device(std::string_view name)
+{
+    return error_response(Status::CODE_404, "not_found", "no such device '" + std::string(name) + "'");
 }
 
 /**

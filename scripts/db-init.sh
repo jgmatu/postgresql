@@ -123,4 +123,4 @@ EOF
 chmod 600 "${PGDEMO_ENV_FILE}"
 
 log "done. Settings in ${PGDEMO_ENV_FILE#"${ROOT}"/}"
-psql_su -d "${PGDEMO_DB}" -c "SELECT target, applied_rate_ms, applied_amplitude, sync FROM v_dummy_config_sync_status ORDER BY target"
+psql_su -d "${PGDEMO_DB}" -c "SELECT device, type_id, applied_rate_ms, applied_amplitude, sync FROM v_device_config_sync_status ORDER BY device_id"

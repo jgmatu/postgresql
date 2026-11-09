@@ -104,7 +104,7 @@ public:
      * with that wait and can deadlock or corrupt the connection. This method
      * therefore refuses the call once the loop is running.
      *
-     * @param channel PostgreSQL notification channel, for example `dummy1_events`.
+     * @param channel PostgreSQL notification channel, for example `telemetry_scalar`.
      * @param callback invoked on the listener thread with the decoded payload.
      * @throws std::logic_error if the listener loop is already running.
      * @throws std::runtime_error if `connect()` has not been called.
@@ -170,56 +170,103 @@ public:
     // -------------------------------------------------------------- data plane
 
     /**
-     * @brief UPSERT the live row and append it to the history, in one transaction.
-     * @param table  `dummy1` or `dummy2`; the trigger fires its channel on commit
-     * @param sample row to write
+     * @brief UPSERT `device_state` and append to `telemetry_scalar`, in one statement.
+     *
+     * The `device_state` trigger fires `telemetry_scalar` on commit.
+     *
+     * @param sample device, value and tick
      */
-    void upsert_dummy_with_history(DummyTable table, const DummySample& sample);
+    void write_scalar_sample(const DummySample& sample);
 
     /**
-     * @brief UPSERT a GPS fix and append it to the history, in one transaction.
+     * @brief UPSERT a GPS fix into `device_state` and append it to `telemetry_gps`.
      *
      * The point is `ST_Project` of the origin by `radius_m` along `bearing_rad`.
-     * Only `dummy3` accepts a track sample.
+     * The `device_state` trigger fires `telemetry_gps` on commit.
      *
-     * @param table  must be `dummy3`; the trigger fires `dummy3_events` on commit
-     * @param sample origin, radius, bearing and tick
+     * @param sample device, origin, radius, bearing and tick
      */
-    void upsert_dummy_with_history(DummyTable table, const TrackSample& sample);
+    void write_gps_sample(const TrackSample& sample);
 
     /**
-     * @brief Live rows of `table`, ordered by `item_id`.
+     * @brief Every registered device with its type (controller start-up, no SET ROLE).
+     * @return devices ordered by `device_id`
+     */
+    std::vector<Device> load_devices();
+
+    /**
+     * @brief One device by id (controller, on `device_events`; no SET ROLE).
+     * @param device_id identity key
+     * @return the device, or `std::nullopt` when it no longer exists
+     */
+    std::optional<Device> load_device(int device_id);
+
+    /**
+     * @brief `v_devices`: every device, its type and its last sample.
+     * @param role group used for `SET LOCAL ROLE`
+     * @return JSON array ordered by `device_id`; GPS devices carry `lon` and `lat`
+     */
+    boost::json::value fetch_devices(DbRole role);
+
+    /**
+     * @brief One `v_devices` row plus its `v_device_config_sync_status` row as `config`.
+     * @param role group used for `SET LOCAL ROLE`
+     * @param name device name
+     * @return the device as a JSON object, or `std::nullopt` when it does not exist
+     */
+    std::optional<boost::json::value> fetch_device(DbRole role, const std::string& name);
+
+    /**
+     * @brief Telemetry of one device in `[from, to)`, newest first. Each row carries
+     * the name of the partition it was read from. NULL bounds default to the last hour.
+     *
+     * The device's type selects `telemetry_scalar` or `telemetry_gps`.
+     *
      * @param role  group used for `SET LOCAL ROLE`
-     * @param table table to read
-     * @return scalar tables: `[{"item_id","value","seq","updated_at"}, ...]`;
-     *         `dummy3`: `lon` and `lat` instead of `value`
+     * @param name  device name
+     * @param from  inclusive lower bound (`timestamptz` text), or last hour
+     * @param to    exclusive upper bound, or now
+     * @param limit maximum number of rows
+     * @return JSON array of rows, or `std::nullopt` when the device does not exist
      */
-    boost::json::value fetch_dummy(DbRole role, DummyTable table);
+    std::optional<boost::json::value> fetch_telemetry(DbRole role, const std::string& name,
+                                                      const std::optional<std::string>& from,
+                                                      const std::optional<std::string>& to, int limit);
 
     /**
-     * @brief History rows in `[from, to)`, newest first. Each row carries the name
-     * of the partition it was read from. NULL bounds default to the last hour.
-     *
-     * @param role    group used for `SET LOCAL ROLE`
-     * @param table   whose history table to read
-     * @param from    inclusive lower bound (`timestamptz` text), or last hour
-     * @param to      exclusive upper bound, or now
-     * @param item_id only this item, or every item
-     * @param limit   maximum number of rows
-     * @return JSON array of history rows
+     * @brief `device_type` as a JSON array (payload and defaults of each type).
+     * @param role group used for `SET LOCAL ROLE`
+     * @return JSON array ordered by `type_id`
      */
-    boost::json::value fetch_history(DbRole role, DummyTable table,
-                                     const std::optional<std::string>& from,
-                                     const std::optional<std::string>& to,
-                                     std::optional<int> item_id, int limit);
+    boost::json::value fetch_device_types(DbRole role);
+
+    /**
+     * @brief Register a device. The trigger fires `device_events` on commit.
+     * @param role    group used for `SET LOCAL ROLE`; must be admin
+     * @param name    unique device name (`valid_device_name()`)
+     * @param type_id existing `device_type.type_id`
+     * @return the new device as a JSON object, or `std::nullopt` when the type does not exist
+     * @throws pqxx::sql_error SQLSTATE 23505 when the name exists
+     */
+    std::optional<boost::json::value> create_device(DbRole role, const std::string& name,
+                                                    const std::string& type_id);
+
+    /**
+     * @brief Remove a device. State, configuration and queued requests go with it
+     * (`ON DELETE CASCADE`); telemetry and audit rows stay. Fires `device_events`.
+     * @param role group used for `SET LOCAL ROLE`; must be admin
+     * @param name device name
+     * @return false when no such device
+     */
+    bool delete_device(DbRole role, const std::string& name);
 
     /**
      * @brief Create the current month's partition and the next `months_ahead`.
-     * @param table        whose history table to maintain
+     * @param payload      whose telemetry table to maintain
      * @param months_ahead future months to create
      * @return names of the partitions created by this call; empty when all existed
      */
-    std::vector<std::string> ensure_history_partitions(DummyTable table, int months_ahead = 2);
+    std::vector<std::string> ensure_history_partitions(Payload payload, int months_ahead = 2);
 
     // ----------------------------------------------------------- control plane
 
@@ -240,8 +287,20 @@ public:
      */
     void add_pending_config(DbRole role, const ConfigRequest& request);
 
-    /// Applied configuration of every target (controller start-up).
+    /// Applied configuration of every initialised device, ordered by `device_id`.
     std::vector<AppliedConfig> fetch_applied_config();
+
+    /**
+     * @brief Applied configuration of one device, creating it from the
+     * `device_type` defaults (plus an audit row) when the device has none yet.
+     *
+     * The controller calls this for every device at start-up and for each
+     * `device_events` INSERT. A new row fires `config_events`.
+     *
+     * @param device_id identity key
+     * @return the configuration in force, or `std::nullopt` when the device does not exist
+     */
+    std::optional<AppliedConfig> init_device_config(int device_id);
 
     /**
      * @brief Process every PENDING request, oldest first.
@@ -249,8 +308,8 @@ public:
      * Each request is locked with `FOR UPDATE SKIP LOCKED`, so several controllers
      * may drain the same queue. Requests older than `max_age` are marked TIMEOUT.
      * Otherwise `decide` validates the request:
-     * - success: UPSERT `dummy_config` + history + status SUCCESS (fires `config_events`)
-     * - failure: INSERT `dummy_config_errors` + status ERROR (fires `error_events`)
+     * - success: UPSERT `device_config` + history + status SUCCESS (fires `config_events`)
+     * - failure: INSERT `device_config_errors` + status ERROR (fires `error_events`)
      *
      * `on_applied` runs after the commit, with the configuration now in force.
      * One pooled connection is held for the whole drain. `decide` and `on_applied`
@@ -266,11 +325,19 @@ public:
                              std::chrono::seconds max_age);
 
     /**
-     * @brief `v_dummy_config_sync_status`: applied vs desired state per target.
+     * @brief `v_device_config_sync_status`: applied vs desired state per device.
      * @param role group used for `SET LOCAL ROLE`
-     * @return JSON array, one object per target
+     * @return JSON array, one object per device, ordered by `device_id`
      */
     boost::json::value fetch_sync_status(DbRole role);
+
+    /**
+     * @brief The `v_device_config_sync_status` row of one device.
+     * @param role group used for `SET LOCAL ROLE`
+     * @param name device name
+     * @return the row as a JSON object, or `std::nullopt` when the device does not exist
+     */
+    std::optional<boost::json::value> fetch_device_sync(DbRole role, const std::string& name);
 
     /**
      * @brief One request with its error, if any.
@@ -282,12 +349,14 @@ public:
 
     /**
      * @brief Applied-configuration audit, newest first.
+     * Rows of removed devices stay; their `device` is null.
+     *
      * @param role   group used for `SET LOCAL ROLE`
-     * @param target only this target, or both
+     * @param device only this device name, or every device
      * @param limit  maximum number of rows
-     * @return JSON array of `dummy_config_history` rows
+     * @return JSON array of `device_config_history` rows
      */
-    boost::json::value fetch_config_history(DbRole role, std::optional<ConfigTarget> target,
+    boost::json::value fetch_config_history(DbRole role, const std::optional<std::string>& device,
                                             int limit);
 
     // ------------------------------------------------------------------- users

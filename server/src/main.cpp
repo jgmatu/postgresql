@@ -1,10 +1,11 @@
 // pgdemo-server: zone A process.
 //
 // HTTP API (Oat++) in front of PostgreSQL. It never talks to the controller:
-// desired configuration goes into the dummy_config_pending queue, and results
-// and live data come back as NOTIFY on the listener connection.
+// devices are rows it inserts and deletes, desired configuration goes into the
+// device_config_pending queue, and results and live data come back as NOTIFY on
+// the listener connection.
 //
-//   dummy1_events, dummy2_events, dummy3_events --> EventHub --> SSE /api/stream
+//   telemetry_scalar, telemetry_gps, device_events --> EventHub --> SSE /api/stream
 //   config_events                --> Dispatcher::dispatch(SUCCESS) + SSE
 //   error_events                 --> Dispatcher::dispatch(ERROR)   + SSE
 //
@@ -29,7 +30,7 @@
 #include "Services.hpp"
 #include "controllers/AuthController.hpp"
 #include "controllers/ConfigController.hpp"
-#include "controllers/DataController.hpp"
+#include "controllers/DeviceController.hpp"
 #include "controllers/UsersController.hpp"
 #include "http/AuthInterceptor.hpp"
 #include "http/ErrorHandler.hpp"
@@ -128,28 +129,41 @@ std::string payload_text(const boost::json::object& msg)
     return payload ? boost::json::serialize(*payload) : std::string("null");
 }
 
+/// Device name carried by every payload of sql/04_triggers.sql; empty if absent.
+std::string device_of(const boost::json::object& msg)
+{
+    const auto* payload = msg.if_contains("payload");
+    if (!payload || !payload->is_object()) return {};
+    const auto* name = payload->as_object().if_contains("device");
+    return name && name->is_string() ? std::string(name->as_string()) : std::string{};
+}
+
 void register_channels(Services& s)
 {
     auto& db = *s.db;
     auto hub = s.hub;
     auto dispatcher = s.dispatcher;
 
-    // Data plane: one channel per table, one listener socket.
-    for (const auto t : db::kAllTables)
+    // Data plane: one channel per payload shape, whatever the number of devices.
+    for (const auto p : db::kAllPayloads)
     {
-        const std::string sse(db::table_name(t));
-        db.register_listen_async(std::string(db::channel_name(t)),
-                                 [hub, sse](const boost::json::object& msg) { hub->publish(sse, payload_text(msg)); });
+        const std::string channel(db::telemetry_channel(p));
+        db.register_listen_async(channel, [hub, channel](const boost::json::object& msg) {
+            hub->publish(channel, device_of(msg), payload_text(msg));
+        });
     }
+    db.register_listen_async(std::string(db::channel::kDeviceEvents), [hub](const boost::json::object& msg) {
+        hub->publish("device", device_of(msg), payload_text(msg));
+    });
 
     // Control plane: completions wake the HTTP thread waiting on that request_id.
     db.register_listen_async(std::string(db::channel::kConfigEvents), [hub, dispatcher](const boost::json::object& msg) {
         if (const auto id = request_id_of(msg)) dispatcher->dispatch(*id, ResponseStatus::SUCCESS);
-        hub->publish("config", payload_text(msg));
+        hub->publish("config", device_of(msg), payload_text(msg));
     });
     db.register_listen_async(std::string(db::channel::kErrorEvents), [hub, dispatcher](const boost::json::object& msg) {
         if (const auto id = request_id_of(msg)) dispatcher->dispatch(*id, ResponseStatus::ERROR);
-        hub->publish("error", payload_text(msg));
+        hub->publish("error", device_of(msg), payload_text(msg));
     });
 }
 
@@ -199,7 +213,7 @@ int run(const ServerConfig& cfg)
     auto router = oatpp::web::server::HttpRouter::createShared();
     router->addController(std::make_shared<AuthController>(services, mapper));
     router->addController(std::make_shared<UsersController>(services, mapper));
-    router->addController(std::make_shared<DataController>(services, mapper));
+    router->addController(std::make_shared<DeviceController>(services, mapper));
     router->addController(std::make_shared<ConfigController>(services, mapper));
 
     auto handler = oatpp::web::server::HttpConnectionHandler::createShared(router);

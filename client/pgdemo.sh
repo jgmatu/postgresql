@@ -12,15 +12,21 @@
 #   health
 #   info                              PostgreSQL, libpqxx and listener details
 #
-#   data TABLE                        live rows (dummy1 | dummy2 | dummy3)
-#   history TABLE [limit=N] [item=N] [from=TS] [to=TS]
-#   monitor [CHANNELS]                live SSE: dummy1,dummy2,dummy3,config,error
+#   devices                           every device and its last sample
+#   devices types                     device types: payload and default configuration
+#   devices add NAME TYPE             admin; TYPE: sine | sawtooth | gps_orbit
+#   devices del NAME                  admin; the telemetry is kept
+#   data DEVICE                       one device: last sample and config sync state
+#   history DEVICE [limit=N] [from=TS] [to=TS]
+#   monitor [CHANNELS] [DEVICES]      live SSE; CHANNELS from telemetry_scalar,
+#                                     telemetry_gps,device,config,error (default all),
+#                                     DEVICES a comma-separated filter (default all)
 #
-#   config status                     applied vs desired, per target
-#   config set TARGET [rate_ms=N] [amplitude=X] [active=true|false]
+#   config status                     applied vs desired, per device
+#   config set DEVICE [rate_ms=N] [amplitude=X] [active=true|false]
 #   config request ID
-#   config history [TARGET] [limit=N]
-#   burst N [TARGET]                  N concurrent `config set` (Dispatcher demo)
+#   config history [DEVICE] [limit=N]
+#   burst N [DEVICE]                  N concurrent `config set` (Dispatcher demo)
 #
 #   users list                        admin only
 #   users add NAME [admin|normal]     password from $PGDEMO_NEW_PASSWORD or a prompt
@@ -51,7 +57,7 @@ need() { command -v "$1" >/dev/null || die "$1 not found (apt install $1)"; }
 need curl
 need jq
 
-usage() { sed -n '2,36p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,42p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 auth_args() {
     [[ -f "${TOKEN_FILE}" ]] || die "not logged in (client/pgdemo.sh login)"
@@ -101,7 +107,6 @@ query() {
         [[ "${kv}" == *=* ]] || die "expected key=value, got '${kv}'"
         k="${kv%%=*}"
         v="$(printf '%s' "${kv#*=}" | jq -sRr @uri)"
-        case "${k}" in item) k=item_id ;; esac
         q+="${q:+&}${k}=${v}"
     done
     [[ -n "${q}" ]] && printf '?%s' "${q}"
@@ -124,10 +129,10 @@ cmd_login() {
 }
 
 config_set_body() {
-    local target="$1"
+    local device="$1"
     shift
     local body
-    body="$(jq -nc --arg t "${target}" '{target: $t}')"
+    body="$(jq -nc --arg d "${device}" '{device: $d}')"
     local kv k v
     for kv in "$@"; do
         k="${kv%%=*}"
@@ -148,13 +153,13 @@ cmd_config() {
     case "${sub}" in
         status) authed GET /api/config ;;
         set)
-            [[ $# -ge 1 ]] || die "config set TARGET [rate_ms=N] [amplitude=X] [active=true|false]"
+            [[ $# -ge 1 ]] || die "config set DEVICE [rate_ms=N] [amplitude=X] [active=true|false]"
             config_set_body "$@" | authed POST /api/config -H 'Content-Type: application/json' --data-binary @-
             ;;
         request) [[ $# -eq 1 ]] || die "config request ID"; authed GET "/api/config/requests/$1" ;;
         history)
             local args=()
-            if [[ $# -ge 1 && "$1" != *=* ]]; then args+=("target=$1"); shift; fi
+            if [[ $# -ge 1 && "$1" != *=* ]]; then args+=("device=$1"); shift; fi
             authed GET "/api/config/history$(query "${args[@]}" "$@")"
             ;;
         *) die "unknown config command '${sub}'" ;;
@@ -162,7 +167,7 @@ cmd_config() {
 }
 
 cmd_burst() {
-    local n="${1:-10}" target="${2:-dummy1}" i start
+    local n="${1:-10}" device="${2:-dummy1}" i start
     [[ "${n}" =~ ^[0-9]+$ && "${n}" -ge 1 && "${n}" -le 500 ]] || die "burst N with N in 1..500"
     local -a a
     mapfile -t a < <(auth_args)
@@ -175,7 +180,7 @@ cmd_burst() {
         ((i % 5 == 4)) && rate=5
         (curl -sS --cacert "${CA}" -o "${dir}/${i}.json" -w '%{http_code}\n' -X POST "${a[@]}" \
             -H 'Content-Type: application/json' \
-            --data-binary "{\"target\":\"${target}\",\"rate_ms\":${rate}}" \
+            --data-binary "{\"device\":\"${device}\",\"rate_ms\":${rate}}" \
             "${URL}/api/config" > "${dir}/${i}.code") &
     done
     wait
@@ -187,10 +192,10 @@ cmd_burst() {
 }
 
 cmd_monitor() {
-    local channels="${1:-dummy1,dummy2,dummy3,config,error}"
+    local channels="${1:-telemetry_scalar,telemetry_gps,device,config,error}" devices="${2:-}"
     local -a a
     mapfile -t a < <(auth_args)
-    echo "streaming ${channels} (Ctrl-C to stop)" >&2
+    echo "streaming ${channels}${devices:+ for ${devices}} (Ctrl-C to stop)" >&2
     local event="" line
     # Process substitution, not a pipe: curl's HTTPS stdout is block-buffered
     # when piped, so data frames never reached this loop.
@@ -198,10 +203,26 @@ cmd_monitor() {
         line="${line%$'\r'}"
         case "${line}" in
             event:*) event="${line#event: }" ;;
-            data:*) printf '%-7s %s\n' "${event}" "$(jq -c . <<<"${line#data: }")" || true ;;
+            data:*) printf '%-16s %s\n' "${event}" "$(jq -c . <<<"${line#data: }")" || true ;;
         esac
     done < <(curl --http1.1 -sSN --cacert "${CA}" "${a[@]}" \
-        "${URL}/api/stream?channels=${channels}")
+        "${URL}/api/stream?channels=${channels}${devices:+&devices=${devices}}")
+}
+
+cmd_devices() {
+    local sub="${1:-list}"
+    shift || true
+    case "${sub}" in
+        list) authed GET /api/devices ;;
+        types) authed GET /api/device-types ;;
+        add)
+            [[ $# -eq 2 ]] || die "devices add NAME TYPE"
+            jq -nc --arg n "$1" --arg t "$2" '{name: $n, type: $t}' |
+                authed POST /api/devices -H 'Content-Type: application/json' --data-binary @-
+            ;;
+        del|delete) [[ $# -eq 1 ]] || die "devices del NAME"; authed DELETE "/api/devices/$1" ;;
+        *) die "unknown devices command '${sub}'" ;;
+    esac
 }
 
 cmd_users() {
@@ -231,12 +252,13 @@ main() {
         me) authed GET /api/auth/me ;;
         health) api GET /api/health ;;
         info) authed GET /api/db/info ;;
-        data) [[ $# -eq 1 ]] || die "data TABLE"; authed GET "/api/data/$1" ;;
+        devices) cmd_devices "$@" ;;
+        data) [[ $# -eq 1 ]] || die "data DEVICE"; authed GET "/api/devices/$1" ;;
         history)
-            [[ $# -ge 1 ]] || die "history TABLE [limit=N] [item=N] [from=TS] [to=TS]"
-            local t="$1"
+            [[ $# -ge 1 ]] || die "history DEVICE [limit=N] [from=TS] [to=TS]"
+            local d="$1"
             shift
-            authed GET "/api/history/${t}$(query "$@")"
+            authed GET "/api/devices/${d}/history$(query "$@")"
             ;;
         monitor) cmd_monitor "$@" ;;
         config) cmd_config "$@" ;;

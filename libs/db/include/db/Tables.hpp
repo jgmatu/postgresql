@@ -6,74 +6,72 @@
 namespace pgdemo::db {
 
 /**
- * @brief The data-plane tables. Each has its own trigger, NOTIFY channel and
- * partitioned history table.
+ * @brief Shape of the data a device produces. Selects the telemetry table and
+ * the NOTIFY channel; the device itself travels in the row and in the payload.
  *
  * SQL identifiers are never built from caller strings: every table and channel
- * name comes from this fixed whitelist.
+ * name comes from this fixed whitelist. Devices are rows of `device`, so adding
+ * one changes neither the schema nor this list.
  */
-enum class DummyTable {
-    Dummy1, ///< `dummy1`: sine wave, channel `dummy1_events`
-    Dummy2, ///< `dummy2`: noisy sawtooth, channel `dummy2_events`
-    Dummy3, ///< `dummy3`: GPS orbit, channel `dummy3_events`
+enum class Payload {
+    Scalar, ///< one `double` per sample: `telemetry_scalar`, channel `telemetry_scalar`
+    Gps,    ///< one WGS84 point per sample: `telemetry_gps`, channel `telemetry_gps`
 };
 
-/// The control plane configures exactly the same targets.
-using ConfigTarget = DummyTable;
-
-/// Live table name. Also the SSE channel and the `target` value.
-constexpr std::string_view table_name(DummyTable t) noexcept
+/// Value of `device_type.payload`: `scalar` or `gps`.
+constexpr std::string_view payload_name(Payload p) noexcept
 {
-    switch (t)
-    {
-        case DummyTable::Dummy1: return "dummy1";
-        case DummyTable::Dummy2: return "dummy2";
-        case DummyTable::Dummy3: return "dummy3";
-    }
-    return "dummy3";
+    return p == Payload::Gps ? "gps" : "scalar";
 }
 
-/// Partitioned history table.
-constexpr std::string_view history_table_name(DummyTable t) noexcept
+/// Inverse of `payload_name()`. `std::nullopt` for any other string.
+constexpr std::optional<Payload> parse_payload(std::string_view name) noexcept
 {
-    switch (t)
-    {
-        case DummyTable::Dummy1: return "dummy1_history";
-        case DummyTable::Dummy2: return "dummy2_history";
-        case DummyTable::Dummy3: return "dummy3_history";
-    }
-    return "dummy3_history";
-}
-
-/// NOTIFY channel fired by the table's trigger.
-constexpr std::string_view channel_name(DummyTable t) noexcept
-{
-    switch (t)
-    {
-        case DummyTable::Dummy1: return "dummy1_events";
-        case DummyTable::Dummy2: return "dummy2_events";
-        case DummyTable::Dummy3: return "dummy3_events";
-    }
-    return "dummy3_events";
-}
-
-/// Inverse of `table_name()`. `std::nullopt` for any other string.
-constexpr std::optional<DummyTable> parse_dummy_table(std::string_view name) noexcept
-{
-    if (name == "dummy1") return DummyTable::Dummy1;
-    if (name == "dummy2") return DummyTable::Dummy2;
-    if (name == "dummy3") return DummyTable::Dummy3;
+    if (name == "scalar") return Payload::Scalar;
+    if (name == "gps") return Payload::Gps;
     return std::nullopt;
 }
 
-/// Every data-plane table, for loops that must cover all of them.
-constexpr DummyTable kAllTables[] = {DummyTable::Dummy1, DummyTable::Dummy2, DummyTable::Dummy3};
+/// Partitioned, append-only telemetry table of the payload.
+constexpr std::string_view telemetry_table(Payload p) noexcept
+{
+    return p == Payload::Gps ? "telemetry_gps" : "telemetry_scalar";
+}
 
-/// NOTIFY channels of the control plane (see sql/04_triggers.sql).
+/// NOTIFY channel fired by `device_state` for samples of this payload.
+constexpr std::string_view telemetry_channel(Payload p) noexcept
+{
+    return p == Payload::Gps ? "telemetry_gps" : "telemetry_scalar";
+}
+
+/// Every payload, for loops that must cover all telemetry tables.
+constexpr Payload kAllPayloads[] = {Payload::Scalar, Payload::Gps};
+
+/**
+ * @brief Same rule as the `CHECK` on `device.name`: `^[a-z][a-z0-9_.-]{1,63}$`.
+ *
+ * Lets the HTTP layer answer 400 before touching the database.
+ */
+constexpr bool valid_device_name(std::string_view name) noexcept
+{
+    if (name.size() < 2 || name.size() > 64) return false;
+    if (name[0] < 'a' || name[0] > 'z') return false;
+    for (const char c : name.substr(1))
+    {
+        const bool ok = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '.' ||
+                        c == '-';
+        if (!ok) return false;
+    }
+    return true;
+}
+
+/// NOTIFY channels besides telemetry (see sql/04_triggers.sql).
 namespace channel {
+/// A device was registered or removed; payload carries `action`, `device_id`, `device`, `type_id`.
+inline constexpr std::string_view kDeviceEvents = "device_events";
 /// Server inserted a PENDING request; wakes the controller's queue drain.
 inline constexpr std::string_view kConfigRequested = "config_requested";
-/// Controller applied a request (`dummy_config` changed); payload carries `request_id`.
+/// Controller applied a configuration (`device_config` changed); payload carries `request_id`.
 inline constexpr std::string_view kConfigEvents = "config_events";
 /// Controller rejected or expired a request; payload carries `request_id` and `error_code`.
 inline constexpr std::string_view kErrorEvents = "error_events";
@@ -84,7 +82,7 @@ inline constexpr std::string_view kErrorEvents = "error_events";
  * (`SET LOCAL ROLE`), chosen from the verified JWT role claim.
  */
 enum class DbRole {
-    Admin,  ///< `demo_admin`: may enqueue configuration and manage users
+    Admin,  ///< `demo_admin`: may register devices, enqueue configuration and manage users
     Normal, ///< `demo_normal`: read-only
 };
 

@@ -3,7 +3,7 @@
 This document explains how two processes that never talk to each other run a reactive, transactional exchange through PostgreSQL alone, and how the same database enforces authentication and authorization.
 
 1. [Processes and zones](#1-processes-and-zones)
-2. [Data plane: three tables, one listener](#2-data-plane-three-tables-one-listener)
+2. [Data plane: devices as rows, one channel per payload](#2-data-plane-devices-as-rows-one-channel-per-payload)
 3. [Control plane: desired vs applied configuration](#3-control-plane-desired-vs-applied-configuration)
 4. [The Dispatcher](#4-the-dispatcher)
 5. [Listener lifecycle in `libs/db`](#5-listener-lifecycle-in-libsdb)
@@ -15,8 +15,8 @@ This document explains how two processes that never talk to each other run a rea
 
 | Process | Zone | PostgreSQL login | Writes | Listens to |
 |---|---|---|---|---|
-| `pgdemo-server` | A | `demo_server` (NOINHERIT) | `dummy_config_pending`, `app_users` | `dummy1_events`, `dummy2_events`, `dummy3_events`, `config_events`, `error_events` |
-| `pgdemo-controller` | B | `demo_controller` | `dummy1`, `dummy2`, `dummy3`, histories, `dummy_config`, `dummy_config_errors` | `config_requested` |
+| `pgdemo-server` | A | `demo_server` (NOINHERIT) | `device` (register, remove), `device_config_pending`, `app_users` | `telemetry_scalar`, `telemetry_gps`, `device_events`, `config_events`, `error_events` |
+| `pgdemo-controller` | B | `demo_controller` | `device_state`, `telemetry_scalar`, `telemetry_gps`, `device_config`, `device_config_errors` | `device_events`, `config_requested` |
 | `client/pgdemo.sh` | host | none | over HTTPS (8443) or, with `--http`, plain HTTP (8080) | SSE `/api/stream` |
 
 Neither process knows the other's address, port or existence. Each owns its side of the contract: the server owns *desired* state, and the controller owns *applied* state and the data. The schema in [`sql/`](../sql) is the interface between them; [sql/README.md](../sql/README.md) describes every table, view, function and channel.
@@ -41,73 +41,88 @@ flowchart TB
         H -- "SSE" --> HTTP
     end
     subgraph C["pgdemo-controller (zone B)"]
+        F["Fleet<br/>(mutex-protected map device_id → Producer)"]
         P1["producer dummy1"]
         P2["producer dummy2"]
-        P3["producer dummy3"]
-        CL["listener thread<br/>drain_pending()"]
-        CL -- "apply()" --> P1
-        CL -- "apply()" --> P2
-        CL -- "apply()" --> P3
+        PN["producer sensor-a ..."]
+        CL["listener thread<br/>device_events, drain_pending()"]
+        CL -- "add / remove / apply()" --> F
+        F --> P1
+        F --> P2
+        F --> PN
     end
     PG[("PostgreSQL")]
     HTTP <--> PG
     SL <-. "NOTIFY" .-> PG
     P1 --> PG
     P2 --> PG
-    P3 --> PG
+    PN --> PG
     CL <-. "NOTIFY" .-> PG
     CL --> PG
 ```
 
-## 2. Data plane: three tables, one listener
+## 2. Data plane: devices as rows, one channel per payload
 
-`dummy1`, `dummy2` and `dummy3` are separate tables, each with its own `AFTER INSERT OR UPDATE` trigger and its own channel:
+A device is a row of `device`, typed by `device_type`. The type fixes the *payload* (`scalar` or `gps`), the controller's generator and the default configuration. Tables and channels exist per payload, never per device, so registering a device is an `INSERT`: no `CREATE TABLE`, no new `LISTEN`, no rebuild.
 
-| Table | Trigger function | Channel | Payload |
-|---|---|---|---|
-| `dummy1` | `notify_dummy1_change()` | `dummy1_events` | `{table, action, item_id, value, seq, ts}` |
-| `dummy2` | `notify_dummy2_change()` | `dummy2_events` | same shape |
-| `dummy3` | `notify_dummy3_change()` | `dummy3_events` | `{table, action, item_id, lon, lat, seq, ts}` |
+| Table | Rows | Written by |
+|---|---|---|
+| `device_type` | `sine`, `sawtooth` (scalar), `gps_orbit` (gps) | install |
+| `device` | one per device; seeded with `dummy1`, `dummy2`, `dummy3` | server, as `demo_admin` |
+| `device_state` | the last sample of each device (`value` or `position`, never both) | controller |
+| `telemetry_scalar`, `telemetry_gps` | every sample, monthly-partitioned, no foreign key to `device` | controller |
 
-`dummy3.position` is `geography(Point, 4326)`, installed with PostGIS in the `extensions` schema. The producer does not compute latitude and longitude itself. It passes a fixed origin (Madrid), a radius (`amplitude`, metres) and a bearing, and the INSERT calls `ST_Project`. The same point is appended to `dummy3_history`. A GiST index covers the live table and every monthly partition.
+One trigger on `device_state` publishes each sample on the channel of its payload, with the device in the payload:
 
-The controller runs one `std::jthread` per table. Every tick writes one statement: a CTE that UPSERTs the live row and appends the same sample to the history table in one transaction. The trigger fires on the live row, and PostgreSQL delivers the notification **only when the transaction commits**, so a listener never sees a value that was rolled back.
+| Channel | Payload |
+|---|---|
+| `telemetry_scalar` | `{device_id, device, action, value, seq, ts}` |
+| `telemetry_gps` | `{device_id, device, action, lon, lat, seq, ts}` |
+| `device_events` | `{action: INSERT \| DELETE, device_id, device, type_id}` |
 
-On the server, one listener connection subscribes to every channel. libpqxx keeps a handler per channel and calls the right one for each notification. The server forwards the data channels to the `EventHub`, which fans them out to SSE subscribers filtered by `?channels=`.
+GPS positions are `geography(Point, 4326)`, installed with PostGIS in the `extensions` schema. The producer does not compute latitude and longitude itself. It passes a fixed origin (Madrid), a radius (`amplitude`, metres) and a bearing, and the INSERT calls `ST_Project`. GiST indexes cover `device_state` and every monthly partition of `telemetry_gps`.
+
+The controller keeps a `Fleet`: one `Producer` (`std::jthread`) per device, with the generator chosen by `type_id` and a phase derived from `device_id`. Every tick writes one statement: a CTE that UPSERTs `device_state` and appends the same sample to the telemetry table of the device's payload. The trigger fires on `device_state`, and PostgreSQL delivers the notification **only when the transaction commits**, so a listener never sees a value that was rolled back.
+
+The fleet changes at run time. The controller listens to `device_events`: an `INSERT` initialises the device's applied configuration from its type defaults and starts its producer; a `DELETE` stops it. At start-up it does the same for every registered device, after `LISTEN` is active, so no registration falls between the two. The map is protected by a mutex, because the listener thread changes it while the queue drain reads it; database calls and `Producer::stop()` run outside that mutex.
+
+On the server, one listener connection subscribes to every channel. libpqxx keeps a handler per channel and calls the right one for each notification. The server republishes them on the `EventHub` as the SSE events `telemetry_scalar`, `telemetry_gps`, `device`, `config` and `error`, each tagged with its device name. Subscribers filter by `?channels=` and, optionally, by `?devices=`.
 
 ```mermaid
 sequenceDiagram
     participant P1 as producer dummy1
-    participant P2 as producer dummy2
     participant P3 as producer dummy3
     participant PG as PostgreSQL
     participant L as server listener
     participant H as EventHub
-    participant B as SSE client
-    P1->>PG: UPSERT dummy1 + INSERT dummy1_history (COMMIT)
-    P2->>PG: UPSERT dummy2 + INSERT dummy2_history (COMMIT)
-    P3->>PG: ST_Project + INSERT dummy3_history (COMMIT)
-    PG-->>L: NOTIFY dummy1_events {item_id, value, seq}
-    PG-->>L: NOTIFY dummy2_events {item_id, value, seq}
-    PG-->>L: NOTIFY dummy3_events {item_id, lon, lat}
-    L->>H: publish("dummy1" / "dummy2" / "dummy3")
-    H-->>B: event: dummy1 / event: dummy2 / event: dummy3
+    participant B as SSE client devices=dummy3
+    P1->>PG: UPSERT device_state + INSERT telemetry_scalar (COMMIT)
+    P3->>PG: ST_Project, UPSERT device_state + INSERT telemetry_gps (COMMIT)
+    PG-->>L: NOTIFY telemetry_scalar {device: dummy1, value, seq}
+    PG-->>L: NOTIFY telemetry_gps {device: dummy3, lon, lat}
+    L->>H: publish("telemetry_scalar", "dummy1", ...)
+    L->>H: publish("telemetry_gps", "dummy3", ...)
+    H-->>B: event: telemetry_gps (dummy1 filtered out)
 ```
 
 `EventHub::publish` never blocks the listener thread. Each subscriber has a bounded queue, and a slow client loses its oldest events rather than stalling notification delivery for everybody.
+
+One notification per sample keeps the demo simple. Commits that call `pg_notify` serialize on a cluster-wide lock, so a large fleet needs batched wake-ups, logical decoding or a broker; [sql/README.md](../sql/README.md#scaling-notes) lists the options.
 
 ## 3. Control plane: desired vs applied configuration
 
 | Table | Owner of the rows | Meaning |
 |---|---|---|
-| `dummy_config` | controller | **Applied** configuration, one row per target, with the `request_id` that produced it |
-| `dummy_config_pending` | server inserts, controller updates `status` | **Desired** configuration: the queue. Status `PENDING → SUCCESS \| ERROR \| TIMEOUT` |
-| `dummy_config_errors` | controller | Why a request was rejected (`INVALID_RATE`, `INVALID_AMPLITUDE`, `EXPIRED`, …) |
-| `dummy_config_history` | controller | Every applied configuration |
-| `dummy_config_pending_history` | server | Every desired configuration, as submitted |
+| `device_config` | controller | **Applied** configuration, one row per device, with the `request_id` that produced it (none for the type defaults) |
+| `device_config_pending` | server inserts, controller updates `status` | **Desired** configuration: the queue. Status `PENDING → SUCCESS \| ERROR \| TIMEOUT` |
+| `device_config_errors` | controller | Why a request was rejected (`INVALID_RATE`, `INVALID_AMPLITUDE`, `EXPIRED`, …) |
+| `device_config_history` | controller | Every applied configuration |
+| `device_config_pending_history` | server | Every desired configuration, as submitted |
 | `request_id_seq` | server | The single cross-process ID authority |
 
-`v_dummy_config_sync_status` joins them per target. It shows the applied values, the latest desired request, its status, the latest error, and a summary `sync` column with the value `SYNC`, `PENDING` or `ERROR`.
+All of them are keyed by `device_id`. Removing a device cascades to its applied state, its queue and its errors; both audits stay.
+
+`v_device_config_sync_status` joins them per device. It shows the applied values, the latest desired request, its status, the latest error, and a summary `sync` column with the value `SYNC`, `PENDING`, `ERROR` or `UNINITIALISED` (registered, but the controller has not written its defaults yet).
 
 ```mermaid
 sequenceDiagram
@@ -117,19 +132,20 @@ sequenceDiagram
     participant D as Dispatcher
     participant PG as PostgreSQL
     participant C as controller listener
-    A->>S: POST /api/config {target, rate_ms}
+    A->>S: POST /api/config {device, rate_ms}
+    S->>PG: v_device_config_sync_status for the device (404 unknown, 409 uninitialised)
     S->>PG: SELECT nextval('request_id_seq')  (SET LOCAL ROLE demo_admin)
     S->>D: wait_for_response(id, 2000 ms, submit)
     D->>D: register id (before submit)
-    D->>PG: submit(): INSERT dummy_config_pending (+ _history), COMMIT
-    PG-->>C: NOTIFY config_requested {request_id, target}
-    C->>PG: SELECT ... WHERE status='PENDING' FOR UPDATE SKIP LOCKED
+    D->>PG: submit(): INSERT device_config_pending (+ _history), COMMIT
+    PG-->>C: NOTIFY config_requested {request_id, device_id}
+    C->>PG: SELECT ... WHERE status='PENDING' FOR UPDATE OF p SKIP LOCKED
     alt valid
-        C->>PG: UPSERT dummy_config, INSERT history, status=SUCCESS, COMMIT
-        PG-->>S: NOTIFY config_events {request_id, ...}
+        C->>PG: UPSERT device_config, INSERT history, status=SUCCESS, COMMIT
+        PG-->>S: NOTIFY config_events {request_id, device, ...}
         S->>D: dispatch(id, SUCCESS)
     else invalid
-        C->>PG: INSERT dummy_config_errors, status=ERROR, COMMIT
+        C->>PG: INSERT device_config_errors, status=ERROR, COMMIT
         PG-->>S: NOTIFY error_events {request_id, error_code}
         S->>D: dispatch(id, ERROR)
     end
@@ -144,8 +160,8 @@ Properties of this loop:
 - **Several controllers can share the queue.** Each row is taken with `FOR UPDATE SKIP LOCKED`, so two workers never process the same request.
 - **Stale requests do not apply.** A request older than `--pending-max-age-s` (600 s by default) becomes `TIMEOUT` with error `EXPIRED`, so an old intent does not overwrite a newer reality.
 - **Validation belongs to the zone that executes.** The server checks types and the role; the controller decides whether the values are acceptable. The answer travels back through the database like any other state.
-- **Partial updates.** Fields left out of the POST body are taken from the applied configuration.
-- **Producers react immediately.** After the commit, the controller calls `Producer::apply()`, which updates atomics and wakes the producer from its sleep, so a new rate takes effect without waiting out the old period.
+- **Partial updates.** Fields left out of the POST body are taken from the applied configuration. A device the controller has not initialised yet has none, so the server answers `409`.
+- **Producers react immediately.** After the commit, the controller calls `Producer::apply()` for that device, which updates atomics and wakes the producer from its sleep, so a new rate takes effect without waiting out the old period.
 
 ## 4. The Dispatcher
 
@@ -191,14 +207,14 @@ Callbacks run on the listener thread. They may call query methods (that thread d
 
 ## 6. Monthly partitioning
 
-`dummy1_history`, `dummy2_history` and `dummy3_history` are `PARTITION BY RANGE (recorded_at)`, with one partition per UTC month plus a `DEFAULT` partition:
+`telemetry_scalar` and `telemetry_gps` are `PARTITION BY RANGE (recorded_at)`, with one partition per UTC month plus a `DEFAULT` partition. Every device of the same payload shares them; the `(device_id, recorded_at DESC)` index narrows a partition to one device.
 
 ```text
-dummy1_history
-├── dummy1_history_y2026m11   [2026-11-01 00:00Z, 2026-12-01 00:00Z)
-├── dummy1_history_y2026m12   [2026-12-01 00:00Z, 2027-01-01 00:00Z)
-├── dummy1_history_y2027m01   ...
-└── dummy1_history_default    anything not covered above
+telemetry_scalar
+├── telemetry_scalar_y2026m11   [2026-11-01 00:00Z, 2026-12-01 00:00Z)
+├── telemetry_scalar_y2026m12   [2026-12-01 00:00Z, 2027-01-01 00:00Z)
+├── telemetry_scalar_y2027m01   ...
+└── telemetry_scalar_default    anything not covered above
 ```
 
 - **Partitions are created ahead.** `ensure_monthly_partitions(parent, from_month, months_ahead)` creates the current month and the next `months_ahead` months. The controller calls it at start-up and every `--maintenance-interval-s` (1 h by default).
@@ -207,7 +223,7 @@ dummy1_history
 - **Retention without DELETE.** `drop_monthly_partitions_before(parent, cutoff)` drops whole months, which avoids a long `DELETE` and the vacuum that follows.
 - **Safe to call from the controller.** Both functions are `SECURITY DEFINER` (they run as `demo_owner`), whitelist their parent table, and pin `search_path` and `TimeZone`. They take an advisory lock so that concurrent callers do not race. The controller needs only `EXECUTE` and never owns a table.
 
-Each history row returned by `/api/history` carries its partition name (`tableoid::regclass`), so routing is visible from the client.
+Each row returned by `/api/devices/{name}/history` carries its partition name (`tableoid::regclass`), so routing is visible from the client.
 
 ## 7. Security
 
@@ -234,10 +250,13 @@ COMMIT;                         -- the role reverts here
 
 | Object | `demo_normal` | `demo_admin` | `demo_controller` | `demo_server` |
 |---|---|---|---|---|
-| `dummy1`, `dummy2`, `dummy3`, histories | SELECT | SELECT | SELECT, INSERT, UPDATE | – |
-| `dummy_config` | SELECT | SELECT | SELECT, INSERT, UPDATE | – |
-| `dummy_config_pending` | SELECT | SELECT, INSERT | SELECT, UPDATE | – |
-| `dummy_config_errors`, `_history` | SELECT | SELECT | INSERT | – |
+| `device_type` | SELECT | SELECT | SELECT | – |
+| `device` | SELECT | SELECT; INSERT `name`, `type_id`; DELETE | SELECT | – |
+| `device_state` | SELECT | SELECT | SELECT, INSERT, UPDATE | – |
+| `telemetry_scalar`, `telemetry_gps` | SELECT | SELECT | INSERT | – |
+| `device_config` | SELECT | SELECT | SELECT, INSERT, UPDATE | – |
+| `device_config_pending` | SELECT | SELECT, INSERT | SELECT, UPDATE | – |
+| `device_config_errors`, `_history` | SELECT | SELECT | INSERT | – |
 | `request_id_seq` | – | USAGE | – | – |
 | `app_users` | – | non-secret columns; INSERT, UPDATE `password_hash`/`role`, DELETE | – | – |
 | `auth_fetch_user()` | – | – | – | EXECUTE |
@@ -250,7 +269,7 @@ The full matrix is in [sql/README.md](../sql/README.md#roles-and-privileges) and
 
 ### Identifiers and inputs
 
-- **No SQL identifier comes from user input.** Table and channel names come from a fixed whitelist (`db::DummyTable`), and values travel as bind parameters.
+- **No SQL identifier comes from user input.** Table and channel names come from a fixed whitelist (`db::Payload`), and values travel as bind parameters. Device names are values, not identifiers; the server also checks them against the `device.name` format (`db::valid_device_name`) and answers `400` before querying.
 - **Secrets stay out of argv and git.** `db-init.sh` generates the login passwords and the first admin password into `run/demo.env` (mode 0600, gitignored), and passes passwords to `psql` as variables, never on the command line. The client stores the token as a 0600 header file and sends it with `curl -H @file`, so neither the token nor a password shows up in a process listing.
 
 ## 8. Failure semantics
@@ -258,9 +277,12 @@ The full matrix is in [sql/README.md](../sql/README.md#roles-and-privileges) and
 | Situation | What happens |
 |---|---|
 | Controller down, admin posts a configuration | Request stored as `PENDING`. API answers `202` after the timeout. Applied at controller start-up (or `EXPIRED` if too old). |
-| Controller rejects a value | `dummy_config_errors` row, status `ERROR`, `error_events` wakes the waiter. API answers `422` with `error_code`. |
+| Controller rejects a value | `device_config_errors` row, status `ERROR`, `error_events` wakes the waiter. API answers `422` with `error_code`. |
+| Device registered while the controller is down | Row stored, configuration `UNINITIALISED`, `POST /api/config` answers `409`. At start-up the controller writes the type defaults and starts the producer. |
+| Device removed | State, configuration and queued requests cascade away; telemetry and audits stay. The controller stops the producer on `device_events DELETE`. |
 | Notification missed (listener restarted between commit and wait) | Dispatcher times out. The server reads the row and answers from it. |
-| Listener connection lost | `listener_alive()` turns false, the process exits with status 1, and the supervisor restarts it. On restart the controller drains the queue again. |
+| Listener connection lost | `listener_alive()` turns false, the process exits with status 1, and the supervisor restarts it. On restart the controller reads every device and drains the queue again. |
+| Duplicate device name | Unique violation `23505`, mapped to `409`. Unknown device type: `400`. |
 | Two controllers running | `SKIP LOCKED`: each request is processed exactly once. Both producers write, so in practice run one. |
 | Duplicate username | Unique violation `23505`, mapped to `409`. |
 | Invalid username format, last-admin removal | `CHECK` or trigger (`23514`), mapped to `422`. |
