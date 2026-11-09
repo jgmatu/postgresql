@@ -14,12 +14,21 @@
 #
 #   devices                           every device and its last sample
 #   devices types                     device types: payload and default configuration
-#   devices add NAME TYPE             admin; TYPE: sine | sawtooth | gps_orbit
+#   devices add NAME TYPE             admin; TYPE: sine | sawtooth | gps_orbit; waits for
+#                                     the certificate (201), or 202 if still enrolling
 #   devices del NAME                  admin; the telemetry is kept
-#   data DEVICE                       one device: last sample and config sync state
+#   devices certs NAME                every certificate the device has had, newest first
+#   devices revoke NAME REASON        admin; REASON: unspecified | keyCompromise |
+#                                     affiliationChanged | cessationOfOperation |
+#                                     certificateHold (the only one that can be lifted)
+#   devices unrevoke NAME             admin; lift a certificateHold
+#   devices rotate NAME               admin; new key and certificate, the old one superseded
+#   devices delcert NAME SERIAL       admin; deleting the current one deletes the device
+#   devices enrollments [NAME]        enrollment and rotation requests, newest first
+#   data DEVICE                       one device: last sample, config sync state, identity
 #   history DEVICE [limit=N] [from=TS] [to=TS]
 #   monitor [CHANNELS] [DEVICES]      live SSE; CHANNELS from telemetry_scalar,
-#                                     telemetry_gps,device,config,error (default all),
+#                                     telemetry_gps,device,config,enrollment,error (default all),
 #                                     DEVICES a comma-separated filter (default all)
 #
 #   config status                     applied vs desired, per device
@@ -31,6 +40,9 @@
 #   users list                        admin only
 #   users add NAME [admin|normal]     password from $PGDEMO_NEW_PASSWORD or a prompt
 #   users del NAME
+#
+#   pki ca                            root CAs, the signing one, and the revoked serials
+#   pki crl                           the CRL in PEM: pgdemo.sh pki crl | openssl crl -text
 #
 # Environment:
 #   PGDEMO_URL    base URL override, for Docker and the e2e suite (host port 8080, HTTPS)
@@ -57,7 +69,7 @@ need() { command -v "$1" >/dev/null || die "$1 not found (apt install $1)"; }
 need curl
 need jq
 
-usage() { sed -n '2,42p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,54p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 auth_args() {
     [[ -f "${TOKEN_FILE}" ]] || die "not logged in (client/pgdemo.sh login)"
@@ -192,7 +204,7 @@ cmd_burst() {
 }
 
 cmd_monitor() {
-    local channels="${1:-telemetry_scalar,telemetry_gps,device,config,error}" devices="${2:-}"
+    local channels="${1:-telemetry_scalar,telemetry_gps,device,config,enrollment,error}" devices="${2:-}"
     local -a a
     mapfile -t a < <(auth_args)
     echo "streaming ${channels}${devices:+ for ${devices}} (Ctrl-C to stop)" >&2
@@ -221,7 +233,34 @@ cmd_devices() {
                 authed POST /api/devices -H 'Content-Type: application/json' --data-binary @-
             ;;
         del|delete) [[ $# -eq 1 ]] || die "devices del NAME"; authed DELETE "/api/devices/$1" ;;
+        certs) [[ $# -eq 1 ]] || die "devices certs NAME"; authed GET "/api/devices/$1/certificates" ;;
+        revoke)
+            [[ $# -eq 2 ]] || die "devices revoke NAME REASON"
+            jq -nc --arg r "$2" '{reason: $r}' |
+                authed POST "/api/devices/$1/revoke" -H 'Content-Type: application/json' --data-binary @-
+            ;;
+        unrevoke) [[ $# -eq 1 ]] || die "devices unrevoke NAME"; authed DELETE "/api/devices/$1/revoke" ;;
+        rotate) [[ $# -eq 1 ]] || die "devices rotate NAME"; authed POST "/api/devices/$1/rotate" ;;
+        delcert)
+            [[ $# -eq 2 ]] || die "devices delcert NAME SERIAL"
+            authed DELETE "/api/devices/$1/certificates/$2"
+            ;;
+        enrollments)
+            local args=()
+            [[ $# -ge 1 ]] && args+=("device=$1")
+            authed GET "/api/enrollments$(query "${args[@]}")"
+            ;;
         *) die "unknown devices command '${sub}'" ;;
+    esac
+}
+
+cmd_pki() {
+    local sub="${1:-ca}"
+    shift || true
+    case "${sub}" in
+        ca) authed GET /api/pki/ca ;;
+        crl) authed GET /api/pki/crl ;;
+        *) die "unknown pki command '${sub}'" ;;
     esac
 }
 
@@ -264,6 +303,7 @@ main() {
         config) cmd_config "$@" ;;
         burst) cmd_burst "$@" ;;
         users) cmd_users "$@" ;;
+        pki) cmd_pki "$@" ;;
         help|-h|--help) usage ;;
         *) usage; exit 2 ;;
     esac

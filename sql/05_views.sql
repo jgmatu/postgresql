@@ -6,7 +6,7 @@
   Object                          demo_normal  demo_admin        demo_controller   demo_server (base)
   ------------------------------  -----------  ----------------  ----------------  ------------------
   device_type                     SELECT       SELECT            SELECT            -
-  device                          SELECT       SELECT/INS/DEL    SELECT            -
+  device                          SELECT       SELECT/DELETE     SELECT            -
   device_state                    SELECT       SELECT            SELECT/INS/UPD    -
   telemetry_scalar, telemetry_gps SELECT       SELECT            INSERT            -
   device_config                   SELECT       SELECT            SELECT/INS/UPD    -
@@ -14,13 +14,24 @@
   device_config_errors            SELECT       SELECT            INSERT            -
   device_config_history           SELECT       SELECT            INSERT            -
   device_config_pending_history   -            INSERT            -                 -
+  root_ca                         SELECT       SELECT            SELECT            SELECT
+  device_certificate              SELECT       SELECT/DELETE     SELECT            -
+  crl                             SELECT       SELECT/INS/UPD/DEL SELECT           -
+  device_enrollment               SELECT       SELECT/INSERT     SELECT/UPD status SELECT
+  device_session                  SELECT       SELECT            SELECT/INS/UPD    -
   request_id_seq                  -            USAGE             -                 -
   app_users                       -            non-secret cols   -                 -
-  v_devices                       SELECT       SELECT            -                 -
+  v_devices, v_device_identity    SELECT       SELECT            v_device_identity -
   v_device_config_sync_status     SELECT       SELECT            -                 -
   v_users_directory               -            SELECT            -                 -
   auth_fetch_user()               -            -                 -                 EXECUTE
+  issue_device_certificate()      -            -                 -                 EXECUTE
+  reject_enrollment()             -            -                 -                 EXECUTE
   ensure_monthly_partitions()     -            -                 EXECUTE           -
+
+Nobody may INSERT into device: a device exists only through
+issue_device_certificate(), together with its certificate. The crl triggers
+keep every reason but certificateHold permanent.
 
 demo_admin inherits the demo_normal column. The JWT role decides which group
 the server switches into (SET LOCAL ROLE) for each request, so the database
@@ -30,7 +41,47 @@ enforces the same authorization as the HTTP layer.
 SET search_path = public, extensions;
 SET ROLE demo_owner;
 
--- Every device with its type and last sample. GPS devices expose lon and lat.
+-- Per device: its current certificate and what that certificate allows.
+--   ACTIVE       valid, not revoked, CA active
+--   SUSPENDED    current certificate on hold (certificateHold), reversible
+--   REVOKED      current certificate revoked for any other reason
+--   CA_INACTIVE  issuing CA disabled or expired
+--   EXPIRED      outside the certificate's validity period
+-- Only ACTIVE devices get a running process from the controller.
+CREATE OR REPLACE VIEW v_device_identity AS
+SELECT
+    d.device_id,
+    d.name                AS device,
+    c.cert_id,
+    c.serial,
+    c.fingerprint_sha256  AS fingerprint,
+    r.name                AS ca,
+    r.fingerprint_sha256  AS ca_fingerprint,
+    c.not_before,
+    c.not_after,
+    c.issued_at,
+    x.reason              AS revocation_reason,
+    x.revoked_at,
+    CASE
+        WHEN x.reason = 'certificateHold' THEN 'SUSPENDED'
+        WHEN x.serial IS NOT NULL THEN 'REVOKED'
+        WHEN NOT r.is_active OR r.not_after <= now() THEN 'CA_INACTIVE'
+        WHEN c.not_after <= now() OR c.not_before > now() THEN 'EXPIRED'
+        ELSE 'ACTIVE'
+    END                   AS identity,
+    (SELECT count(*) FROM device_certificate h WHERE h.device_id = d.device_id) AS certificates,
+    s.state               AS session,
+    s.pid,
+    s.connected_at,
+    s.last_seen,
+    s.last_error
+FROM device d
+JOIN device_certificate c ON c.cert_id = d.cert_id
+JOIN root_ca r ON r.ca_id = c.ca_id
+LEFT JOIN crl x ON x.ca_id = c.ca_id AND x.serial = c.serial
+LEFT JOIN device_session s ON s.device_id = d.device_id;
+
+-- Every device with its type, last sample and identity. GPS devices expose lon and lat.
 CREATE OR REPLACE VIEW v_devices AS
 SELECT
     d.device_id,
@@ -42,10 +93,13 @@ SELECT
     ST_Y(s.position::geometry)     AS lat,
     s.seq,
     s.updated_at,
-    d.created_at
+    d.created_at,
+    i.identity,
+    i.session
 FROM device d
 JOIN device_type t USING (type_id)
-LEFT JOIN device_state s USING (device_id);
+LEFT JOIN device_state s USING (device_id)
+LEFT JOIN v_device_identity i USING (device_id);
 
 -- Per device: applied configuration, latest desired request, sync status and
 -- latest error. A device without applied state yet is UNINITIALISED.
@@ -110,12 +164,16 @@ GRANT USAGE ON SCHEMA public TO demo_normal, demo_admin, demo_controller, demo_s
 -- demo_normal: read-only monitoring
 GRANT SELECT ON device_type, device, device_state, telemetry_scalar, telemetry_gps TO demo_normal;
 GRANT SELECT ON device_config, device_config_pending, device_config_errors, device_config_history TO demo_normal;
-GRANT SELECT ON v_devices, v_device_config_sync_status TO demo_normal;
+GRANT SELECT ON v_devices, v_device_config_sync_status, v_device_identity TO demo_normal;
+GRANT SELECT ON root_ca, device_certificate, crl, device_enrollment, device_session TO demo_normal;
 
--- demo_admin: inherits demo_normal (00_roles.sql), plus device registry, enqueue
--- and user management. Identity columns need no sequence privilege.
-GRANT INSERT (name, type_id) ON device TO demo_admin;
-GRANT DELETE ON device TO demo_admin;
+-- demo_admin: inherits demo_normal (00_roles.sql), plus enrollment, revocation,
+-- removal, enqueue and user management. Identity columns need no sequence privilege.
+GRANT DELETE ON device, device_certificate TO demo_admin;
+GRANT INSERT (request_id, kind, name, type_id, device_id, requested_by) ON device_enrollment TO demo_admin;
+GRANT INSERT (ca_id, serial, fingerprint_sha256, device_name, cert_pem, reason, revoked_by) ON crl TO demo_admin;
+GRANT UPDATE (reason, revoked_at, revoked_by) ON crl TO demo_admin;
+GRANT DELETE ON crl TO demo_admin;
 GRANT INSERT ON device_config_pending, device_config_pending_history TO demo_admin;
 GRANT USAGE ON SEQUENCE request_id_seq TO demo_admin;
 GRANT SELECT (user_id, username, role, created_at, updated_at) ON app_users TO demo_admin;
@@ -124,8 +182,13 @@ GRANT UPDATE (password_hash, role) ON app_users TO demo_admin;
 GRANT DELETE ON app_users TO demo_admin;
 GRANT SELECT ON v_users_directory TO demo_admin;
 
--- demo_server base role: login lookup only
+-- demo_server base role: login lookup and the certificate authority
 GRANT EXECUTE ON FUNCTION auth_fetch_user(text) TO demo_server;
+GRANT SELECT ON root_ca TO demo_server;
+GRANT SELECT (request_id, kind, name, type_id, status, csr_pem, requested_by) ON device_enrollment TO demo_server;
+GRANT EXECUTE ON FUNCTION issue_device_certificate(bigint, text, text, text, text, timestamptz, timestamptz, text)
+    TO demo_server;
+GRANT EXECUTE ON FUNCTION reject_enrollment(bigint, text, text) TO demo_server;
 
 -- demo_controller: zone B worker
 GRANT SELECT ON device_type, device TO demo_controller;
@@ -133,4 +196,7 @@ GRANT SELECT, INSERT, UPDATE ON device_state, device_config TO demo_controller;
 GRANT INSERT ON telemetry_scalar, telemetry_gps TO demo_controller;
 GRANT SELECT, UPDATE ON device_config_pending TO demo_controller;
 GRANT INSERT ON device_config_history, device_config_errors TO demo_controller;
+GRANT SELECT ON root_ca, device_certificate, crl, device_enrollment, v_device_identity TO demo_controller;
+GRANT UPDATE (status, csr_pem, csr_at, error_code, error_detail, decided_at) ON device_enrollment TO demo_controller;
+GRANT SELECT, INSERT, UPDATE ON device_session TO demo_controller;
 GRANT EXECUTE ON FUNCTION ensure_monthly_partitions(regclass, date, int) TO demo_controller;

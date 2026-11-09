@@ -7,6 +7,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -189,8 +190,8 @@ public:
     void write_gps_sample(const TrackSample& sample);
 
     /**
-     * @brief Every registered device with its type (controller start-up, no SET ROLE).
-     * @return devices ordered by `device_id`
+     * @brief Every device with its type and current certificate (controller, no SET ROLE).
+     * @return devices ordered by `device_id`, whatever their identity
      */
     std::vector<Device> load_devices();
 
@@ -209,7 +210,8 @@ public:
     boost::json::value fetch_devices(DbRole role);
 
     /**
-     * @brief One `v_devices` row plus its `v_device_config_sync_status` row as `config`.
+     * @brief One `v_devices` row plus `config` (its `v_device_config_sync_status`
+     * row), `certificate` and `process` (its `v_device_identity` row, split).
      * @param role group used for `SET LOCAL ROLE`
      * @param name device name
      * @return the device as a JSON object, or `std::nullopt` when it does not exist
@@ -241,19 +243,9 @@ public:
     boost::json::value fetch_device_types(DbRole role);
 
     /**
-     * @brief Register a device. The trigger fires `device_events` on commit.
-     * @param role    group used for `SET LOCAL ROLE`; must be admin
-     * @param name    unique device name (`valid_device_name()`)
-     * @param type_id existing `device_type.type_id`
-     * @return the new device as a JSON object, or `std::nullopt` when the type does not exist
-     * @throws pqxx::sql_error SQLSTATE 23505 when the name exists
-     */
-    std::optional<boost::json::value> create_device(DbRole role, const std::string& name,
-                                                    const std::string& type_id);
-
-    /**
-     * @brief Remove a device. State, configuration and queued requests go with it
-     * (`ON DELETE CASCADE`); telemetry and audit rows stay. Fires `device_events`.
+     * @brief Remove a device. Certificates, state, configuration, queued requests
+     * and session go with it (`ON DELETE CASCADE`); telemetry, audit and CRL rows
+     * stay. Fires `device_events`.
      * @param role group used for `SET LOCAL ROLE`; must be admin
      * @param name device name
      * @return false when no such device
@@ -358,6 +350,183 @@ public:
      */
     boost::json::value fetch_config_history(DbRole role, const std::optional<std::string>& device,
                                             int limit);
+
+    // -------------------------------------------------------------- enrollment
+
+    /**
+     * @brief Queue the enrollment of a new device. Nothing is created yet: the
+     * device appears when its certificate is issued. Fires `enrollment_requested`.
+     * @param role         group used for `SET LOCAL ROLE`; must be admin
+     * @param request_id   from `generate_request_id()`, so a waiter can be registered first
+     * @param name         device name, and the CN of its certificate
+     * @param type_id      existing `device_type.type_id`
+     * @param requested_by username of the admin
+     * @return false when the type does not exist (nothing queued)
+     * @throws pqxx::sql_error SQLSTATE 23505 when the device exists or is already enrolling
+     */
+    bool enqueue_enrollment(DbRole role, std::int64_t request_id, const std::string& name,
+                            const std::string& type_id, const std::string& requested_by);
+
+    /**
+     * @brief Queue a key rotation of an existing device. Fires `enrollment_requested`.
+     * @param role         group used for `SET LOCAL ROLE`; must be admin
+     * @param request_id   from `generate_request_id()`
+     * @param name         device name
+     * @param requested_by username of the admin
+     * @return false when the device does not exist (nothing queued)
+     * @throws pqxx::sql_error SQLSTATE 23505 when a rotation is already open
+     */
+    bool enqueue_rotation(DbRole role, std::int64_t request_id, const std::string& name,
+                          const std::string& requested_by);
+
+    /**
+     * @brief One `device_enrollment` row (without the CSR) as JSON.
+     * @param role       group used for `SET LOCAL ROLE`
+     * @param request_id the request
+     * @return the row, or `std::nullopt` when it does not exist
+     */
+    std::optional<boost::json::value> fetch_enrollment(DbRole role, std::int64_t request_id);
+
+    /**
+     * @brief Enrollment and rotation requests, newest first, without CSRs.
+     * @param role   group used for `SET LOCAL ROLE`
+     * @param device only this device name, or every request
+     * @param limit  maximum number of rows
+     * @return JSON array
+     */
+    boost::json::value fetch_enrollments(DbRole role, const std::optional<std::string>& device, int limit);
+
+    /**
+     * @brief Server session: the request whose CSR is to be signed.
+     * @param request_id the request
+     * @return the row, or `std::nullopt` when it does not exist
+     */
+    std::optional<Enrollment> fetch_csr(std::int64_t request_id);
+
+    /**
+     * @brief Server session: record a signed certificate through
+     * `issue_device_certificate()`. Fires `enrollment_events` (and `device_events`).
+     * @param request_id     enrollment in CSR_SUBMITTED
+     * @param ca_fingerprint SHA-256 of the issuing CA, which must be an active `root_ca`
+     * @param cert           the certificate
+     * @return the device and the new certificate
+     * @throws pqxx::sql_error when the request is not open, the CN differs or the CA is unknown
+     */
+    IssueResult issue_certificate(std::int64_t request_id, const std::string& ca_fingerprint,
+                                  const IssuedCertificate& cert);
+
+    /**
+     * @brief Server session: refuse a CSR. Fires `enrollment_events`.
+     * @return false when the request was no longer open
+     */
+    bool reject_enrollment(std::int64_t request_id, const std::string& code, const std::string& detail);
+
+    /// Server session: SHA-256 fingerprints of the active root CAs.
+    std::vector<std::string> active_root_fingerprints();
+
+    /// Server session: requests whose CSR waits for a signature, oldest first.
+    std::vector<std::int64_t> submitted_csr_ids();
+
+    /// Controller: every PENDING request, oldest first.
+    std::vector<Enrollment> pending_enrollments();
+
+    /// Controller: one request, or `std::nullopt` when it does not exist.
+    std::optional<Enrollment> load_enrollment(std::int64_t request_id);
+
+    /**
+     * @brief Controller: store the CSR a device process produced (PENDING to
+     * CSR_SUBMITTED). Fires `enrollment_csr`.
+     * @return false when the request was no longer PENDING
+     */
+    bool submit_csr(std::int64_t request_id, const std::string& csr_pem);
+
+    /**
+     * @brief Controller: give up on an open request (device process failed).
+     * Fires `enrollment_events`.
+     * @return false when the request was no longer open
+     */
+    bool fail_enrollment(std::int64_t request_id, const std::string& code, const std::string& detail);
+
+    /**
+     * @brief Controller: mark requests open for longer than `max_age` as EXPIRED.
+     * @return the expired request ids
+     */
+    std::vector<std::int64_t> expire_enrollments(std::chrono::seconds max_age);
+
+    /// Controller: status of a request and, once ISSUED, its certificate.
+    std::optional<EnrollmentOutcome> enrollment_outcome(std::int64_t request_id);
+
+    // ---------------------------------------------------------------- identity
+
+    /// Controller: PEM of every active root CA, the trust anchors of `CertVerifier`.
+    std::vector<std::string> load_root_pems();
+
+    /// Controller: serial of every revoked certificate.
+    std::set<std::string> load_revoked_serials();
+
+    /**
+     * @brief Every certificate a device has had, newest first, with `current`
+     * and its revocation.
+     * @param role group used for `SET LOCAL ROLE`
+     * @param name device name
+     * @return JSON array, or `std::nullopt` when the device does not exist
+     */
+    std::optional<boost::json::value> fetch_certificates(DbRole role, const std::string& name);
+
+    /**
+     * @brief Revoke the current certificate of a device. A certificateHold may
+     * later be lifted or made permanent; any other reason is final. Fires `device_events`.
+     * @param role       group used for `SET LOCAL ROLE`; must be admin
+     * @param name       device name
+     * @param reason     RFC 5280 reason name (see the `crl.reason` check)
+     * @param revoked_by username of the admin
+     */
+    RevokeResult revoke_certificate(DbRole role, const std::string& name, const std::string& reason,
+                                    const std::string& revoked_by);
+
+    /**
+     * @brief Lift the hold on the current certificate of a device. Fires `device_events`.
+     * @param role group used for `SET LOCAL ROLE`; must be admin
+     * @param name device name
+     */
+    UnrevokeResult unrevoke_certificate(DbRole role, const std::string& name);
+
+    /**
+     * @brief Delete one certificate of a device. Deleting the current one
+     * deletes the device (`device_current_cert_fk ON DELETE CASCADE`).
+     * @param role   group used for `SET LOCAL ROLE`; must be admin
+     * @param name   device name
+     * @param serial certificate serial, lowercase hex
+     */
+    DeleteCertResult delete_certificate(DbRole role, const std::string& name, const std::string& serial);
+
+    /// `root_ca` rows (with PEM) as a JSON array.
+    boost::json::value fetch_root_cas(DbRole role);
+
+    /// `crl` rows (without PEM) as a JSON array, newest first.
+    boost::json::value fetch_crl_entries(DbRole role);
+
+    /// Every revoked certificate with its reason, for `CertificateAuthority::crl_pem()`.
+    std::vector<RevokedPem> load_crl(DbRole role);
+
+    // ----------------------------------------------------------------- session
+
+    /**
+     * @brief Controller: record the state of a device process. A change of state
+     * fires `device_events`. A device deleted meanwhile is ignored.
+     * @param device_id the device
+     * @param state     STARTING, ONLINE, OFFLINE, UNMANAGED, AUTH_FAILED or DISABLED
+     * @param pid       process id, when there is one
+     * @param error     last error, if any
+     */
+    void upsert_session(int device_id, const std::string& state, std::optional<int> pid,
+                        const std::optional<std::string>& error = std::nullopt);
+
+    /// Controller: set `last_seen` of these devices to now.
+    void touch_sessions(const std::vector<int>& device_ids);
+
+    /// Controller: every STARTING or ONLINE session becomes OFFLINE (start-up and shutdown).
+    void reset_sessions();
 
     // ------------------------------------------------------------------- users
 

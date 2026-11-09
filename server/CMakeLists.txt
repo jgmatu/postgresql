@@ -14,6 +14,7 @@ target_link_libraries(pgdemo-server PRIVATE
     pgdemo::dispatcher
     pgdemo::db
     pgdemo::auth
+    pgdemo::pki
     pgdemo::log
     oatpp
     oatpp-openssl

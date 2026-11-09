@@ -45,5 +45,24 @@
 
 /**
  * @namespace pgdemo::controller
- * @brief `pgdemo-controller`: data-plane producers and the configuration queue worker.
+ * @brief `pgdemo-controller`: supervises one `pgdemo-device` process per device
+ * (fork + execv), authenticates each over a Unix socket, stores its samples, and
+ * works the configuration and enrollment queues.
+ */
+
+/**
+ * @namespace pgdemo::pki
+ * @brief Device identity on Botan 3: the internal root CA (signs CSRs and CRLs),
+ * the device key (P-384, CSR, proofs) and the controller's certificate verifier.
+ */
+
+/**
+ * @namespace pgdemo::wire
+ * @brief Controller and device protocol: length-prefixed JSON frames over a Unix socket.
+ */
+
+/**
+ * @namespace pgdemo::device
+ * @brief `pgdemo-device`: one simulated device process. Signal generators and the
+ * online sample stream.
  */

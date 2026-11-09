@@ -6,6 +6,17 @@ target_link_libraries(auth_tests PRIVATE pgdemo::auth GTest::gtest_main)
 target_compile_options(auth_tests PRIVATE ${PGDEMO_WARNINGS})
 gtest_discover_tests(auth_tests)
 
+add_executable(pki_tests unit/pki_tests.cpp)
+target_link_libraries(pki_tests PRIVATE pgdemo::pki GTest::gtest_main)
+target_compile_options(pki_tests PRIVATE ${PGDEMO_WARNINGS})
+gtest_discover_tests(pki_tests)
+
+add_executable(wire_tests unit/wire_tests.cpp)
+target_include_directories(wire_tests PRIVATE ${PROJECT_SOURCE_DIR}/device/src)
+target_link_libraries(wire_tests PRIVATE pgdemo::wire pgdemo::log GTest::gtest_main)
+target_compile_options(wire_tests PRIVATE ${PGDEMO_WARNINGS})
+gtest_discover_tests(wire_tests)
+
 add_executable(dispatcher_tests unit/dispatcher_tests.cpp)
 target_link_libraries(dispatcher_tests PRIVATE pgdemo::dispatcher GTest::gtest_main)
 target_compile_options(dispatcher_tests PRIVATE ${PGDEMO_WARNINGS})
@@ -18,6 +29,7 @@ gtest_discover_tests(connection_pool_tests)
 
 # Needs a database prepared by scripts/db-init.sh; see the header of db_tests.cpp.
 add_executable(db_tests db/db_tests.cpp)
-target_link_libraries(db_tests PRIVATE pgdemo::db pgdemo::dispatcher GTest::gtest_main)
+target_link_libraries(db_tests PRIVATE pgdemo::db pgdemo::dispatcher pgdemo::pki GTest::gtest_main)
+target_compile_definitions(db_tests PRIVATE PGDEMO_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
 target_compile_options(db_tests PRIVATE ${PGDEMO_WARNINGS})
 gtest_discover_tests(db_tests PROPERTIES LABELS db)

@@ -56,6 +56,7 @@ jobs:
           . run/demo.env
           export PGDEMO_TEST_SERVER_CONNINFO="host=postgres dbname=pgdemo user=demo_server password=${DEMO_SERVER_DB_PASSWORD}"
           export PGDEMO_TEST_CONTROLLER_CONNINFO="host=postgres dbname=pgdemo user=demo_controller password=${DEMO_CONTROLLER_DB_PASSWORD}"
+          export PGDEMO_TEST_OWNER_CONNINFO="host=postgres dbname=pgdemo user=postgres password=${PGPASSWORD}"
           ctest --test-dir build -L db --output-on-failure
 
   docs:

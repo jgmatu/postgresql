@@ -1,6 +1,7 @@
 *** Settings ***
-Documentation     A device registered through the API: the controller initialises and drives it,
-...               its telemetry reaches an SSE stream filtered to that device, it is reconfigured,
+Documentation     A device enrolled through the API: the controller starts its process, which generates
+...               a key and a CSR, the server signs it, and the process proves it holds the key.
+...               Its telemetry reaches an SSE stream filtered to that device, it is reconfigured,
 ...               and its removal keeps the telemetry. No schema change, no restart.
 Resource          resources/api.resource
 Library           Process
@@ -14,10 +15,23 @@ ${SSE_FILE}       ${WORK}${/}sse-${DEVICE}.txt
 
 
 *** Test Cases ***
-Admin registers a device (201)
-    ${dev}=    Client Json    devices    add    ${DEVICE}    sine
-    Should Be Equal    ${dev}[device]    ${DEVICE}
-    Should Be Equal    ${dev}[payload]    scalar
+Admin enrolls a device (201 once its certificate is issued)
+    ${headers}=    Auth Headers
+    &{body}=    Create Dictionary    name=${DEVICE}    type=sine
+    ${response}=    HTTP Status Should Be    201    POST    /api/devices    headers=${headers}    json=${body}
+    ${result}=    Set Variable    ${response.json()}
+    Should Be Equal    ${result}[status]    ISSUED
+    Should Be Equal    ${result}[enrollment][kind]    ENROLL
+    Should Be Equal    ${result}[device][device]    ${DEVICE}
+    Should Be Equal    ${result}[device][payload]    scalar
+    Should Match Regexp    ${result}[device][certificate][serial]    ^[0-9a-f]{1,40}$
+    Should Be Equal    ${result}[device][identity]    ACTIVE
+
+The device process authenticates with its own key
+    Wait Until Keyword Succeeds    15s    0.5s    Session Should Be    ${DEVICE}    ONLINE
+    ${dev}=    Client Json    data    ${DEVICE}
+    Should Be True    ${dev}[process][pid] > 0
+    Compose    exec    -T    controller    test    -f    /app/run/devices/${DEVICE}/key.pem
 
 Duplicate device name is 409
     ${headers}=    Auth Headers
@@ -73,6 +87,9 @@ Removed device leaves the config status
     ${names}=    Evaluate    [row['device'] for row in $status]
     Should Not Contain    ${names}    ${DEVICE}
     Should Contain    ${names}    dummy1
+
+Removed device loses its process and its key
+    Wait Until Keyword Succeeds    15s    0.5s    Controller Path Should Not Exist    /app/run/devices/${DEVICE}
 
 
 *** Keywords ***

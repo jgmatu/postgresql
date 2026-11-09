@@ -1,64 +1,80 @@
 // pgdemo-controller: zone B process.
 //
-// Writes the data plane (device_state and the partitioned telemetry tables) for
-// every registered device and applies desired configuration from the
-// device_config_pending queue. It never talks to the server; PostgreSQL is the
-// only channel.
+// Supervises one pgdemo-device process per device (fork + execv), each
+// connected back over a Unix socket and authenticated with its X.509
+// certificate. It writes the samples they send to the data plane and applies
+// desired configuration from the device_config_pending queue. It never talks
+// to the server; PostgreSQL is the only channel.
 //
-//   device_events    --> start / stop the device's Producer
-//   config_requested --> drain PENDING --> validate --> commit applied | error
-//                                                  \--> Producer::apply()
+//   enrollment_requested --> start the device with --enroll / --rotate
+//   enrollment_events    --> deliver the issued certificate to its process
+//   device_events        --> stop / restart on delete, revocation, rotation
+//   config_requested     --> drain PENDING --> validate --> commit --> config frame
+
+#include <pthread.h>
+#include <unistd.h>
 
 #include <csignal>
 #include <cstddef>
 #include <cstdlib>
+#include <filesystem>
 #include <format>
 #include <iostream>
-#include <map>
-#include <memory>
-#include <mutex>
 #include <string>
 #include <string_view>
-#include <vector>
+
+#include <boost/asio.hpp>
 
 #include <db/DatabaseManager.hpp>
 #include <log/Log.hpp>
 
-#include "Producer.hpp"
+#include "Fleet.hpp"
 
 namespace {
 
 using namespace pgdemo;
+namespace fs = std::filesystem;
 
 constexpr std::string_view kLog = "controller";
-
-template <typename F>
-struct ScopeExit
-{
-    F fn;
-    ~ScopeExit() { fn(); }
-};
 
 struct Options
 {
     std::string conninfo;
     std::size_t pool_size = db::DatabaseManager::kDefaultPoolSize;
-    int pending_max_age_s = 600;
-    int maintenance_interval_s = 3600;
+    controller::FleetOptions fleet;
 };
 
 void usage()
 {
     std::cout << "Usage: pgdemo-controller [options]\n"
-                 "  --conninfo STR             libpq connection string (default: PG* environment)\n"
-                 "  --pool-size N              query connections (default 8)\n"
-                 "  --pending-max-age-s N      PENDING requests older than this become TIMEOUT (default 600)\n"
-                 "  --maintenance-interval-s N partition maintenance period (default 3600)\n";
+                 "  --conninfo STR               libpq connection string (default: PG* environment)\n"
+                 "  --pool-size N                query connections and database threads (default 8)\n"
+                 "  --max-devices N              device processes run at once; the rest are UNMANAGED (default 16)\n"
+                 "  --device-bin PATH            pgdemo-device executable (default: next to this binary)\n"
+                 "  --devices-dir DIR            key directory of every device (default run/devices)\n"
+                 "  --socket PATH                socket the devices connect to (default DIR/.controller.sock)\n"
+                 "  --enrollment-timeout-s N     open enrollments older than this become EXPIRED (default 120)\n"
+                 "  --pending-max-age-s N        PENDING requests older than this become TIMEOUT (default 600)\n"
+                 "  --maintenance-interval-s N   partition maintenance period (default 3600)\n";
+}
+
+/// pgdemo-device next to this executable, or in the build tree's device/.
+std::string default_device_bin()
+{
+    std::error_code ec;
+    const fs::path self = fs::read_symlink("/proc/self/exe", ec);
+    if (ec) return "pgdemo-device";
+    for (const auto& candidate : {self.parent_path() / "pgdemo-device",
+                                  self.parent_path().parent_path() / "device" / "pgdemo-device"})
+        if (fs::exists(candidate)) return candidate.string();
+    return (self.parent_path() / "pgdemo-device").string();
 }
 
 Options parse(int argc, char** argv)
 {
     Options o;
+    std::string socket;
+    std::string devices_dir = "run/devices";
     for (int i = 1; i < argc; ++i)
     {
         const std::string_view a = argv[i];
@@ -66,114 +82,35 @@ Options parse(int argc, char** argv)
             if (i + 1 >= argc) throw std::invalid_argument(std::string(a) + " needs a value");
             return argv[++i];
         };
+        auto positive = [&](std::string_view what) {
+            const int v = std::stoi(next());
+            if (v < 1) throw std::invalid_argument(std::string(what) + " must be positive");
+            return v;
+        };
         if (a == "--conninfo") o.conninfo = next();
-        else if (a == "--pool-size") o.pool_size = std::stoul(next());
-        else if (a == "--pending-max-age-s") o.pending_max_age_s = std::stoi(next());
-        else if (a == "--maintenance-interval-s") o.maintenance_interval_s = std::stoi(next());
-        else if (a == "-h" || a == "--help") { usage(); std::exit(0); }
+        else if (a == "--pool-size") o.pool_size = static_cast<std::size_t>(positive(a));
+        else if (a == "--max-devices") o.fleet.max_devices = static_cast<std::size_t>(positive(a));
+        else if (a == "--device-bin") o.fleet.device_bin = next();
+        else if (a == "--devices-dir") devices_dir = next();
+        else if (a == "--socket") socket = next();
+        else if (a == "--enrollment-timeout-s") o.fleet.enrollment_timeout = std::chrono::seconds(positive(a));
+        else if (a == "--pending-max-age-s") o.fleet.pending_max_age = std::chrono::seconds(positive(a));
+        else if (a == "--maintenance-interval-s") o.fleet.maintenance_interval = std::chrono::seconds(positive(a));
+        else if (a == "-h" || a == "--help")
+        {
+            usage();
+            std::exit(0);
+        }
         else throw std::invalid_argument("unknown option " + std::string(a));
     }
-    if (o.pool_size < 1) throw std::invalid_argument("--pool-size must be at least 1");
-    if (o.pending_max_age_s < 1) throw std::invalid_argument("--pending-max-age-s must be positive");
-    if (o.maintenance_interval_s < 1) throw std::invalid_argument("--maintenance-interval-s must be positive");
+    // Device names cannot start with a dot, so the socket never clashes with a key directory.
+    o.fleet.devices_dir = fs::absolute(devices_dir);
+    o.fleet.socket_path = socket.empty() ? o.fleet.devices_dir / ".controller.sock" : fs::absolute(socket);
+    o.fleet.device_bin = o.fleet.device_bin.empty() ? default_device_bin() : fs::absolute(o.fleet.device_bin).string();
+    if (::access(o.fleet.device_bin.c_str(), X_OK) != 0)
+        throw std::invalid_argument("device binary " + o.fleet.device_bin + " is not executable");
     return o;
 }
-
-/// Validation of a desired configuration. Pure: no side effects.
-db::ConfigOutcome decide(const db::ConfigRequest& r)
-{
-    if (r.rate_ms < 50 || r.rate_ms > 10000)
-        return db::ConfigOutcome::failure("INVALID_RATE",
-                                          std::format("rate_ms {} outside [50, 10000]", r.rate_ms));
-    if (!(r.amplitude > 0.0) || r.amplitude > 1000.0)
-        return db::ConfigOutcome::failure("INVALID_AMPLITUDE",
-                                          std::format("amplitude {} outside (0, 1000]", r.amplitude));
-    return db::ConfigOutcome::success();
-}
-
-void ensure_partitions(db::DatabaseManager& db)
-{
-    for (const auto p : db::kAllPayloads)
-    {
-        for (const auto& name : db.ensure_history_partitions(p))
-            log::info(kLog, "created partition " + name);
-    }
-}
-
-/**
- * Running producers, one per device.
- *
- * Changed from the main thread (start-up) and from the listener thread
- * (`device_events`), read from the drain's `on_applied`. The mutex covers the
- * map only: database calls and `Producer::stop()` (which joins a thread) run
- * outside it.
- */
-class Fleet
-{
-public:
-    explicit Fleet(db::DatabaseManager& db) : db_(db) {}
-
-    /// Initialise the device's applied configuration if needed and start its producer.
-    void add(const db::Device& device)
-    {
-        {
-            std::lock_guard lock(mtx_);
-            if (producers_.contains(device.device_id)) return;
-        }
-        const auto cfg = db_.init_device_config(device.device_id);
-        if (!cfg)
-        {
-            log::warn(kLog, std::format("{}: device vanished before it could start", device.name));
-            return;
-        }
-        auto p = std::make_unique<controller::Producer>(db_, device, *cfg);
-        std::lock_guard lock(mtx_);
-        auto [it, inserted] = producers_.try_emplace(device.device_id, std::move(p));
-        if (inserted) it->second->start();
-    }
-
-    /// Stop and forget the device's producer, if any.
-    void remove(int device_id)
-    {
-        std::unique_ptr<controller::Producer> p;
-        {
-            std::lock_guard lock(mtx_);
-            auto node = producers_.extract(device_id);
-            if (node.empty()) return;
-            p = std::move(node.mapped());
-        }
-        p->stop();
-        log::info(kLog, std::format("{}: producer removed", p->device().name));
-    }
-
-    /// Forward a committed configuration to the device's producer.
-    void apply(const db::AppliedConfig& c)
-    {
-        std::lock_guard lock(mtx_);
-        if (const auto it = producers_.find(c.device_id); it != producers_.end()) it->second->apply(c);
-    }
-
-    void stop_all()
-    {
-        std::map<int, std::unique_ptr<controller::Producer>> all;
-        {
-            std::lock_guard lock(mtx_);
-            all.swap(producers_);
-        }
-        for (auto& [_, p] : all) p->stop();
-    }
-
-    std::size_t size()
-    {
-        std::lock_guard lock(mtx_);
-        return producers_.size();
-    }
-
-private:
-    db::DatabaseManager& db_;
-    std::mutex mtx_;
-    std::map<int, std::unique_ptr<controller::Producer>> producers_;
-};
 
 } // namespace
 
@@ -191,103 +128,51 @@ int main(int argc, char** argv)
         return 2;
     }
 
-    // Signals are handled synchronously by the main thread only. Block them
-    // before any thread starts so every thread inherits the mask.
+    // Blocked before any thread exists, so every thread inherits the mask; the
+    // io thread unblocks them for Asio's signal_set. Children start with an
+    // empty mask (see spawn_process).
     sigset_t sigs;
     sigemptyset(&sigs);
     sigaddset(&sigs, SIGINT);
     sigaddset(&sigs, SIGTERM);
+    sigaddset(&sigs, SIGCHLD);
     pthread_sigmask(SIG_BLOCK, &sigs, nullptr);
+    std::signal(SIGPIPE, SIG_IGN);
 
     try
     {
         db::DatabaseManager db(opt.conninfo, "pgdemo-controller", opt.pool_size);
         db.connect();
+        for (const auto p : db::kAllPayloads)
+            for (const auto& name : db.ensure_history_partitions(p)) log::info(kLog, "created partition " + name);
 
-        ensure_partitions(db);
+        boost::asio::io_context io(1);
+        boost::asio::thread_pool pool(opt.pool_size);
+        controller::Fleet fleet(io, pool, db, opt.fleet);
+        fleet.open_socket();
 
-        Fleet fleet(db);
-
-        // On every exit path: producers first (they write through db), then the
-        // listener (its callbacks reach the fleet), then the connections.
-        ScopeExit shutdown{[&] {
-            fleet.stop_all();
-            db.disconnect();
-        }};
-
-        const auto max_age = std::chrono::seconds(opt.pending_max_age_s);
-        auto drain = [&] {
-            const auto stats = db.drain_pending(
-                decide, [&](const db::AppliedConfig& c) { fleet.apply(c); }, max_age);
-            if (stats.applied + stats.rejected + stats.expired > 0)
-            {
-                log::info(kLog, std::format("queue drained: {} applied, {} rejected, {} expired",
-                                            stats.applied, stats.rejected, stats.expired));
-            }
-        };
-
-        // Registration phase, then activation.
-        db.register_listen_async(std::string(db::channel::kConfigRequested),
-                                 [&](const boost::json::object& msg) {
-                                     log::debug(kLog, "config_requested " + boost::json::serialize(msg));
-                                     drain();
-                                 });
-        db.register_listen_async(
-            std::string(db::channel::kDeviceEvents), [&](const boost::json::object& msg) {
-                const auto* payload = msg.if_contains("payload");
-                if (!payload || !payload->is_object()) return;
-                const auto& o = payload->as_object();
-                const auto* action = o.if_contains("action");
-                const auto* id = o.if_contains("device_id");
-                if (!action || !action->is_string() || !id || !id->is_int64()) return;
-                const int device_id = static_cast<int>(id->as_int64());
-                if (action->as_string() == "INSERT")
-                {
-                    if (const auto dev = db.load_device(device_id)) fleet.add(*dev);
-                }
-                else if (action->as_string() == "DELETE")
-                {
-                    fleet.remove(device_id);
-                }
-            });
+        // Registration phase, then activation. Callbacks only post to the io thread.
+        for (const auto channel : {db::channel::kEnrollmentRequested, db::channel::kEnrollmentEvents,
+                                   db::channel::kDeviceEvents, db::channel::kConfigRequested})
+            db.register_listen_async(std::string(channel),
+                                     [&fleet](boost::json::object msg) { fleet.notify(std::move(msg)); });
         db.run_listener_loop();
 
-        // LISTEN is active before these reads, so a device or request committed
-        // in between is either seen here or announced by a notification.
-        for (const auto& dev : db.load_devices()) fleet.add(dev);
-        drain();
+        // LISTEN is active before boot() reads devices and enrollments, so
+        // anything committed in between is either read or announced.
+        fleet.start();
+        pthread_sigmask(SIG_UNBLOCK, &sigs, nullptr);
+        io.run();
 
-        log::info(kLog, std::format("running {} device(s); Ctrl-C to stop", fleet.size()));
-
-        const timespec period{opt.maintenance_interval_s, 0};
-        for (;;)
-        {
-            const int sig = sigtimedwait(&sigs, nullptr, &period);
-            if (sig == SIGINT || sig == SIGTERM)
-            {
-                log::info(kLog, std::format("signal {} received, shutting down", sig));
-                break;
-            }
-            if (!db.listener_alive())
-            {
-                log::error(kLog, "listener connection lost; exiting so a supervisor can restart us");
-                return 1;
-            }
-            try
-            {
-                ensure_partitions(db);
-            }
-            catch (const std::exception& e)
-            {
-                log::error(kLog, std::string("partition maintenance failed: ") + e.what());
-            }
-        }
-
+        // Database work still queued finishes; then the listener stops before
+        // the fleet it posts to goes away.
+        pool.join();
+        db.disconnect();
+        return fleet.exit_code();
     }
     catch (const std::exception& e)
     {
         log::error(kLog, e.what());
         return 1;
     }
-    return 0;
 }

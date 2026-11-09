@@ -16,10 +16,12 @@ COPY cmake cmake
 COPY patches patches
 COPY libs libs
 COPY controller controller
+COPY device device
 COPY server server
 RUN cmake -S . -B /build -G Ninja -DCMAKE_BUILD_TYPE=Release -DPGDEMO_BUILD_TESTS=OFF \
  && cmake --build /build \
- && strip /build/server/pgdemo-server /build/server/oqsprovider.so /build/controller/pgdemo-controller
+ && strip /build/server/pgdemo-server /build/server/oqsprovider.so /build/controller/pgdemo-controller \
+          /build/device/pgdemo-device
 
 FROM ubuntu:26.04
 ARG DEBIAN_FRONTEND=noninteractive
@@ -36,7 +38,12 @@ COPY --from=build /build/server/pgdemo-server build/server/pgdemo-server
 COPY --from=build /build/server/oqsprovider.so build/server/oqsprovider.so
 COPY --from=build /build/server/openssl-oqs.cnf build/server/openssl-oqs.cnf
 COPY --from=build /build/controller/pgdemo-controller build/controller/pgdemo-controller
+COPY --from=build /build/device/pgdemo-device build/device/pgdemo-device
 COPY sql sql
 COPY scripts scripts
-RUN mkdir -p run && chown pgdemo:pgdemo run
+# run/ca and run/devices are mount points of the ca-keys and device-keys
+# volumes; a new volume copies this ownership and mode.
+RUN mkdir -p run/ca run/devices \
+ && chown -R pgdemo:pgdemo run \
+ && chmod 700 run/ca run/devices
 USER pgdemo

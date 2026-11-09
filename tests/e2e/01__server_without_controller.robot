@@ -1,5 +1,7 @@
 *** Settings ***
-Documentation     Server alone: authentication, and a configuration request queued while the controller is down.
+Documentation     Server alone: authentication, and the seed devices waiting for their certificates.
+...               A device exists only once its certificate does, and only the controller's
+...               device processes can produce the CSRs.
 Resource          resources/api.resource
 
 
@@ -25,7 +27,32 @@ Unknown user is 401
 Admin login
     Login As    admin    ${ADMIN_PASSWORD}
 
-Config set without controller is queued (202 PENDING)
-    ${queued}=    Client Json    config    set    dummy1    rate_ms=300
-    Should Be Equal    ${queued}[status]    PENDING
-    Set Global Variable    ${QUEUED_ID}    ${queued}[request_id]
+Seeds are PENDING enrollments without the controller
+    ${rows}=    Client Json    devices    enrollments
+    ${pending}=    Evaluate
+    ...    sorted(r['device'] for r in $rows if r['kind'] == 'ENROLL' and r['status'] == 'PENDING')
+    Should Be Equal    ${pending}    ${{ ['dummy1', 'dummy2', 'dummy3'] }}
+
+No device exists before its certificate
+    ${devices}=    Client Json    devices
+    Should Be Empty    ${devices}
+    ${headers}=    Auth Headers
+    HTTP Status Should Be    404    GET    /api/devices/dummy1    headers=${headers}
+
+Config for a device still enrolling is 404
+    ${headers}=    Auth Headers    content_type=application/json
+    HTTP Status Should Be    404    POST    /api/config    headers=${headers}
+    ...    data={"device":"dummy1","rate_ms":300}
+
+Enrollment without the controller stays in progress (202)
+    ${headers}=    Auth Headers
+    &{body}=    Create Dictionary    name=early-1    type=sine
+    ${response}=    HTTP Status Should Be    202    POST    /api/devices    headers=${headers}    json=${body}
+    Should Be Equal    ${response.json()}[status]    PENDING
+    Set Global Variable    ${EARLY_ID}    ${response.json()}[request_id]
+
+The device CA is published
+    ${ca}=    Client Json    pki    ca
+    Length Should Be    ${ca}[roots]    1
+    Should Be Equal    ${ca}[roots][0][fingerprint]    ${ca}[signing_fingerprint]
+    Should Be Empty    ${ca}[revoked]

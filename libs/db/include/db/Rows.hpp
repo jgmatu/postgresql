@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -8,13 +9,94 @@
 
 namespace pgdemo::db {
 
-/// One registered device (row of `device` joined with its `device_type`).
+/// One registered device: `device`, its `device_type` and its current certificate.
 struct Device
 {
     int device_id{0};                ///< identity key, used by every other table
     std::string name;                ///< unique, human-facing name; the API addresses devices by it
-    std::string type_id;             ///< `device_type.type_id`; selects the controller's generator
+    std::string type_id;             ///< `device_type.type_id`; selects the device's generator
     Payload payload{Payload::Scalar}; ///< telemetry table and channel of its samples
+    int cert_id{0};                  ///< current `device_certificate`
+    std::string serial;              ///< its serial, lowercase hex
+    std::string fingerprint;         ///< its SHA-256 fingerprint, lowercase hex
+    std::string cert_pem;            ///< the certificate itself
+    /// `v_device_identity.identity`: ACTIVE, SUSPENDED, REVOKED, CA_INACTIVE or EXPIRED.
+    std::string identity;
+
+    /// Only ACTIVE devices get a process.
+    [[nodiscard]] bool active() const noexcept { return identity == "ACTIVE"; }
+};
+
+/// One row of `device_enrollment`, as the controller and the server read it.
+struct Enrollment
+{
+    std::int64_t request_id{0};       ///< from `request_id_seq`
+    std::string kind;                 ///< `ENROLL` or `ROTATE`
+    std::string name;                 ///< device name, and the CN of the certificate
+    std::string type_id;              ///< device type
+    Payload payload{Payload::Scalar}; ///< payload of that type
+    std::optional<int> device_id;     ///< ROTATE: the device being re-keyed
+    std::string status;               ///< PENDING, CSR_SUBMITTED, ISSUED, REJECTED or EXPIRED
+    std::optional<std::string> csr_pem; ///< set once the device process submitted it
+    std::string requested_by;         ///< admin who asked for it
+};
+
+/// What became of an enrollment once it was decided.
+struct EnrollmentOutcome
+{
+    std::int64_t request_id{0};         ///< the request
+    std::string status;                 ///< ISSUED, REJECTED or EXPIRED (or still open)
+    std::optional<int> device_id;       ///< the device, once it exists
+    std::optional<std::string> cert_pem; ///< ISSUED: the new certificate
+    std::string error_code;             ///< REJECTED or EXPIRED: why
+    std::string error_detail;           ///< human-readable reason
+};
+
+/// A certificate the server has just signed, as `issue_device_certificate()` records it.
+struct IssuedCertificate
+{
+    std::string serial;                              ///< lowercase hex
+    std::string fingerprint;                         ///< SHA-256, lowercase hex
+    std::string subject_cn;                          ///< must equal the enrollment name
+    std::chrono::system_clock::time_point not_before; ///< start of validity
+    std::chrono::system_clock::time_point not_after;  ///< end of validity
+    std::string pem;                                 ///< the certificate
+};
+
+/// Result of `issue_device_certificate()`.
+struct IssueResult
+{
+    int device_id{0}; ///< device created (ENROLL) or re-keyed (ROTATE)
+    int cert_id{0};   ///< the new current certificate
+};
+
+/// One revoked certificate, for building the X.509 CRL.
+struct RevokedPem
+{
+    std::string cert_pem; ///< the revoked certificate
+    std::string reason;   ///< RFC 5280 reason name
+};
+
+/// Outcome of revoking the current certificate of a device.
+enum class RevokeResult {
+    Revoked,        ///< a CRL row was added, or a hold was made permanent
+    NoSuchDevice,   ///< no device of that name
+    AlreadyRevoked, ///< already revoked permanently; nothing changed
+};
+
+/// Outcome of lifting a hold.
+enum class UnrevokeResult {
+    Lifted,       ///< the certificateHold row was deleted
+    NoSuchDevice, ///< no device of that name
+    NotOnHold,    ///< the current certificate is not on hold
+};
+
+/// Outcome of deleting one certificate of a device.
+enum class DeleteCertResult {
+    Deleted,           ///< a previous certificate was deleted; the device stays
+    DeviceDeleted,     ///< it was the current one, so the device went with it
+    NoSuchDevice,      ///< no device of that name
+    NoSuchCertificate, ///< the device has no certificate with that serial
 };
 
 /// One scalar sample written by a controller producer thread.

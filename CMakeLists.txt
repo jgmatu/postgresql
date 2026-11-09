@@ -24,6 +24,9 @@ set(PGDEMO_WARNINGS -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wno-sign-con
 add_subdirectory(libs/log)
 add_subdirectory(libs/db)
 add_subdirectory(libs/auth)
+add_subdirectory(libs/pki)
+add_subdirectory(libs/wire)
+add_subdirectory(device)
 add_subdirectory(controller)
 add_subdirectory(server)
 

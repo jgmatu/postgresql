@@ -7,6 +7,7 @@
 
 #include "Services.hpp"
 #include "http/Common.hpp"
+#include "http/Enrollment.hpp"
 #include "http/SseBody.hpp"
 #include "oatpp/core/macro/codegen.hpp"
 #include "oatpp/web/protocol/http/outgoing/StreamingBody.hpp"
@@ -26,12 +27,13 @@ namespace pgdemo::server {
  * GET    /api/devices                        every device with its last sample (v_devices)
  * GET    /api/devices/{name}                 one device, its last sample and its config sync state
  * GET    /api/devices/{name}/history?from=&to=&limit=
- * POST   /api/devices                        admin; {"name", "type"}
- * DELETE /api/devices/{name}                 admin; telemetry is kept
+ * POST   /api/devices                        admin; {"name", "type"}: enrollment
+ * DELETE /api/devices/{name}                 admin; certificates go too, telemetry and CRL stay
  * GET    /api/stream?channels=&devices=      Server-Sent Events
  *
- * A device is a row, so registering one changes neither the schema nor the
- * routes: the controller sees `device_events` and starts writing for it.
+ * A device is a row, so enrolling one changes neither the schema nor the
+ * routes. The row appears only when its first certificate is issued (see
+ * `http::enroll_and_wait`).
  */
 class DeviceController : public oatpp::web::server::api::ApiController
 {
@@ -114,12 +116,12 @@ public:
         });
     }
 
-    /// `POST /api/devices` (admin): 201 created, 400 bad body or unknown type, 403 not admin,
-    /// 409 name taken.
+    /// `POST /api/devices` (admin): enroll a device. 201 issued, 202 in progress, 400 bad body or
+    /// unknown type, 403 not admin, 409 name taken or already enrolling, 422 refused or expired.
     ENDPOINT("POST", "/api/devices", create, REQUEST(std::shared_ptr<IncomingRequest>, request),
              BODY_STRING(String, body))
     {
-        return http::guarded("create device", [&] {
+        return http::guarded("enroll device", [&] {
             const auto c = http::caller_of(request);
             if (!c.is_admin()) return http::forbidden();
 
@@ -131,14 +133,7 @@ public:
                 throw http::BadRequest(R"(body must be {"name": "...", "type": "sine|sawtooth|gps_orbit|..."})");
             }
             const auto dev = http::device_param(name_v->as_string());
-            const std::string type(type_v->as_string());
-
-            const auto row = s_->db->create_device(c.role, dev, type);
-            if (!row) throw http::BadRequest("unknown device type '" + type + "' (see GET /api/device-types)");
-            log::info("devices", "'" + c.username + "' registered device '" + dev + "' (" + type + ")");
-            auto r = http::json_response(Status::CODE_201, *row);
-            r->putOrReplaceHeader("Location", oatpp::String("/api/devices/" + dev));
-            return r;
+            return http::enroll_and_wait(*s_, c, dev, std::string(type_v->as_string()));
         });
     }
 

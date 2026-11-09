@@ -4,6 +4,10 @@
 #   zone_b (172.28.20.0/24)  controller  internal: no route out, not even to zone_a
 #   postgres is attached to both zones and is the only path between them.
 #
+# Secrets stay in their zone: the device CA key (ca-keys) is mounted only by
+# init, which creates it, and server, which signs CSRs with it; the device
+# keys and the controller socket (device-keys) only by controller.
+#
 # Usage (from the repository root):
 #   cp docker/.env.example docker/.env      # then set real passwords
 #   docker compose -f docker/compose.yaml --env-file docker/.env up --build
@@ -17,8 +21,6 @@ x-app: &app
     dockerfile: docker/Dockerfile
   image: pgdemo:latest
   init: true
-  volumes:
-    - demo-run:/app/run
 
 services:
   postgres:
@@ -42,6 +44,9 @@ services:
   init:
     <<: *app
     command: ["scripts/db-init.sh"]
+    volumes:
+      - demo-run:/app/run
+      - ca-keys:/app/run/ca
     environment:
       PGHOST: postgres
       PGUSER: postgres
@@ -58,6 +63,9 @@ services:
   server:
     <<: *app
     command: ["scripts/run-all.sh", "server"]
+    volumes:
+      - demo-run:/app/run
+      - ca-keys:/app/run/ca
     environment:
       PGDEMO_LISTEN_ADDR: 0.0.0.0
     ports:
@@ -73,6 +81,11 @@ services:
   controller:
     <<: *app
     command: ["scripts/run-all.sh", "controller"]
+    volumes:
+      - demo-run:/app/run
+      - device-keys:/app/run/devices
+    environment:
+      PGDEMO_MAX_DEVICES: ${PGDEMO_MAX_DEVICES:-16}
     depends_on:
       init:
         condition: service_completed_successfully
@@ -84,6 +97,8 @@ services:
 volumes:
   pgdata:
   demo-run:
+  ca-keys:
+  device-keys:
 
 networks:
   zone_a:

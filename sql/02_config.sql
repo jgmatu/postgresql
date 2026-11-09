@@ -8,10 +8,10 @@ controller (zone B). Configuration changes travel as rows, not as messages:
 
   device_config_pending          Desired state. Durable queue of change requests
                                  (status PENDING -> SUCCESS | ERROR | TIMEOUT).
-  device_config                  Applied state. One row per device. Written only
-                                 by the controller: the seed rows below, the
-                                 defaults of a newly registered device, and
-                                 every request it really applied.
+  device_config                  Applied state. One row per device: the type
+                                 defaults, written by issue_device_certificate()
+                                 when the device is created (03_identity.sql),
+                                 then every request the controller applied.
   device_config_errors           Why a request failed. One row per failed request.
   device_config_history          Audit of every applied configuration.
   device_config_pending_history  Audit of every enqueue. Neither audit has a
@@ -103,20 +103,5 @@ CREATE TABLE IF NOT EXISTS device_config_pending_history (
 
 CREATE INDEX IF NOT EXISTS device_config_pending_history_device_idx
     ON device_config_pending_history (device_id, recorded_at DESC);
-
--- Applied state of the seeded devices, so the API can enqueue changes for them
--- before the controller has ever run. Devices registered later get theirs from
--- the controller when it receives device_events.
-INSERT INTO device_config (device_id, rate_ms, amplitude, is_active)
-SELECT d.device_id, t.default_rate_ms, t.default_amplitude, TRUE
-FROM device d
-JOIN device_type t USING (type_id)
-WHERE d.name IN ('dummy1', 'dummy2', 'dummy3')
-ON CONFLICT (device_id) DO NOTHING;
-
-INSERT INTO device_config_history (device_id, rate_ms, amplitude, is_active, request_id)
-SELECT c.device_id, c.rate_ms, c.amplitude, c.is_active, NULL
-FROM device_config c
-WHERE NOT EXISTS (SELECT 1 FROM device_config_history h WHERE h.device_id = c.device_id);
 
 RESET ROLE;

@@ -2,10 +2,15 @@
 //
 //   PGDEMO_TEST_SERVER_CONNINFO      conninfo of the demo_server login role
 //   PGDEMO_TEST_CONTROLLER_CONNINFO  conninfo of the demo_controller login role
+//   PGDEMO_TEST_CA_DIR               device CA of that database (default <repo>/run/ca)
+//   PGDEMO_TEST_OWNER_CONNINFO       optional, a role that may write `device`
+//                                    directly (e.g. postgres), for the
+//                                    foreign-key tests that no app role can reach
 //
-// Skipped when either is unset. Do not run them while pgdemo-controller is
-// running: it would drain the queue the tests are filling, and start producers
-// for the devices the tests register.
+// Skipped when either app conninfo is unset. Devices are enrolled the way the
+// server and controller do it: queue, CSR from a fresh P-384 key, signed by
+// the CA, issue_device_certificate(). Do not run them while pgdemo-controller
+// or pgdemo-server is running: they would drain the queues the tests fill.
 
 #include <unistd.h>
 
@@ -14,7 +19,10 @@
 #include <condition_variable>
 #include <cstdlib>
 #include <ctime>
+#include <filesystem>
 #include <format>
+#include <map>
+#include <memory>
 #include <mutex>
 #include <stdexcept>
 #include <string>
@@ -26,6 +34,8 @@
 #include <db/DatabaseManager.hpp>
 #include <db/Errors.hpp>
 #include <dispatcher/Dispatcher.hpp>
+#include <pki/CertificateAuthority.hpp>
+#include <pki/DeviceKey.hpp>
 
 using namespace std::chrono_literals;
 using namespace pgdemo;
@@ -90,6 +100,10 @@ protected:
         const char* s = std::getenv("PGDEMO_TEST_SERVER_CONNINFO");
         const char* c = std::getenv("PGDEMO_TEST_CONTROLLER_CONNINFO");
         if (!s || !c) GTEST_SKIP() << "PGDEMO_TEST_SERVER_CONNINFO / PGDEMO_TEST_CONTROLLER_CONNINFO not set";
+        const char* ca_dir = std::getenv("PGDEMO_TEST_CA_DIR");
+        const std::filesystem::path dir = ca_dir ? ca_dir : PGDEMO_SOURCE_DIR "/run/ca";
+        if (!std::filesystem::exists(dir / "ca.key")) GTEST_SKIP() << (dir / "ca.key") << " not found";
+        ca_ = std::make_unique<pki::CertificateAuthority>((dir / "ca.key").string(), (dir / "ca.crt").string());
         server_ = std::make_unique<db::DatabaseManager>(s, "pgdemo-test-server");
         controller_ = std::make_unique<db::DatabaseManager>(c, "pgdemo-test-controller");
         server_->connect();
@@ -106,18 +120,72 @@ protected:
         if (controller_) controller_->disconnect();
     }
 
-    /// Register a device of `type_id` under a name unique to this process.
-    db::Device make_device(const std::string& type_id)
+    /// A device name unique to this process.
+    static std::string unique_name()
     {
         static std::atomic<int> counter{0};
-        const auto name = std::format("gtest-{}-{}", ::getpid(), counter.fetch_add(1));
-        const auto row = server_->create_device(db::DbRole::Admin, name, type_id);
-        if (!row) throw std::runtime_error("unknown device type " + type_id);
-        created_.push_back(name);
-        const auto& o = row->as_object();
-        return db::Device{static_cast<int>(o.at("device_id").as_int64()), name, type_id,
-                          db::parse_payload(o.at("payload").as_string()).value()};
+        return std::format("gtest-{}-{}", ::getpid(), counter.fetch_add(1));
     }
+
+    /// The CSR step of the device process and the signing step of the server
+    /// for an open request. @return the certificate it was issued
+    pki::CertInfo issue(std::int64_t request_id, const std::string& name)
+    {
+        const auto key = pki::DeviceKey::generate();
+        if (!controller_->submit_csr(request_id, key.csr_pem(name)))
+            throw std::runtime_error("request is not PENDING");
+        const auto csr = server_->fetch_csr(request_id);
+        if (!csr || !csr->csr_pem) throw std::runtime_error("CSR not stored");
+        auto cert = ca_->sign_csr(*csr->csr_pem, name);
+        server_->issue_certificate(request_id, ca_->fingerprint(), to_issued(cert));
+        return cert;
+    }
+
+    static db::IssuedCertificate to_issued(const pki::CertInfo& c)
+    {
+        return {c.serial, c.fingerprint, c.subject_cn, c.not_before, c.not_after, c.pem};
+    }
+
+    /// Enroll a device of `type_id` under a name unique to this process.
+    db::Device make_device(const std::string& type_id)
+    {
+        const auto name = unique_name();
+        const auto id = server_->generate_request_id(db::DbRole::Admin);
+        if (!server_->enqueue_enrollment(db::DbRole::Admin, id, name, type_id, "gtest"))
+            throw std::runtime_error("unknown device type " + type_id);
+        created_.push_back(name);
+        serials_[name] = issue(id, name).serial;
+        const auto loaded = controller_->load_devices();
+        for (const auto& d : loaded)
+            if (d.name == name) return d;
+        throw std::runtime_error("enrolled device " + name + " not loaded");
+    }
+
+    /// Re-key `dev` through a rotation. @return the serial of the new certificate
+    std::string rotate(const db::Device& dev)
+    {
+        const auto id = server_->generate_request_id(db::DbRole::Admin);
+        if (!server_->enqueue_rotation(db::DbRole::Admin, id, dev.name, "gtest"))
+            throw std::runtime_error("no device " + dev.name);
+        return serials_[dev.name] = issue(id, dev.name).serial;
+    }
+
+    /// `identity` of the device as the API shows it, or MISSING.
+    std::string identity_of(const std::string& name)
+    {
+        const auto row = server_->fetch_device(db::DbRole::Normal, name);
+        return row ? std::string(row->as_object().at("identity").as_string()) : "MISSING";
+    }
+
+    std::size_t certificate_count(const std::string& name)
+    {
+        const auto certs = server_->fetch_certificates(db::DbRole::Normal, name);
+        return certs ? certs->as_array().size() : 0;
+    }
+
+    bool revoked(const std::string& serial) { return controller_->load_revoked_serials().contains(serial); }
+
+    void forget(const std::string& name) { std::erase(created_, name); }
 
     db::ConfigRequest request(std::int64_t id, const db::Device& dev, int rate_ms, double amplitude = 10.0)
     {
@@ -148,6 +216,8 @@ protected:
     std::atomic<int> applied_{0};
 
     std::vector<std::string> created_;
+    std::map<std::string, std::string> serials_; ///< current serial of each enrolled device
+    std::unique_ptr<pki::CertificateAuthority> ca_;
     std::unique_ptr<db::DatabaseManager> server_;
     std::unique_ptr<db::DatabaseManager> controller_;
 };
@@ -267,43 +337,79 @@ TEST_F(DbTest, NormalRoleCannotEnqueue)
     }
 }
 
-TEST_F(DbTest, NormalRoleCannotRegisterOrRemoveDevices)
+/// Runs `fn`; expects it to throw an error that classifies as `kind`.
+template <typename Fn>
+void expect_db_error(db::DbErrorKind kind, Fn fn, std::string_view what)
 {
     try
     {
-        server_->create_device(db::DbRole::Normal, "gtest-normal", "sine");
-        FAIL() << "INSERT INTO device succeeded as demo_normal";
+        fn();
+        ADD_FAILURE() << what << " succeeded";
     }
     catch (const std::exception& e)
     {
-        EXPECT_EQ(db::classify(e), db::DbErrorKind::Forbidden) << e.what();
+        EXPECT_EQ(db::classify(e), kind) << what << ": " << e.what();
     }
+}
 
+TEST_F(DbTest, NormalRoleCannotEnrollRevokeOrRemoveDevices)
+{
     const auto dev = make_device("sine");
-    try
-    {
-        server_->delete_device(db::DbRole::Normal, dev.name);
-        FAIL() << "DELETE FROM device succeeded as demo_normal";
-    }
-    catch (const std::exception& e)
-    {
-        EXPECT_EQ(db::classify(e), db::DbErrorKind::Forbidden) << e.what();
-    }
+    const auto id = server_->generate_request_id(db::DbRole::Admin);
+    const auto F = db::DbErrorKind::Forbidden;
+    expect_db_error(F, [&] { server_->enqueue_enrollment(db::DbRole::Normal, id, "gtest-normal", "sine", "x"); },
+                    "enrollment as demo_normal");
+    expect_db_error(F, [&] { server_->enqueue_rotation(db::DbRole::Normal, id, dev.name, "x"); },
+                    "rotation as demo_normal");
+    expect_db_error(F, [&] { server_->revoke_certificate(db::DbRole::Normal, dev.name, "keyCompromise", "x"); },
+                    "revocation as demo_normal");
+    expect_db_error(F, [&] { server_->delete_certificate(db::DbRole::Normal, dev.name, serials_[dev.name]); },
+                    "certificate deletion as demo_normal");
+    expect_db_error(F, [&] { server_->delete_device(db::DbRole::Normal, dev.name); }, "device deletion as demo_normal");
+    EXPECT_EQ(identity_of(dev.name), "ACTIVE");
+}
+
+// Not even the admin writes `device` or `device_certificate`: a device comes
+// into existence only through issue_device_certificate().
+TEST_F(DbTest, AdminCannotCreateDevicesOrCertificatesDirectly)
+{
+    const auto dev = make_device("sine");
+    const auto F = db::DbErrorKind::Forbidden;
+    expect_db_error(F,
+                    [&] {
+                        server_->with_role(db::DbRole::Admin, [&](pqxx::work& txn) {
+                            txn.exec("INSERT INTO device (name, type_id, cert_id) VALUES ('gtest-direct', 'sine', 1)");
+                        });
+                    },
+                    "INSERT INTO device as demo_admin");
+    expect_db_error(F,
+                    [&] {
+                        server_->with_role(db::DbRole::Admin, [&](pqxx::work& txn) {
+                            txn.exec("UPDATE device SET cert_id = cert_id WHERE device_id = $1",
+                                     pqxx::params{dev.device_id});
+                        });
+                    },
+                    "UPDATE device as demo_admin");
 }
 
 TEST_F(DbTest, DeviceNamesAreUniqueAndTypesMustExist)
 {
     const auto dev = make_device("sine");
-    try
-    {
-        server_->create_device(db::DbRole::Admin, dev.name, "sawtooth");
-        FAIL() << "duplicate device name accepted";
-    }
-    catch (const std::exception& e)
-    {
-        EXPECT_EQ(db::classify(e), db::DbErrorKind::Conflict) << e.what();
-    }
-    EXPECT_FALSE(server_->create_device(db::DbRole::Admin, "gtest-no-type", "no_such_type"));
+    const auto id = server_->generate_request_id(db::DbRole::Admin);
+    expect_db_error(db::DbErrorKind::Conflict,
+                    [&] { server_->enqueue_enrollment(db::DbRole::Admin, id, dev.name, "sawtooth", "gtest"); },
+                    "enrollment of an existing name");
+    EXPECT_FALSE(server_->enqueue_enrollment(db::DbRole::Admin, id, unique_name(), "no_such_type", "gtest"));
+
+    // One open request per name.
+    const auto name = unique_name();
+    ASSERT_TRUE(server_->enqueue_enrollment(db::DbRole::Admin, id, name, "sine", "gtest"));
+    const auto again = server_->generate_request_id(db::DbRole::Admin);
+    expect_db_error(db::DbErrorKind::Conflict,
+                    [&] { server_->enqueue_enrollment(db::DbRole::Admin, again, name, "sine", "gtest"); },
+                    "second open enrollment");
+    EXPECT_TRUE(controller_->fail_enrollment(id, "GTEST", "cleanup"));
+    EXPECT_FALSE(controller_->fail_enrollment(id, "GTEST", "twice"));
 }
 
 TEST_F(DbTest, NormalRoleCannotListUsers)
@@ -422,6 +528,204 @@ TEST_F(DbTest, DeviceLifecycleEmitsDeviceEventsAndKeepsTelemetry)
     EXPECT_EQ(status_of(queued), "MISSING");
     EXPECT_FALSE(server_->delete_device(db::DbRole::Admin, dev.name));
     EXPECT_EQ(telemetry_rows(db::Payload::Scalar, dev.device_id), 2);
+}
+
+// ---------------------------------------------------------------- identity
+
+// The device does not exist until its certificate does; then both appear in
+// one transaction, with the type defaults, and the request becomes ISSUED.
+TEST_F(DbTest, EnrollmentCreatesTheDeviceWithItsFirstCertificate)
+{
+    server_->register_listen_async("enrollment_events", [this](boost::json::object m) { inbox_.push(std::move(m)); });
+    server_->run_listener_loop();
+
+    const auto name = unique_name();
+    const auto id = server_->generate_request_id(db::DbRole::Admin);
+    ASSERT_TRUE(server_->enqueue_enrollment(db::DbRole::Admin, id, name, "gps_orbit", "gtest"));
+    created_.push_back(name);
+    EXPECT_EQ(identity_of(name), "MISSING");
+    const auto pending = controller_->load_enrollment(id);
+    ASSERT_TRUE(pending);
+    EXPECT_EQ(pending->status, "PENDING");
+    EXPECT_EQ(pending->payload, db::Payload::Gps);
+
+    const auto cert = issue(id, name);
+    EXPECT_TRUE(inbox_.wait([&](const auto& m) { return has(m, "enrollment_events", name); }));
+    const auto outcome = controller_->enrollment_outcome(id);
+    ASSERT_TRUE(outcome);
+    EXPECT_EQ(outcome->status, "ISSUED");
+    EXPECT_EQ(outcome->cert_pem, cert.pem);
+
+    EXPECT_EQ(identity_of(name), "ACTIVE");
+    const auto certs = server_->fetch_certificates(db::DbRole::Normal, name);
+    ASSERT_TRUE(certs);
+    ASSERT_EQ(certs->as_array().size(), 1u);
+    const auto& c = certs->as_array()[0].as_object();
+    EXPECT_EQ(c.at("serial").as_string(), cert.serial);
+    EXPECT_TRUE(c.at("current").as_bool());
+    const auto row = server_->fetch_device(db::DbRole::Normal, name);
+    ASSERT_TRUE(row);
+    EXPECT_TRUE(controller_->init_device_config(static_cast<int>(row->as_object().at("device_id").as_int64())));
+}
+
+// issue_device_certificate() checks again what the server already checked.
+TEST_F(DbTest, IssuingChecksTheNameTheCaAndTheState)
+{
+    const auto name = unique_name();
+    const auto id = server_->generate_request_id(db::DbRole::Admin);
+    ASSERT_TRUE(server_->enqueue_enrollment(db::DbRole::Admin, id, name, "sine", "gtest"));
+    const auto key = pki::DeviceKey::generate();
+    ASSERT_TRUE(controller_->submit_csr(id, key.csr_pem(name)));
+    EXPECT_FALSE(controller_->submit_csr(id, key.csr_pem(name))); // no longer PENDING
+
+    const auto other = ca_->sign_csr(key.csr_pem("gtest-someone-else"), "gtest-someone-else");
+    EXPECT_THROW(server_->issue_certificate(id, ca_->fingerprint(), to_issued(other)), pqxx::sql_error);
+    const auto mine = ca_->sign_csr(key.csr_pem(name), name);
+    EXPECT_THROW(server_->issue_certificate(id, std::string(64, '0'), to_issued(mine)), pqxx::sql_error);
+
+    EXPECT_TRUE(server_->reject_enrollment(id, "GTEST", "refused by the test"));
+    EXPECT_THROW(server_->issue_certificate(id, ca_->fingerprint(), to_issued(mine)), pqxx::sql_error);
+    EXPECT_EQ(identity_of(name), "MISSING");
+    const auto row = server_->fetch_enrollment(db::DbRole::Normal, id);
+    ASSERT_TRUE(row);
+    EXPECT_EQ(row->as_object().at("status").as_string(), "REJECTED");
+    EXPECT_EQ(row->as_object().at("error_code").as_string(), "GTEST");
+}
+
+// A device may have had several certificates; a rotation adds one, makes it
+// current and revokes the previous one as superseded.
+TEST_F(DbTest, RotationSupersedesThePreviousCertificate)
+{
+    const auto dev = make_device("sawtooth");
+    const auto first = serials_[dev.name];
+    const auto second = rotate(dev);
+    EXPECT_NE(first, second);
+    EXPECT_EQ(certificate_count(dev.name), 2u);
+    EXPECT_TRUE(revoked(first));
+    EXPECT_FALSE(revoked(second));
+    EXPECT_EQ(identity_of(dev.name), "ACTIVE");
+    const auto loaded = controller_->load_device(dev.device_id);
+    ASSERT_TRUE(loaded);
+    EXPECT_EQ(loaded->serial, second);
+    EXPECT_TRUE(loaded->active());
+}
+
+// Deleting a previous certificate touches nothing else, and its revocation
+// stays in the CRL: the crl table has no foreign key to device_certificate.
+TEST_F(DbTest, DeletingAPreviousCertificateKeepsTheDeviceAndTheCrl)
+{
+    const auto dev = make_device("sine");
+    const auto first = serials_[dev.name];
+    rotate(dev);
+    EXPECT_EQ(server_->delete_certificate(db::DbRole::Admin, dev.name, first), db::DeleteCertResult::Deleted);
+    EXPECT_EQ(certificate_count(dev.name), 1u);
+    EXPECT_EQ(identity_of(dev.name), "ACTIVE");
+    EXPECT_TRUE(revoked(first));
+    EXPECT_EQ(server_->delete_certificate(db::DbRole::Admin, dev.name, first),
+              db::DeleteCertResult::NoSuchCertificate);
+}
+
+// device.(cert_id, device_id) -> device_certificate ON DELETE CASCADE: the
+// current certificate takes the device with it; the telemetry stays.
+TEST_F(DbTest, DeletingTheCurrentCertificateDeletesTheDevice)
+{
+    server_->register_listen_async("device_events", [this](boost::json::object m) { inbox_.push(std::move(m)); });
+    server_->run_listener_loop();
+
+    const auto dev = make_device("sine");
+    rotate(dev);
+    controller_->write_scalar_sample(db::DummySample{dev.device_id, 1.0, 1});
+    EXPECT_EQ(server_->delete_certificate(db::DbRole::Admin, dev.name, serials_[dev.name]),
+              db::DeleteCertResult::DeviceDeleted);
+    forget(dev.name);
+    EXPECT_TRUE(inbox_.wait([&](const auto& m) { return has(m, "device_events", dev.name, "DELETE"); }));
+    EXPECT_EQ(identity_of(dev.name), "MISSING");
+    EXPECT_FALSE(controller_->load_device(dev.device_id));
+    EXPECT_EQ(certificate_count(dev.name), 0u);
+    EXPECT_EQ(telemetry_rows(db::Payload::Scalar, dev.device_id), 1);
+    EXPECT_EQ(server_->delete_certificate(db::DbRole::Admin, dev.name, serials_[dev.name]),
+              db::DeleteCertResult::NoSuchDevice);
+}
+
+// Revoked means out of service, not deleted. Only a hold can be undone.
+TEST_F(DbTest, RevocationKeepsTheDeviceAndIsPermanent)
+{
+    const auto dev = make_device("sine");
+    const auto serial = serials_[dev.name];
+    EXPECT_EQ(server_->revoke_certificate(db::DbRole::Admin, dev.name, "keyCompromise", "gtest"),
+              db::RevokeResult::Revoked);
+    EXPECT_EQ(identity_of(dev.name), "REVOKED");
+    const auto loaded = controller_->load_device(dev.device_id);
+    ASSERT_TRUE(loaded);
+    EXPECT_FALSE(loaded->active());
+    EXPECT_TRUE(revoked(serial));
+
+    EXPECT_EQ(server_->revoke_certificate(db::DbRole::Admin, dev.name, "certificateHold", "gtest"),
+              db::RevokeResult::AlreadyRevoked);
+    EXPECT_EQ(server_->unrevoke_certificate(db::DbRole::Admin, dev.name), db::UnrevokeResult::NotOnHold);
+    expect_db_error(db::DbErrorKind::Constraint,
+                    [&] {
+                        server_->with_role(db::DbRole::Admin, [&](pqxx::work& txn) {
+                            txn.exec("DELETE FROM crl WHERE serial = $1", pqxx::params{serial});
+                        });
+                    },
+                    "DELETE of a permanent CRL row");
+    EXPECT_TRUE(revoked(serial));
+
+    // The revocation outlives the device.
+    ASSERT_TRUE(server_->delete_device(db::DbRole::Admin, dev.name));
+    forget(dev.name);
+    EXPECT_TRUE(revoked(serial));
+    EXPECT_EQ(server_->revoke_certificate(db::DbRole::Admin, dev.name, "keyCompromise", "gtest"),
+              db::RevokeResult::NoSuchDevice);
+}
+
+TEST_F(DbTest, CertificateHoldSuspendsAndCanBeLiftedOrMadePermanent)
+{
+    const auto dev = make_device("sine");
+    EXPECT_EQ(server_->revoke_certificate(db::DbRole::Admin, dev.name, "certificateHold", "gtest"),
+              db::RevokeResult::Revoked);
+    EXPECT_EQ(identity_of(dev.name), "SUSPENDED");
+    EXPECT_EQ(server_->unrevoke_certificate(db::DbRole::Admin, dev.name), db::UnrevokeResult::Lifted);
+    EXPECT_EQ(identity_of(dev.name), "ACTIVE");
+    EXPECT_FALSE(revoked(serials_[dev.name]));
+
+    EXPECT_EQ(server_->revoke_certificate(db::DbRole::Admin, dev.name, "certificateHold", "gtest"),
+              db::RevokeResult::Revoked);
+    EXPECT_EQ(server_->revoke_certificate(db::DbRole::Admin, dev.name, "cessationOfOperation", "gtest"),
+              db::RevokeResult::Revoked);
+    EXPECT_EQ(identity_of(dev.name), "REVOKED");
+    EXPECT_EQ(server_->unrevoke_certificate(db::DbRole::Admin, dev.name), db::UnrevokeResult::NotOnHold);
+    EXPECT_EQ(server_->unrevoke_certificate(db::DbRole::Admin, "gtest-nobody"), db::UnrevokeResult::NoSuchDevice);
+}
+
+// What no application role can even attempt, checked as the schema owner:
+// a device without a certificate, or with somebody else's, never commits.
+TEST_F(DbTest, ADeviceCannotBeLeftWithoutItsOwnCertificate)
+{
+    const char* owner = std::getenv("PGDEMO_TEST_OWNER_CONNINFO");
+    if (!owner) GTEST_SKIP() << "PGDEMO_TEST_OWNER_CONNINFO not set";
+    const auto a = make_device("sine");
+    const auto b = make_device("sine");
+    rotate(b); // b.cert_id is now a previous certificate of b, current of nobody
+    pqxx::connection conn(owner);
+    {
+        pqxx::work txn(conn);
+        EXPECT_THROW(txn.exec("UPDATE device SET cert_id = NULL WHERE device_id = $1", pqxx::params{a.device_id}),
+                     pqxx::not_null_violation);
+    }
+    {
+        pqxx::work txn(conn);
+        txn.exec("UPDATE device SET cert_id = $1 WHERE device_id = $2", pqxx::params{b.cert_id, a.device_id});
+        EXPECT_THROW(txn.commit(), pqxx::foreign_key_violation);
+    }
+    {
+        pqxx::work txn(conn);
+        txn.exec("INSERT INTO device (name, type_id, cert_id) VALUES ($1, 'sine', 2147483647)",
+                 pqxx::params{unique_name()});
+        EXPECT_THROW(txn.commit(), pqxx::foreign_key_violation);
+    }
+    EXPECT_EQ(identity_of(a.name), "ACTIVE");
 }
 
 TEST(DatabaseManagerPool, ZeroSizeIsRejected)

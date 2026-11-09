@@ -67,8 +67,15 @@ constexpr bool valid_device_name(std::string_view name) noexcept
 
 /// NOTIFY channels besides telemetry (see sql/04_triggers.sql).
 namespace channel {
-/// A device was registered or removed; payload carries `action`, `device_id`, `device`, `type_id`.
+/// A device was registered, removed or re-keyed, a certificate revoked or
+/// restored, or a device process changed state. `action` tells which.
 inline constexpr std::string_view kDeviceEvents = "device_events";
+/// Admin queued an enrollment or rotation; wakes the controller.
+inline constexpr std::string_view kEnrollmentRequested = "enrollment_requested";
+/// A device process submitted its CSR; wakes the server, which signs it.
+inline constexpr std::string_view kEnrollmentCsr = "enrollment_csr";
+/// An enrollment was ISSUED, REJECTED or EXPIRED; payload carries `request_id` and `status`.
+inline constexpr std::string_view kEnrollmentEvents = "enrollment_events";
 /// Server inserted a PENDING request; wakes the controller's queue drain.
 inline constexpr std::string_view kConfigRequested = "config_requested";
 /// Controller applied a configuration (`device_config` changed); payload carries `request_id`.
@@ -82,7 +89,7 @@ inline constexpr std::string_view kErrorEvents = "error_events";
  * (`SET LOCAL ROLE`), chosen from the verified JWT role claim.
  */
 enum class DbRole {
-    Admin,  ///< `demo_admin`: may register devices, enqueue configuration and manage users
+    Admin,  ///< `demo_admin`: may enroll and revoke devices, enqueue configuration and manage users
     Normal, ///< `demo_normal`: read-only
 };
 

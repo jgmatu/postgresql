@@ -83,6 +83,51 @@ Request Status Should Be
     ${request}=    Client Json    config    request    ${id}
     Should Be Equal    ${request}[status]    ${expected}
 
+Enrollment Status Should Be
+    [Arguments]    ${request_id}    ${expected}
+    ${headers}=    Auth Headers
+    ${response}=    HTTP Status Should Be    200    GET    /api/enrollments/${request_id}    headers=${headers}
+    Should Be Equal    ${response.json()}[status]    ${expected}
+
+Session Should Be
+    [Documentation]    ``session`` of ``device``: the process state the controller reports.
+    [Arguments]    ${device}    ${expected}
+    ${dev}=    Client Json    data    ${device}
+    Should Be Equal    ${dev}[session]    ${expected}
+
+Identity Should Be
+    [Arguments]    ${device}    ${expected}
+    ${dev}=    Client Json    data    ${device}
+    Should Be Equal    ${dev}[identity]    ${expected}
+
+Sessions Of Seeds
+    [Documentation]    ``session`` of dummy1, dummy2 and dummy3, in that order.
+    ${states}=    Create List
+    FOR    ${name}    IN    dummy1    dummy2    dummy3
+        ${dev}=    Client Json    data    ${name}
+        Append To List    ${states}    ${dev}[session]
+    END
+    RETURN    ${states}
+
+Seeds Should Be Online
+    ${states}=    Sessions Of Seeds
+    Should Be Equal    ${states}    ${{ ['ONLINE', 'ONLINE', 'ONLINE'] }}
+
+Last Seq
+    [Arguments]    ${device}
+    ${dev}=    Client Json    data    ${device}
+    RETURN    ${dev}[seq]
+
+Seq Should Advance
+    [Arguments]    ${device}    ${since}
+    ${seq}=    Last Seq    ${device}
+    Should Be True    $seq is not None and $seq > int($since)    ${device}: seq ${seq} not past ${since}
+
+Controller Path Should Not Exist
+    [Documentation]    Fails unless ``path`` is absent inside the controller container.
+    [Arguments]    ${path}
+    Compose    exec    -T    controller    test    !    -e    ${path}
+
 Capture SSE
     [Documentation]    Three seconds of ``/api/stream`` for ``query`` (e.g. ``channels=telemetry_gps``).
     ...                ``timeout`` exits 124 when it stops curl, and that is the expected outcome.

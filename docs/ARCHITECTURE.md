@@ -1,6 +1,6 @@
 # Architecture
 
-This document explains how two processes that never talk to each other run a reactive, transactional exchange through PostgreSQL alone, and how the same database enforces authentication and authorization.
+This document explains how two processes that never talk to each other run a reactive, transactional exchange through PostgreSQL alone, and how the same database enforces authentication and authorization. Device identity (the internal CA, enrollment, certificates, the CRL and how the controller authenticates its device processes) has its own document, [DEVICE_PKI.md](DEVICE_PKI.md).
 
 1. [Processes and zones](#1-processes-and-zones)
 2. [Data plane: devices as rows, one channel per payload](#2-data-plane-devices-as-rows-one-channel-per-payload)
@@ -15,11 +15,12 @@ This document explains how two processes that never talk to each other run a rea
 
 | Process | Zone | PostgreSQL login | Writes | Listens to |
 |---|---|---|---|---|
-| `pgdemo-server` | A | `demo_server` (NOINHERIT) | `device` (register, remove), `device_config_pending`, `app_users` | `telemetry_scalar`, `telemetry_gps`, `device_events`, `config_events`, `error_events` |
-| `pgdemo-controller` | B | `demo_controller` | `device_state`, `telemetry_scalar`, `telemetry_gps`, `device_config`, `device_config_errors` | `device_events`, `config_requested` |
+| `pgdemo-server` | A | `demo_server` (NOINHERIT) | `device_enrollment` (enroll, rotate), `device` and `device_certificate` (issue through `issue_device_certificate()`, remove), `crl`, `device_config_pending`, `app_users` | `telemetry_scalar`, `telemetry_gps`, `device_events`, `enrollment_csr`, `enrollment_events`, `config_events`, `error_events` |
+| `pgdemo-controller` | B | `demo_controller` | `device_enrollment` (CSR, status), `device_session`, `device_state`, `telemetry_scalar`, `telemetry_gps`, `device_config`, `device_config_errors` | `enrollment_requested`, `enrollment_events`, `device_events`, `config_requested` |
+| `pgdemo-device` | B | none | samples, over a Unix socket to the controller | configuration frames from the controller |
 | `client/pgdemo.sh` | host | none | over HTTPS (8443) or, with `--http`, plain HTTP (8080) | SSE `/api/stream` |
 
-Neither process knows the other's address, port or existence. Each owns its side of the contract: the server owns *desired* state, and the controller owns *applied* state and the data. The schema in [`sql/`](../sql) is the interface between them; [sql/README.md](../sql/README.md) describes every table, view, function and channel.
+Neither process knows the other's address, port or existence. Each owns its side of the contract: the server owns *desired* state and the certificate authority, and the controller owns *applied* state, the device processes and the data. The device processes are children of the controller (`fork` + `execv`) and talk only to it; they have no database login. The schema in [`sql/`](../sql) is the interface between them; [sql/README.md](../sql/README.md) describes every table, view, function and channel.
 
 The HTTP listener is TLS 1.3 on port 8443 (`scripts/run-all.sh --http` serves plain HTTP on 8080 instead). oatpp-openssl creates the context; [`server/openssl-oqs.cnf`](../server/openssl-oqs.cnf), loaded from beside the executable, activates OpenSSL's default provider and `oqsprovider`. Ordinary clients use `X25519MLKEM768`. liboqs groups in that file are accepted when the client offers them. The TLS certificate is not the JWT key.
 
@@ -41,34 +42,35 @@ flowchart TB
         H -- "SSE" --> HTTP
     end
     subgraph C["pgdemo-controller (zone B)"]
-        F["Fleet<br/>(mutex-protected map device_id → Producer)"]
-        P1["producer dummy1"]
-        P2["producer dummy2"]
-        PN["producer sensor-a ..."]
-        CL["listener thread<br/>device_events, drain_pending()"]
-        CL -- "add / remove / apply()" --> F
-        F --> P1
-        F --> P2
-        F --> PN
+        CL["listener thread"]
+        F["Fleet: io_context thread<br/>(coroutines, no locks)"]
+        DB["thread pool<br/>(blocking database calls)"]
+        CL -- "post(notify)" --> F
+        F -- "on_db()" --> DB
+    end
+    subgraph DEV["device processes (fork + execv)"]
+        P1["pgdemo-device dummy1"]
+        P2["pgdemo-device dummy2"]
+        PN["pgdemo-device sensor-a ..."]
     end
     PG[("PostgreSQL")]
     HTTP <--> PG
     SL <-. "NOTIFY" .-> PG
-    P1 --> PG
-    P2 --> PG
-    PN --> PG
+    P1 <-- "Unix socket" --> F
+    P2 <-- "Unix socket" --> F
+    PN <-- "Unix socket" --> F
+    DB --> PG
     CL <-. "NOTIFY" .-> PG
-    CL --> PG
 ```
 
 ## 2. Data plane: devices as rows, one channel per payload
 
-A device is a row of `device`, typed by `device_type`. The type fixes the *payload* (`scalar` or `gps`), the controller's generator and the default configuration. Tables and channels exist per payload, never per device, so registering a device is an `INSERT`: no `CREATE TABLE`, no new `LISTEN`, no rebuild.
+A device is a row of `device`, typed by `device_type`. The type fixes the *payload* (`scalar` or `gps`), the device's generator and the default configuration. Tables and channels exist per payload, never per device, so adding a device needs no `CREATE TABLE`, no new `LISTEN` and no rebuild.
 
 | Table | Rows | Written by |
 |---|---|---|
 | `device_type` | `sine`, `sawtooth` (scalar), `gps_orbit` (gps) | install |
-| `device` | one per device; seeded with `dummy1`, `dummy2`, `dummy3` | server, as `demo_admin` |
+| `device` | one per device, created with its first certificate; `dummy1`, `dummy2`, `dummy3` are enrolled at the first controller start | server, through `issue_device_certificate()` |
 | `device_state` | the last sample of each device (`value` or `position`, never both) | controller |
 | `telemetry_scalar`, `telemetry_gps` | every sample, monthly-partitioned, no foreign key to `device` | controller |
 
@@ -78,26 +80,31 @@ One trigger on `device_state` publishes each sample on the channel of its payloa
 |---|---|
 | `telemetry_scalar` | `{device_id, device, action, value, seq, ts}` |
 | `telemetry_gps` | `{device_id, device, action, lon, lat, seq, ts}` |
-| `device_events` | `{action: INSERT \| DELETE, device_id, device, type_id}` |
+| `device_events` | `{action, device_id, device, ...}`: `INSERT`, `DELETE`, `ROTATED`, `REVOKED`, `UNREVOKED`, and each session state (`ONLINE`, `OFFLINE`, `AUTH_FAILED`, ...) |
 
-GPS positions are `geography(Point, 4326)`, installed with PostGIS in the `extensions` schema. The producer does not compute latitude and longitude itself. It passes a fixed origin (Madrid), a radius (`amplitude`, metres) and a bearing, and the INSERT calls `ST_Project`. GiST indexes cover `device_state` and every monthly partition of `telemetry_gps`.
+GPS positions are `geography(Point, 4326)`, installed with PostGIS in the `extensions` schema. The device does not compute latitude and longitude itself. It sends a fixed origin (Madrid), a radius (`amplitude`, metres) and a bearing, and the controller's INSERT calls `ST_Project`. GiST indexes cover `device_state` and every monthly partition of `telemetry_gps`.
 
-The controller keeps a `Fleet`: one `Producer` (`std::jthread`) per device, with the generator chosen by `type_id` and a phase derived from `device_id`. Every tick writes one statement: a CTE that UPSERTs `device_state` and appends the same sample to the telemetry table of the device's payload. The trigger fires on `device_state`, and PostgreSQL delivers the notification **only when the transaction commits**, so a listener never sees a value that was rolled back.
+Each device is a `pgdemo-device` process, started by the controller with `fork` + `execv` and connected back to it over the Unix socket `run/devices/.controller.sock`. After it has proved its identity (challenge-response with its private key, plus `SO_PEERCRED`; see [DEVICE_PKI.md](DEVICE_PKI.md#5-authentication)), it streams samples from a generator chosen by `type_id`, with a phase derived from `device_id`, at the configured rate. Frames are a 4-byte big-endian length and a JSON object (`libs/wire`). Both sides are Boost.Asio C++20 coroutines: the device runs the producer, the frame reader and its signal handler as three coroutines on one thread; the controller runs every session, the child reaper, the heartbeat and the maintenance loops on one `io_context` thread, so its process table needs no lock. Database calls block (libpqxx), so `on_db()` runs them on a small thread pool and the coroutine resumes with the result.
 
-The fleet changes at run time. The controller listens to `device_events`: an `INSERT` initialises the device's applied configuration from its type defaults and starts its producer; a `DELETE` stops it. At start-up it does the same for every registered device, after `LISTEN` is active, so no registration falls between the two. The map is protected by a mutex, because the listener thread changes it while the queue drain reads it; database calls and `Producer::stop()` run outside that mutex.
+For every sample the controller writes one statement: a CTE that UPSERTs `device_state` and appends the same sample to the telemetry table of the device's payload. The trigger fires on `device_state`, and PostgreSQL delivers the notification **only when the transaction commits**, so a listener never sees a value that was rolled back.
 
-On the server, one listener connection subscribes to every channel. libpqxx keeps a handler per channel and calls the right one for each notification. The server republishes them on the `EventHub` as the SSE events `telemetry_scalar`, `telemetry_gps`, `device`, `config` and `error`, each tagged with its device name. Subscribers filter by `?channels=` and, optionally, by `?devices=`.
+The fleet changes at run time. The controller listens to `enrollment_requested` (start a process with `--enroll` to generate a key and a CSR, or replace the running one with a `--rotate` process), `enrollment_events` (deliver the issued certificate to that same process, which then authenticates and streams) and `device_events` (stop the process on `DELETE` or a revocation of the current certificate, start it again when a hold is lifted). At start-up it does the same for every device and every open enrollment, after `LISTEN` is active, so nothing falls between the two; every 30 s it reconciles again, which catches a certificate that expired. The listener thread only posts each notification to the `io_context` thread. A process that exits is restarted with a backoff (1 s, doubling to 30 s), and `--max-devices` bounds how many run; the rest are `UNMANAGED`.
+
+On the server, one listener connection subscribes to every channel. libpqxx keeps a handler per channel and calls the right one for each notification. The server republishes them on the `EventHub` as the SSE events `telemetry_scalar`, `telemetry_gps`, `device`, `enrollment`, `config` and `error`, each tagged with its device name. Subscribers filter by `?channels=` and, optionally, by `?devices=`.
 
 ```mermaid
 sequenceDiagram
-    participant P1 as producer dummy1
-    participant P3 as producer dummy3
+    participant P1 as pgdemo-device dummy1
+    participant P3 as pgdemo-device dummy3
+    participant C as controller
     participant PG as PostgreSQL
     participant L as server listener
     participant H as EventHub
     participant B as SSE client devices=dummy3
-    P1->>PG: UPSERT device_state + INSERT telemetry_scalar (COMMIT)
-    P3->>PG: ST_Project, UPSERT device_state + INSERT telemetry_gps (COMMIT)
+    P1->>C: sample {value, seq}
+    C->>PG: UPSERT device_state + INSERT telemetry_scalar (COMMIT)
+    P3->>C: sample {origin, radius_m, bearing_rad, seq}
+    C->>PG: ST_Project, UPSERT device_state + INSERT telemetry_gps (COMMIT)
     PG-->>L: NOTIFY telemetry_scalar {device: dummy1, value, seq}
     PG-->>L: NOTIFY telemetry_gps {device: dummy3, lon, lat}
     L->>H: publish("telemetry_scalar", "dummy1", ...)
@@ -161,7 +168,7 @@ Properties of this loop:
 - **Stale requests do not apply.** A request older than `--pending-max-age-s` (600 s by default) becomes `TIMEOUT` with error `EXPIRED`, so an old intent does not overwrite a newer reality.
 - **Validation belongs to the zone that executes.** The server checks types and the role; the controller decides whether the values are acceptable. The answer travels back through the database like any other state.
 - **Partial updates.** Fields left out of the POST body are taken from the applied configuration. A device the controller has not initialised yet has none, so the server answers `409`.
-- **Producers react immediately.** After the commit, the controller calls `Producer::apply()` for that device, which updates atomics and wakes the producer from its sleep, so a new rate takes effect without waiting out the old period.
+- **Devices react immediately.** After the commit, the controller sends a `config` frame to that device's process. Its producer coroutine is waiting on a timer, which the frame cancels, so a new rate takes effect without waiting out the old period. A process that starts later receives the applied configuration right after it authenticates.
 
 ## 4. The Dispatcher
 
@@ -203,7 +210,7 @@ stateDiagram-v2
 
 A query checkout is a `Lease`: `acquire()` blocks until a connection is free, and the destructor returns it, including when the transaction throws. `SET LOCAL ROLE` is transaction-scoped, so a role cannot leak into the next checkout of that connection. `disconnect()` joins the listener first, then waits until every lease is back before closing the sockets.
 
-Callbacks run on the listener thread. They may call query methods (that thread does not already hold a lease) and must stay short: the controller's queue drain and the server's `dispatch` + `publish` are both bounded. `drain_pending` holds its lease across `decide` and `on_applied`; those two callbacks must not call back into `DatabaseManager`.
+Callbacks run on the listener thread. They may call query methods (that thread does not already hold a lease) and must stay short: the server's `dispatch` + `publish` are bounded, and the controller's callback only posts the notification to its `io_context` thread, which drains the queue through `on_db()`. `drain_pending` holds its lease across `decide` and `on_applied`; those two callbacks must not call back into `DatabaseManager`.
 
 ## 6. Monthly partitioning
 
@@ -233,6 +240,7 @@ Each row returned by `/api/devices/{name}/history` carries its partition name (`
 - **No user enumeration.** When the username does not exist, the server verifies the password against a fixed dummy hash anyway, so response time does not reveal whether a user exists. Both failures return the same `401` body.
 - **Login lookup without table access.** `demo_server` has no privilege on `app_users`. It calls `auth_fetch_user(username)`, a `SECURITY DEFINER` function that returns one hash and one role, and nothing else.
 - **Tokens.** JWT signed with ES384 (ECDSA P-384, SHA-384, raw `r‖s` signature, RFC 7518 §3.4). The signing key is a PKCS#8 file and verification uses the public key of an X.509 certificate, both generated by `scripts/gen-jwt-keys.sh` into `run/keys/`. Verification pins `alg` to ES384, so `none` and algorithm confusion are rejected. It also checks the issuer, the expiry, and that `sub` and `role` are present.
+- **Devices.** Each device process holds an ECDSA P-384 key that never leaves its directory (`run/devices/<name>/key.pem`, mode 0600, controller side only) and a certificate signed by the internal root CA, whose key only the server reads (`run/ca/`). The controller accepts a connection only from its own child (`SO_PEERCRED` uid and pid) that signs a fresh challenge with the key of the device's current, unrevoked certificate. [DEVICE_PKI.md](DEVICE_PKI.md) has the details.
 - **Default-deny routing.** `AuthInterceptor` requires a valid bearer token on every route except `POST /api/auth/login` and `GET /api/health`. A route added later is protected by default.
 
 ### Authorization, twice
@@ -251,7 +259,11 @@ COMMIT;                         -- the role reverts here
 | Object | `demo_normal` | `demo_admin` | `demo_controller` | `demo_server` |
 |---|---|---|---|---|
 | `device_type` | SELECT | SELECT | SELECT | – |
-| `device` | SELECT | SELECT; INSERT `name`, `type_id`; DELETE | SELECT | – |
+| `device`, `device_certificate` | SELECT | SELECT, DELETE | SELECT | – |
+| `crl` | SELECT | SELECT, INSERT, UPDATE, DELETE (limited by `protect_crl`) | SELECT | – |
+| `device_enrollment` | SELECT | SELECT, INSERT | SELECT, UPDATE of status and CSR | SELECT of the CSR columns |
+| `device_session` | SELECT | SELECT | SELECT, INSERT, UPDATE | – |
+| `root_ca` | SELECT | SELECT | SELECT | SELECT |
 | `device_state` | SELECT | SELECT | SELECT, INSERT, UPDATE | – |
 | `telemetry_scalar`, `telemetry_gps` | SELECT | SELECT | INSERT | – |
 | `device_config` | SELECT | SELECT | SELECT, INSERT, UPDATE | – |
@@ -260,7 +272,10 @@ COMMIT;                         -- the role reverts here
 | `request_id_seq` | – | USAGE | – | – |
 | `app_users` | – | non-secret columns; INSERT, UPDATE `password_hash`/`role`, DELETE | – | – |
 | `auth_fetch_user()` | – | – | – | EXECUTE |
+| `issue_device_certificate()`, `reject_enrollment()` | – | – | – | EXECUTE |
 | `ensure_monthly_partitions()` | – | – | EXECUTE | – |
+
+No role can insert into `device` or `device_certificate`: a certificate enters the database only through `issue_device_certificate()`, which only the server's base role may call, after it has verified and signed the CSR. An admin enrolls, revokes and removes; the CA issues.
 
 The full matrix is in [sql/README.md](../sql/README.md#roles-and-privileges) and in [`sql/05_views.sql`](../sql/05_views.sql). Two more rules live in the schema:
 
@@ -278,12 +293,15 @@ The full matrix is in [sql/README.md](../sql/README.md#roles-and-privileges) and
 |---|---|
 | Controller down, admin posts a configuration | Request stored as `PENDING`. API answers `202` after the timeout. Applied at controller start-up (or `EXPIRED` if too old). |
 | Controller rejects a value | `device_config_errors` row, status `ERROR`, `error_events` wakes the waiter. API answers `422` with `error_code`. |
-| Device registered while the controller is down | Row stored, configuration `UNINITIALISED`, `POST /api/config` answers `409`. At start-up the controller writes the type defaults and starts the producer. |
-| Device removed | State, configuration and queued requests cascade away; telemetry and audits stay. The controller stops the producer on `device_events DELETE`. |
+| Device enrolled while the controller is down | Enrollment stored as `PENDING`; `POST /api/devices` answers `202`. At start-up the controller starts the process, which submits its CSR; the server signs it and the device appears. |
+| Device removed | Certificates, session, state, configuration and queued requests cascade away; telemetry, the CRL and audits stay. The controller stops the process on `device_events DELETE` and removes its key directory. |
+| Current certificate revoked or held | `crl` row; the device stays. The controller stops the process (`DISABLED`). A lifted hold starts it again. See [DEVICE_PKI.md](DEVICE_PKI.md#6-revocation-and-deletion). |
+| Device process crashes or hangs | `SIGCHLD`; the controller marks it `OFFLINE` and restarts it with a backoff. A process silent for 30 s is killed. A process that fails authentication is `AUTH_FAILED` and is not restarted until its identity changes. |
+| More devices than `--max-devices` | The extra devices are `UNMANAGED`, and a new enrollment is rejected with `CAPACITY` (`422`). |
 | Notification missed (listener restarted between commit and wait) | Dispatcher times out. The server reads the row and answers from it. |
-| Listener connection lost | `listener_alive()` turns false, the process exits with status 1, and the supervisor restarts it. On restart the controller reads every device and drains the queue again. |
+| Listener connection lost | `listener_alive()` turns false, the process exits with status 1, and the supervisor restarts it. On restart the controller reads every device and every open enrollment and drains the queue again; the server signs any CSR left `CSR_SUBMITTED`. |
 | Duplicate device name | Unique violation `23505`, mapped to `409`. Unknown device type: `400`. |
-| Two controllers running | `SKIP LOCKED`: each request is processed exactly once. Both producers write, so in practice run one. |
+| A second controller on the same host | It exits at start-up: another controller answers on `run/devices/.controller.sock`. A socket left by a killed controller refuses connections and is replaced. (Controllers on separate hosts would each run every device; the configuration queue itself is `SKIP LOCKED`, so each request is still applied once.) |
 | Duplicate username | Unique violation `23505`, mapped to `409`. |
 | Invalid username format, last-admin removal | `CHECK` or trigger (`23514`), mapped to `422`. |
 | Too many concurrent configuration requests | 500 waiters: `503`, nothing enqueued. |

@@ -1,13 +1,14 @@
 // pgdemo-server: zone A process.
 //
-// HTTP API (Oat++) in front of PostgreSQL. It never talks to the controller:
-// devices are rows it inserts and deletes, desired configuration goes into the
-// device_config_pending queue, and results and live data come back as NOTIFY on
-// the listener connection.
+// HTTP API (Oat++) in front of PostgreSQL, and the device CA. It never talks to
+// the controller: enrollments and desired configuration are queued in tables,
+// and results and live data come back as NOTIFY on the listener connection.
 //
 //   telemetry_scalar, telemetry_gps, device_events --> EventHub --> SSE /api/stream
 //   config_events                --> Dispatcher::dispatch(SUCCESS) + SSE
 //   error_events                 --> Dispatcher::dispatch(ERROR)   + SSE
+//   enrollment_csr               --> CertificateSigner: sign, issue or reject
+//   enrollment_events            --> Dispatcher::dispatch(ISSUED ? SUCCESS : ERROR) + SSE
 //
 // Subcommand: `pgdemo-server hash-password` reads a password on stdin and
 // prints its Argon2id PHC string (used by scripts/db-init.sh).
@@ -31,6 +32,7 @@
 #include "controllers/AuthController.hpp"
 #include "controllers/ConfigController.hpp"
 #include "controllers/DeviceController.hpp"
+#include "controllers/IdentityController.hpp"
 #include "controllers/UsersController.hpp"
 #include "http/AuthInterceptor.hpp"
 #include "http/ErrorHandler.hpp"
@@ -64,7 +66,11 @@ void usage()
                  "  --tls-key PATH            TLS private key; with --tls-cert, listen on HTTPS\n"
                  "  --tls-cert PATH           TLS certificate; omit both to listen on HTTP\n"
                  "  --token-ttl-s N           token lifetime (default 900)\n"
-                 "  --config-timeout-ms N     POST /api/config wait (default 2000)\n";
+                 "  --config-timeout-ms N     POST /api/config wait (default 2000)\n"
+                 "  --ca-key PATH             device CA private key (default run/ca/ca.key)\n"
+                 "  --ca-cert PATH            device CA certificate (default run/ca/ca.crt)\n"
+                 "  --cert-validity-days N    lifetime of device certificates (default 365)\n"
+                 "  --enroll-timeout-ms N     POST /api/devices and rotate wait (default 5000)\n";
 }
 
 ServerConfig parse(int argc, char** argv)
@@ -87,6 +93,10 @@ ServerConfig parse(int argc, char** argv)
         else if (a == "--tls-cert") c.tls_cert = next();
         else if (a == "--token-ttl-s") c.token_ttl_s = std::stoull(next());
         else if (a == "--config-timeout-ms") c.config_timeout_ms = std::stoi(next());
+        else if (a == "--ca-key") c.ca_key = next();
+        else if (a == "--ca-cert") c.ca_cert = next();
+        else if (a == "--cert-validity-days") c.cert_validity_days = std::stoi(next());
+        else if (a == "--enroll-timeout-ms") c.enroll_timeout_ms = std::stoi(next());
         else if (a == "-h" || a == "--help") { usage(); std::exit(0); }
         else throw std::invalid_argument("unknown option " + std::string(a));
     }
@@ -96,6 +106,10 @@ ServerConfig parse(int argc, char** argv)
     if (c.token_ttl_s < 60 || c.token_ttl_s > 86400) throw std::invalid_argument("--token-ttl-s must be in [60, 86400]");
     if (c.config_timeout_ms < 100 || c.config_timeout_ms > 60000)
         throw std::invalid_argument("--config-timeout-ms must be in [100, 60000]");
+    if (c.enroll_timeout_ms < 100 || c.enroll_timeout_ms > 60000)
+        throw std::invalid_argument("--enroll-timeout-ms must be in [100, 60000]");
+    if (c.cert_validity_days < 1 || c.cert_validity_days > 3650)
+        throw std::invalid_argument("--cert-validity-days must be in [1, 3650]");
     return c;
 }
 
@@ -165,6 +179,43 @@ void register_channels(Services& s)
         if (const auto id = request_id_of(msg)) dispatcher->dispatch(*id, ResponseStatus::ERROR);
         hub->publish("error", device_of(msg), payload_text(msg));
     });
+
+    // Identity: the controller submits CSRs, this process signs them.
+    // Weak: the signer holds the DatabaseManager that holds this callback.
+    std::weak_ptr<CertificateSigner> signer = s.signer;
+    db.register_listen_async(std::string(db::channel::kEnrollmentRequested), [hub](const boost::json::object& msg) {
+        hub->publish("enrollment", device_of(msg), payload_text(msg));
+    });
+    db.register_listen_async(std::string(db::channel::kEnrollmentCsr), [hub, signer](const boost::json::object& msg) {
+        const auto id = request_id_of(msg);
+        if (const auto sp = signer.lock(); sp && id) sp->submit(static_cast<std::int64_t>(*id));
+        hub->publish("enrollment", device_of(msg), payload_text(msg));
+    });
+    db.register_listen_async(std::string(db::channel::kEnrollmentEvents), [hub, dispatcher](const boost::json::object& msg) {
+        if (const auto id = request_id_of(msg))
+        {
+            const auto& payload = msg.at("payload").as_object();
+            const auto* status = payload.if_contains("status");
+            const bool issued = status && status->is_string() && status->as_string() == "ISSUED";
+            dispatcher->dispatch(*id, issued ? ResponseStatus::SUCCESS : ResponseStatus::ERROR);
+        }
+        hub->publish("enrollment", device_of(msg), payload_text(msg));
+    });
+}
+
+/// Load the device CA and check that the database trusts it.
+std::shared_ptr<CertificateSigner> make_signer(const ServerConfig& cfg, std::shared_ptr<db::DatabaseManager> db)
+{
+    auto ca = std::make_shared<pki::CertificateAuthority>(cfg.ca_key, cfg.ca_cert);
+    const auto roots = db->active_root_fingerprints();
+    if (std::ranges::find(roots, ca->fingerprint()) == roots.end())
+    {
+        log::warn(kLog, "device CA " + ca->fingerprint() +
+                            " is not an active root_ca row; issuing will fail (run scripts/db-init.sh)");
+    }
+    log::info(kLog, "device CA " + ca->fingerprint() + " (" + cfg.ca_cert + ")");
+    return std::make_shared<CertificateSigner>(std::move(db), std::move(ca),
+                                               std::chrono::days(cfg.cert_validity_days));
 }
 
 /// Point OpenSSL at the provider and the config copied beside this executable.
@@ -204,16 +255,20 @@ int run(const ServerConfig& cfg)
     services->hub = std::make_shared<EventHub>();
     services->db = std::make_shared<db::DatabaseManager>(cfg.conninfo, "pgdemo-server", cfg.pool_size);
     services->db->connect();
+    services->signer = make_signer(cfg, services->db);
 
     // Registration phase, then activation (see DatabaseManager).
     register_channels(*services);
     services->db->run_listener_loop();
+    // CSRs submitted while this server was down.
+    for (const auto id : services->db->submitted_csr_ids()) services->signer->submit(id);
 
     auto mapper = oatpp::parser::json::mapping::ObjectMapper::createShared();
     auto router = oatpp::web::server::HttpRouter::createShared();
     router->addController(std::make_shared<AuthController>(services, mapper));
     router->addController(std::make_shared<UsersController>(services, mapper));
     router->addController(std::make_shared<DeviceController>(services, mapper));
+    router->addController(std::make_shared<IdentityController>(services, mapper));
     router->addController(std::make_shared<ConfigController>(services, mapper));
 
     auto handler = oatpp::web::server::HttpConnectionHandler::createShared(router);
@@ -256,6 +311,7 @@ int run(const ServerConfig& cfg)
     provider->stop();
     handler->stop();
     http_thread.join();
+    services->signer.reset();
     services->db->disconnect();
     return exit_code;
 }

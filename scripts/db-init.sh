@@ -15,8 +15,12 @@
 #   DEMO_CONTROLLER_DB_PASSWORD  password of the demo_controller login role
 #   DEMO_ADMIN_PASSWORD          password of the API user "admin"
 #
+# The device root CA (scripts/gen-device-ca.sh) is generated in PGDEMO_CA_DIR
+# if missing, and its certificate, never its key, is registered in root_ca.
+#
 # Other variables:
 #   PGDEMO_DB          database name (default: pgdemo)
+#   PGDEMO_CA_DIR      device CA directory (default: run/ca)
 #   PGDEMO_SERVER_BIN  binary used for `hash-password` (default: build/server/pgdemo-server)
 #   PGDEMO_ENV_FILE    where generated settings are written (default: run/demo.env)
 set -euo pipefail
@@ -31,12 +35,13 @@ fi
 
 PGDEMO_DB="${PGDEMO_DB:-pgdemo}"
 PGDEMO_SERVER_BIN="${PGDEMO_SERVER_BIN:-${ROOT}/build/server/pgdemo-server}"
+PGDEMO_CA_DIR="${PGDEMO_CA_DIR:-${ROOT}/run/ca}"
 RESET=0
 
 for arg in "$@"; do
     case "${arg}" in
         --reset) RESET=1 ;;
-        -h|--help) sed -n '2,25p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,29p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "db-init: unknown argument: ${arg}" >&2; exit 2 ;;
     esac
 done
@@ -91,10 +96,31 @@ REVOKE ALL ON DATABASE ${PGDEMO_DB} FROM PUBLIC;
 GRANT CONNECT ON DATABASE ${PGDEMO_DB} TO demo_server, demo_controller;
 SQL
 
-for f in 01_data.sql 02_config.sql 03_users.sql 04_triggers.sql 05_views.sql; do
+for f in 01_data.sql 02_config.sql 03_identity.sql 03_users.sql 04_triggers.sql 05_views.sql; do
     log "loading sql/${f}"
     psql_su -d "${PGDEMO_DB}" -f "${ROOT}/sql/${f}"
 done
+
+"${ROOT}/scripts/gen-device-ca.sh" "${PGDEMO_CA_DIR}"
+ca_crt="${PGDEMO_CA_DIR}/ca.crt"
+ca_fp="$(openssl x509 -in "${ca_crt}" -noout -fingerprint -sha256 | sed 's/^.*=//; s/://g' | tr 'A-F' 'a-f')"
+log "registering device root CA ${ca_fp:0:16}..."
+PGDEMO_CA_PEM="$(cat "${ca_crt}")" \
+PGDEMO_CA_FP="${ca_fp}" \
+PGDEMO_CA_SUBJECT="$(openssl x509 -in "${ca_crt}" -noout -subject -nameopt RFC2253 | sed 's/^subject=//')" \
+PGDEMO_CA_NOT_BEFORE="$(openssl x509 -in "${ca_crt}" -noout -startdate -dateopt iso_8601 | sed 's/^notBefore=//')" \
+PGDEMO_CA_NOT_AFTER="$(openssl x509 -in "${ca_crt}" -noout -enddate -dateopt iso_8601 | sed 's/^notAfter=//')" \
+psql_su -d "${PGDEMO_DB}" <<'SQL'
+\getenv pem PGDEMO_CA_PEM
+\getenv fp PGDEMO_CA_FP
+\getenv subject PGDEMO_CA_SUBJECT
+\getenv not_before PGDEMO_CA_NOT_BEFORE
+\getenv not_after PGDEMO_CA_NOT_AFTER
+SET ROLE demo_owner;
+INSERT INTO root_ca (name, subject, fingerprint_sha256, cert_pem, not_before, not_after)
+VALUES ('device-root-' || left(:'fp', 12), :'subject', :'fp', :'pem', :'not_before', :'not_after')
+ON CONFLICT (fingerprint_sha256) DO NOTHING;
+SQL
 
 has_admin="$(psql_su -d "${PGDEMO_DB}" -tAc "SELECT 1 FROM app_users WHERE role = 'admin' LIMIT 1")"
 if [[ "${has_admin}" != "1" ]]; then
@@ -123,4 +149,4 @@ EOF
 chmod 600 "${PGDEMO_ENV_FILE}"
 
 log "done. Settings in ${PGDEMO_ENV_FILE#"${ROOT}"/}"
-psql_su -d "${PGDEMO_DB}" -c "SELECT device, type_id, applied_rate_ms, applied_amplitude, sync FROM v_device_config_sync_status ORDER BY device_id"
+psql_su -d "${PGDEMO_DB}" -c "SELECT request_id, kind, name, type_id, status FROM device_enrollment ORDER BY request_id"

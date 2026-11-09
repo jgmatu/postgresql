@@ -3,12 +3,14 @@
 01_data.sql - data plane: devices, their last sample and monthly-partitioned telemetry
 =============================================================================
 
-A device is a row, not a table. Registering one is an INSERT into device; the
+A device is a row, not a table. Registering one adds a row to device; the
 schema and the code do not change. Tables are per data shape instead:
 
   device_type        what a device produces (payload scalar | gps) and its
                      default configuration
-  device             the registered devices
+  device             the registered devices. Each one points at its current
+                     X.509 certificate (cert_id, NOT NULL); 03_identity.sql
+                     adds that foreign key and is the only way to insert one
   device_state       the last sample of each device (one row per device, UPSERT)
   telemetry_scalar   every scalar sample, range-partitioned by month
   telemetry_gps      every GPS fix, range-partitioned by month
@@ -49,6 +51,7 @@ CREATE TABLE IF NOT EXISTS device (
     device_id   INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     name        TEXT NOT NULL UNIQUE CHECK (name ~ '^[a-z][a-z0-9_.-]{1,63}$'),
     type_id     TEXT NOT NULL REFERENCES device_type (type_id),
+    cert_id     INT NOT NULL UNIQUE,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -66,7 +69,7 @@ CREATE TABLE IF NOT EXISTS device_state (
 
 CREATE INDEX IF NOT EXISTS device_state_position_gix ON device_state USING GIST (position);
 
-COMMENT ON TABLE device IS 'Registered devices. Registering one is an INSERT; the controller starts producing for it on device_events.';
+COMMENT ON TABLE device IS 'Registered devices, each bound to its current certificate. Created only by issue_device_certificate().';
 COMMENT ON TABLE device_state IS 'Last sample of each device, written by the controller producer for that device.';
 
 -- amplitude: peak value for the scalar types, orbit radius in metres for gps_orbit.
@@ -75,12 +78,6 @@ INSERT INTO device_type (type_id, payload, default_rate_ms, default_amplitude, d
     ('sawtooth',  'scalar', 1000, 5.0,   'Sawtooth with noise'),
     ('gps_orbit', 'gps',    1000, 250.0, 'GPS fix orbiting a fixed origin (ST_Project)')
 ON CONFLICT (type_id) DO NOTHING;
-
-INSERT INTO device (name, type_id) VALUES
-    ('dummy1', 'sine'),
-    ('dummy2', 'sawtooth'),
-    ('dummy3', 'gps_orbit')
-ON CONFLICT (name) DO NOTHING;
 
 -- ---------------------------------------------------------------------------
 -- Partitioned telemetry. The partition key must be part of the primary key.

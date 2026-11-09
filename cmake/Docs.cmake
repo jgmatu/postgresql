@@ -26,8 +26,11 @@ set(DOXYGEN_STRIP_FROM_INC_PATH
     "${CMAKE_SOURCE_DIR}/libs/log/include"
     "${CMAKE_SOURCE_DIR}/libs/db/include"
     "${CMAKE_SOURCE_DIR}/libs/auth/include"
+    "${CMAKE_SOURCE_DIR}/libs/pki/include"
+    "${CMAKE_SOURCE_DIR}/libs/wire/include"
     "${CMAKE_SOURCE_DIR}/server/src"
-    "${CMAKE_SOURCE_DIR}/controller/src")
+    "${CMAKE_SOURCE_DIR}/controller/src"
+    "${CMAKE_SOURCE_DIR}/device/src")
 
 set(DOXYGEN_EXTRACT_ALL NO)
 set(DOXYGEN_EXTRACT_PRIVATE NO)
@@ -69,6 +72,7 @@ endif()
 doxygen_add_docs(docs
     "${CMAKE_SOURCE_DIR}/README.md"
     "${CMAKE_SOURCE_DIR}/docs/ARCHITECTURE.md"
+    "${CMAKE_SOURCE_DIR}/docs/DEVICE_PKI.md"
     "${CMAKE_SOURCE_DIR}/patches/README.md"
     "${CMAKE_SOURCE_DIR}/sql/README.md"
     "${CMAKE_SOURCE_DIR}/tests/e2e/README.md"
@@ -76,6 +80,9 @@ doxygen_add_docs(docs
     "${CMAKE_SOURCE_DIR}/libs/log/include"
     "${CMAKE_SOURCE_DIR}/libs/db/include"
     "${CMAKE_SOURCE_DIR}/libs/auth/include"
+    "${CMAKE_SOURCE_DIR}/libs/pki/include"
+    "${CMAKE_SOURCE_DIR}/libs/wire/include"
     "${CMAKE_SOURCE_DIR}/server/src"
     "${CMAKE_SOURCE_DIR}/controller/src"
+    "${CMAKE_SOURCE_DIR}/device/src"
     COMMENT "Generating Doxygen HTML in ${CMAKE_BINARY_DIR}/docs/html")

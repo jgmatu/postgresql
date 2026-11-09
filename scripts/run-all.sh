@@ -10,11 +10,16 @@
 # which pgdemo-server loads before oatpp-openssl creates its SSL_CTX.
 #
 # Each process logs in with its own PostgreSQL role (demo_server, demo_controller)
-# and knows nothing about the other one. Logs go to run/logs/. Ctrl-C stops both.
+# and knows nothing about the other one. The server signs device CSRs with the
+# CA in run/ca/; the controller forks one pgdemo-device per device, with its
+# keys in run/devices/<name>/. Logs go to run/logs/. Ctrl-C stops both.
 #
 # Variables (defaults from run/demo.env):
 #   PGDEMO_PGHOST, PGDEMO_PGPORT, PGDEMO_DB   database location
 #   PGDEMO_LISTEN_ADDR (127.0.0.1)            bind address (Docker uses 0.0.0.0)
+#   PGDEMO_CA_DIR (run/ca)                    device CA key and certificate
+#   PGDEMO_DEVICES_DIR (run/devices)          device keys and the controller socket
+#   PGDEMO_MAX_DEVICES (16)                   device processes run at once
 #   PGDEMO_SERVER_ARGS, PGDEMO_CONTROLLER_ARGS  extra command-line options
 set -euo pipefail
 
@@ -27,7 +32,7 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --https) SCHEME=https ;;
         --http) SCHEME=http ;;
-        -h|--help) sed -n '2,18p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,23p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
         server|controller|all) WHAT="$1" ;;
         *) printf '[run-all] ERROR: unknown argument %s\n' "$1" >&2; exit 1 ;;
     esac
@@ -44,6 +49,7 @@ case "${WHAT}" in server|controller|all) ;; *) die "unknown target '${WHAT}'" ;;
 PGHOST_="${PGDEMO_PGHOST:-127.0.0.1}"
 PGPORT_="${PGDEMO_PGPORT:-5432}"
 DB_="${PGDEMO_DB:-pgdemo}"
+CA_DIR="${PGDEMO_CA_DIR:-${ROOT}/run/ca}"
 LOGS="${ROOT}/run/logs"
 mkdir -p "${LOGS}"
 
@@ -63,10 +69,15 @@ start_controller() {
     [[ -x "${BUILD}/controller/pgdemo-controller" ]] || die "build first: cmake --build build"
     : > "${LOGS}/controller.log"
     logs+=("${LOGS}/controller.log")
+    [[ -x "${BUILD}/device/pgdemo-device" ]] || die "build first: cmake --build build"
     # shellcheck disable=SC2086
     PGHOST="${PGHOST_}" PGPORT="${PGPORT_}" PGDATABASE="${DB_}" \
     PGUSER=demo_controller PGPASSWORD="${DEMO_CONTROLLER_DB_PASSWORD}" \
-        "${BUILD}/controller/pgdemo-controller" ${PGDEMO_CONTROLLER_ARGS:-} \
+        "${BUILD}/controller/pgdemo-controller" \
+        --device-bin "${BUILD}/device/pgdemo-device" \
+        --devices-dir "${PGDEMO_DEVICES_DIR:-${ROOT}/run/devices}" \
+        --max-devices "${PGDEMO_MAX_DEVICES:-16}" \
+        ${PGDEMO_CONTROLLER_ARGS:-} \
         >> "${LOGS}/controller.log" 2>&1 &
     pids+=("$!")
     echo "[run-all] controller pid $! (log run/logs/controller.log)"
@@ -74,6 +85,7 @@ start_controller() {
 
 start_server() {
     [[ -x "${BUILD}/server/pgdemo-server" ]] || die "build first: cmake --build build"
+    [[ -f "${CA_DIR}/ca.key" ]] || die "${CA_DIR}/ca.key not found; run scripts/db-init.sh first"
     "${ROOT}/scripts/gen-jwt-keys.sh" >/dev/null
     local -a tls_args=()
     local port=8080 mode="plain HTTP"
@@ -92,6 +104,7 @@ start_server() {
         "${BUILD}/server/pgdemo-server" \
         --listen-addr "${addr}" --port "${port}" \
         --jwt-key "${ROOT}/run/keys/jwt.key" --jwt-cert "${ROOT}/run/keys/jwt.crt" \
+        --ca-key "${CA_DIR}/ca.key" --ca-cert "${CA_DIR}/ca.crt" \
         "${tls_args[@]}" \
         ${PGDEMO_SERVER_ARGS:-} \
         >> "${LOGS}/server.log" 2>&1 &
