@@ -1,6 +1,6 @@
 // pgdemo-controller: zone B process.
 //
-// Writes the data plane (dummy1, dummy2 and their partitioned histories) and
+// Writes the data plane (dummy1, dummy2, dummy3 and their partitioned histories) and
 // applies desired configuration from the dummy_config_pending queue. It never
 // talks to the server; PostgreSQL is the only channel.
 //

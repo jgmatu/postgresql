@@ -2,10 +2,11 @@
 
 A small, complete reference architecture in which **PostgreSQL is the only channel between two processes that never talk to each other**. Tables are the persistent queue and the source of truth; triggers and `LISTEN/NOTIFY` make the exchange reactive; roles and grants enforce the same authorization as the HTTP API.
 
-The demo runs on dummy data with two tables, `dummy1` and `dummy2`. It covers:
+The demo runs on dummy data with three tables, `dummy1`, `dummy2` and `dummy3` (a GPS track stored with PostGIS). It covers:
 
 - **Reactive IPC across network zones.** The server (zone A) and the controller (zone B) share no socket, no broker and no addresses. Each one only knows the database.
-- **Channel multiplexing on one connection.** `dummy1_events` and `dummy2_events` (plus two control-plane channels) arrive on a single `LISTEN` socket. libpqxx routes each notification to the callback registered for its channel.
+- **Channel multiplexing on one connection.** `dummy1_events`, `dummy2_events` and `dummy3_events` (plus two control-plane channels) arrive on a single `LISTEN` socket. libpqxx routes each notification to the callback registered for its channel.
+- **PostGIS.** `dummy3` stores a `geography(Point, 4326)`. The controller passes an origin, a radius and a bearing; `ST_Project` builds the point, and the same point is appended to the monthly history.
 - **Desired vs applied configuration.** An admin posts a desired configuration. The controller validates it and applies or rejects it. The HTTP request waits for the outcome through a request-id **Dispatcher**, so a concurrent, synchronous API sits on top of an asynchronous queue.
 - **Monthly-partitioned history.** Every sample is appended to a `RANGE`-partitioned history table. Partitions are created ahead of time, rows that landed in `DEFAULT` are moved, and retention drops whole months.
 - **Secure authentication and authorization.** Passwords are stored as Argon2id hashes and requests carry ES384 JWTs. Each request runs under `SET LOCAL ROLE demo_admin | demo_normal`, so PostgreSQL enforces the role a second time, independently of the HTTP check.
@@ -16,10 +17,10 @@ flowchart LR
     subgraph zoneA["zone A"]
         server["pgdemo-server<br/>Oat++ HTTP API"]
     end
-    subgraph db["PostgreSQL 18"]
+    subgraph db["PostgreSQL 18 + PostGIS"]
         queue[("dummy_config_pending<br/>(queue)")]
         applied[("dummy_config<br/>(applied)")]
-        data[("dummy1 / dummy2<br/>+ monthly history")]
+        data[("dummy1 / dummy2 / dummy3<br/>+ monthly history")]
     end
     subgraph zoneB["zone B"]
         controller["pgdemo-controller<br/>producers + queue worker"]
@@ -31,7 +32,7 @@ flowchart LR
     controller -- "UPSERT applied / errors" --> applied
     applied -. "NOTIFY config_events / error_events" .-> server
     controller -- "UPSERT + history" --> data
-    data -. "NOTIFY dummy1_events / dummy2_events" .-> server
+    data -. "NOTIFY dummy1_events / dummy2_events / dummy3_events" .-> server
     server -- "SSE /api/stream" --> client
 ```
 
@@ -56,7 +57,7 @@ Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design: sequence diagr
 ```bash
 sudo apt install build-essential cmake ninja-build git pkg-config patch \
     libpq-dev libbotan-3-dev libboost-json-dev libgtest-dev libgmock-dev \
-    postgresql-18 postgresql-client curl jq openssl
+    postgresql-18 postgresql-18-postgis-3 postgresql-client curl jq openssl
 
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
@@ -85,7 +86,7 @@ In another terminal:
 . run/demo.env
 PGDEMO_PASSWORD="$DEMO_ADMIN_PASSWORD" client/pgdemo.sh login admin
 
-client/pgdemo.sh monitor                      # live events from both tables
+client/pgdemo.sh monitor                      # live events, including the dummy3 GPS track
 client/pgdemo.sh config set dummy1 rate_ms=200 amplitude=25
 client/pgdemo.sh config set dummy1 rate_ms=5  # rejected by the controller: 422 INVALID_RATE
 client/pgdemo.sh config status                # applied vs desired, per target
@@ -117,9 +118,9 @@ The server sits on `zone_a` (172.28.10.0/24) and is published on `127.0.0.1:8080
 | `GET /api/health` | public | Listener liveness |
 | `GET /api/auth/me` | any | Identity and the PostgreSQL group used for the request |
 | `GET /api/db/info` | any | Server version, backend PIDs, libpqxx version, SSE and Dispatcher counters |
-| `GET /api/data/{dummy1\|dummy2}` | any | Live rows |
+| `GET /api/data/{dummy1\|dummy2\|dummy3}` | any | Live rows (`dummy3` returns `lon` and `lat`) |
 | `GET /api/history/{table}?from=&to=&item_id=&limit=` | any | History, newest first, with the partition name |
-| `GET /api/stream?channels=dummy1,dummy2,config,error` | any | Server-Sent Events |
+| `GET /api/stream?channels=dummy1,dummy2,dummy3,config,error` | any | Server-Sent Events |
 | `GET /api/config` | any | `v_dummy_config_sync_status`: applied, desired, `SYNC`/`PENDING`/`ERROR` |
 | `POST /api/config` | admin | `{"target", "rate_ms"?, "amplitude"?, "is_active"?}`, partial update |
 | `GET /api/config/requests/{id}` | any | One request and its error, if any |
@@ -142,7 +143,7 @@ export PGDEMO_TEST_CONTROLLER_CONNINFO="host=127.0.0.1 dbname=pgdemo user=demo_c
 ctest --test-dir build -L db
 
 python3 -m venv .venv && .venv/bin/pip install -r tests/e2e/requirements.txt
-.venv/bin/robot --outputdir build/e2e tests/e2e                       # docker compose stack, 40 checks
+.venv/bin/robot --outputdir build/e2e tests/e2e                       # docker compose stack, 43 checks
 .venv/bin/robot --variable E2E_DEBUG:true --outputdir build/e2e tests/e2e  # same, with live command output
 ```
 
@@ -150,7 +151,7 @@ The database tests cover channel multiplexing, the registration and shutdown rul
 
 The end-to-end suite ([`tests/e2e`](tests/e2e)) needs Docker with compose v2, `curl` and `jq`. [tests/e2e/README.md](tests/e2e/README.md) describes the disposable compose project, the two network zones and the lifecycle the suites drive.
 
-CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs the unit and database tests on `ubuntu:26.04` against `postgres:18`, and the end-to-end suite in a separate job on the compose stack.
+CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs the unit and database tests on `ubuntu:26.04` against `postgis/postgis:18-3.7`, and the end-to-end suite in a separate job on the compose stack.
 
 ## Documentation
 

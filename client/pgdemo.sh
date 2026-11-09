@@ -9,9 +9,9 @@
 #   health
 #   info                              PostgreSQL, libpqxx and listener details
 #
-#   data TABLE                        live rows (dummy1 | dummy2)
+#   data TABLE                        live rows (dummy1 | dummy2 | dummy3)
 #   history TABLE [limit=N] [item=N] [from=TS] [to=TS]
-#   monitor [CHANNELS]                live SSE: dummy1,dummy2,config,error
+#   monitor [CHANNELS]                live SSE: dummy1,dummy2,dummy3,config,error
 #
 #   config status                     applied vs desired, per target
 #   config set TARGET [rate_ms=N] [amplitude=X] [active=true|false]
@@ -176,7 +176,7 @@ cmd_burst() {
 }
 
 cmd_monitor() {
-    local channels="${1:-dummy1,dummy2,config,error}"
+    local channels="${1:-dummy1,dummy2,dummy3,config,error}"
     local -a a
     mapfile -t a < <(auth_args)
     echo "streaming ${channels} (Ctrl-C to stop)" >&2

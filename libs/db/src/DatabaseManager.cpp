@@ -298,12 +298,46 @@ void DatabaseManager::upsert_dummy_with_history(DummyTable table, const DummySam
     txn.commit();
 }
 
+void DatabaseManager::upsert_dummy_with_history(DummyTable table, const TrackSample& sample)
+{
+    if (table != DummyTable::Dummy3) throw std::invalid_argument("track samples are written only to dummy3");
+
+    const auto live = table_name(table);
+    const auto hist = history_table_name(table);
+    // PostGIS builds the point. The same geography is appended to the history.
+    const std::string sql = std::format(
+        "WITH up AS ("
+        "  INSERT INTO {0} (item_id, position, seq, updated_at) VALUES ("
+        "    $1, ST_Project(ST_SetSRID(ST_MakePoint($2, $3), 4326)::geography, $4, $5),"
+        "    $6, clock_timestamp())"
+        "  ON CONFLICT (item_id) DO UPDATE SET position = EXCLUDED.position, seq = EXCLUDED.seq,"
+        "    updated_at = EXCLUDED.updated_at"
+        "  RETURNING item_id, position, seq, updated_at)"
+        " INSERT INTO {1} (item_id, position, seq, recorded_at)"
+        " SELECT item_id, position, seq, updated_at FROM up",
+        live, hist);
+
+    auto lease = pool_.acquire();
+    pqxx::work txn(lease.get());
+    txn.exec(sql, pqxx::params{sample.item_id, sample.origin_lon, sample.origin_lat, sample.radius_m,
+                               sample.bearing_rad, sample.seq})
+        .no_rows();
+    txn.commit();
+}
+
 boost::json::value DatabaseManager::fetch_dummy(DbRole role, DummyTable table)
 {
-    const std::string sql = std::format(
-        "SELECT COALESCE(json_agg(json_build_object('item_id', item_id, 'value', value,"
-        " 'seq', seq, 'updated_at', updated_at) ORDER BY item_id), '[]'::json)::text FROM {}",
-        table_name(table));
+    const std::string sql =
+        table == DummyTable::Dummy3
+            ? std::format(
+                  "SELECT COALESCE(json_agg(json_build_object('item_id', item_id,"
+                  " 'lon', ST_X(position::geometry), 'lat', ST_Y(position::geometry),"
+                  " 'seq', seq, 'updated_at', updated_at) ORDER BY item_id), '[]'::json)::text FROM {}",
+                  table_name(table))
+            : std::format(
+                  "SELECT COALESCE(json_agg(json_build_object('item_id', item_id, 'value', value,"
+                  " 'seq', seq, 'updated_at', updated_at) ORDER BY item_id), '[]'::json)::text FROM {}",
+                  table_name(table));
     return with_role(role, [&](pqxx::work& txn) {
         return parse_json_field(txn.exec(sql).one_field());
     });
@@ -314,16 +348,22 @@ boost::json::value DatabaseManager::fetch_history(DbRole role, DummyTable table,
                                                   const std::optional<std::string>& to,
                                                   std::optional<int> item_id, int limit)
 {
+    const std::string columns = table == DummyTable::Dummy3
+                                     ? "history_id, item_id, ST_X(position::geometry) AS lon,"
+                                       " ST_Y(position::geometry) AS lat, seq, recorded_at,"
+                                       " tableoid::regclass::text AS partition"
+                                     : "history_id, item_id, value, seq, recorded_at,"
+                                       " tableoid::regclass::text AS partition";
     const std::string sql = std::format(
         "SELECT COALESCE(json_agg(r ORDER BY r.recorded_at DESC), '[]'::json)::text FROM ("
-        "  SELECT history_id, item_id, value, seq, recorded_at, tableoid::regclass::text AS partition"
+        "  SELECT {}"
         "  FROM {}"
         "  WHERE recorded_at >= COALESCE($1::timestamptz, now() - interval '1 hour')"
         "    AND recorded_at <  COALESCE($2::timestamptz, now() + interval '1 second')"
         "    AND ($3::int IS NULL OR item_id = $3::int)"
         "  ORDER BY recorded_at DESC"
         "  LIMIT $4) r",
-        history_table_name(table));
+        columns, history_table_name(table));
     return with_role(role, [&](pqxx::work& txn) {
         return parse_json_field(txn.exec(sql, pqxx::params{from, to, item_id, limit}).one_field());
     });
@@ -433,7 +473,7 @@ DrainStats DatabaseManager::drain_pending(
         bool expired = false;
         if (!target)
         {
-            outcome = ConfigOutcome::failure("UNKNOWN_TARGET", "target is not dummy1 or dummy2");
+            outcome = ConfigOutcome::failure("UNKNOWN_TARGET", "target is not dummy1, dummy2 or dummy3");
         }
         else if (age_s > static_cast<double>(max_age.count()))
         {

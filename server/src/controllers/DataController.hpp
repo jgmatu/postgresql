@@ -21,9 +21,9 @@ namespace pgdemo::server {
  *
  * GET /api/health                     public liveness
  * GET /api/db/info                    PostgreSQL / libpqxx / listener details
- * GET /api/data/{table}               live rows of dummy1 | dummy2
+ * GET /api/data/{table}               live rows of dummy1 | dummy2 | dummy3
  * GET /api/history/{table}?from=&to=&item_id=&limit=
- * GET /api/stream?channels=dummy1,dummy2,config,error   Server-Sent Events
+ * GET /api/stream?channels=dummy1,dummy2,dummy3,config,error   Server-Sent Events
  */
 class DataController : public oatpp::web::server::api::ApiController
 {

@@ -58,7 +58,7 @@ void EventHub::Subscription::close()
 
 const std::set<std::string>& EventHub::all_channels()
 {
-    static const std::set<std::string> kAll{"dummy1", "dummy2", "config", "error"};
+    static const std::set<std::string> kAll{"dummy1", "dummy2", "dummy3", "config", "error"};
     return kAll;
 }
 

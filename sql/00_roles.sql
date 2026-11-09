@@ -45,3 +45,8 @@ GRANT demo_normal TO demo_admin;
 -- The server may switch into either group but inherits neither.
 GRANT demo_admin  TO demo_server WITH INHERIT FALSE, SET TRUE;
 GRANT demo_normal TO demo_server WITH INHERIT FALSE, SET TRUE;
+
+-- SET LOCAL ROLE does not replace the session search_path, so the login roles
+-- carry the PostGIS schema. Installed by sql/01_data.sql; a missing schema is skipped.
+ALTER ROLE demo_server SET search_path = public, extensions;
+ALTER ROLE demo_controller SET search_path = public, extensions;

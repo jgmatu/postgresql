@@ -20,6 +20,7 @@ namespace pgdemo::controller {
  *
  * - dummy1: `amplitude * sin(2*pi*seq/40 + phase(item))`
  * - dummy2: sawtooth `amplitude * (seq % 50) / 50` plus Gaussian noise
+ * - dummy3: GPS orbit of radius `amplitude` metres; PostGIS projects the point
  */
 class Producer
 {

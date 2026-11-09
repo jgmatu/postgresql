@@ -85,13 +85,13 @@ inline std::optional<std::string> str_param(const std::shared_ptr<IncomingReques
 }
 
 /**
- * @brief `dummy1` or `dummy2` from a path or query value.
+ * @brief `dummy1`, `dummy2` or `dummy3` from a path or query value.
  * @throws BadRequest for any other name
  */
 inline db::DummyTable table_param(std::string_view name)
 {
     const auto t = db::parse_dummy_table(name);
-    if (!t) throw BadRequest("unknown table '" + std::string(name) + "' (expected dummy1 or dummy2)");
+    if (!t) throw BadRequest("unknown table '" + std::string(name) + "' (expected dummy1, dummy2 or dummy3)");
     return *t;
 }
 

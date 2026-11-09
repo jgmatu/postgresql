@@ -4,7 +4,7 @@
 // desired configuration goes into the dummy_config_pending queue, and results
 // and live data come back as NOTIFY on the listener connection.
 //
-//   dummy1_events, dummy2_events --> EventHub --> SSE /api/stream
+//   dummy1_events, dummy2_events, dummy3_events --> EventHub --> SSE /api/stream
 //   config_events                --> Dispatcher::dispatch(SUCCESS) + SSE
 //   error_events                 --> Dispatcher::dispatch(ERROR)   + SSE
 //
@@ -125,7 +125,7 @@ void register_channels(Services& s)
     auto hub = s.hub;
     auto dispatcher = s.dispatcher;
 
-    // Data plane: two tables, two channels, one listener socket.
+    // Data plane: one channel per table, one listener socket.
     for (const auto t : db::kAllTables)
     {
         const std::string sse(db::table_name(t));

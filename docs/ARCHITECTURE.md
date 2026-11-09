@@ -3,7 +3,7 @@
 This document explains how two processes that never talk to each other run a reactive, transactional exchange through PostgreSQL alone, and how the same database enforces authentication and authorization.
 
 1. [Processes and zones](#1-processes-and-zones)
-2. [Data plane: two tables, one listener](#2-data-plane-two-tables-one-listener)
+2. [Data plane: three tables, one listener](#2-data-plane-three-tables-one-listener)
 3. [Control plane: desired vs applied configuration](#3-control-plane-desired-vs-applied-configuration)
 4. [The Dispatcher](#4-the-dispatcher)
 5. [Listener lifecycle in `libs/db`](#5-listener-lifecycle-in-libsdb)
@@ -15,8 +15,8 @@ This document explains how two processes that never talk to each other run a rea
 
 | Process | Zone | PostgreSQL login | Writes | Listens to |
 |---|---|---|---|---|
-| `pgdemo-server` | A | `demo_server` (NOINHERIT) | `dummy_config_pending`, `app_users` | `dummy1_events`, `dummy2_events`, `config_events`, `error_events` |
-| `pgdemo-controller` | B | `demo_controller` | `dummy1`, `dummy2`, histories, `dummy_config`, `dummy_config_errors` | `config_requested` |
+| `pgdemo-server` | A | `demo_server` (NOINHERIT) | `dummy_config_pending`, `app_users` | `dummy1_events`, `dummy2_events`, `dummy3_events`, `config_events`, `error_events` |
+| `pgdemo-controller` | B | `demo_controller` | `dummy1`, `dummy2`, `dummy3`, histories, `dummy_config`, `dummy_config_errors` | `config_requested` |
 | `client/pgdemo.sh` | host | none | over HTTP only | SSE `/api/stream` |
 
 Neither process knows the other's address, port or existence. Each owns its side of the contract: the server owns *desired* state, and the controller owns *applied* state and the data. The schema in [`sql/`](../sql) is the interface between them.
@@ -41,46 +41,55 @@ flowchart TB
     subgraph C["pgdemo-controller (zone B)"]
         P1["producer dummy1"]
         P2["producer dummy2"]
+        P3["producer dummy3"]
         CL["listener thread<br/>drain_pending()"]
         CL -- "apply()" --> P1
         CL -- "apply()" --> P2
+        CL -- "apply()" --> P3
     end
     PG[("PostgreSQL")]
     HTTP <--> PG
     SL <-. "NOTIFY" .-> PG
     P1 --> PG
     P2 --> PG
+    P3 --> PG
     CL <-. "NOTIFY" .-> PG
     CL --> PG
 ```
 
-## 2. Data plane: two tables, one listener
+## 2. Data plane: three tables, one listener
 
-`dummy1` and `dummy2` are separate tables, each with its own `AFTER INSERT OR UPDATE` trigger and its own channel:
+`dummy1`, `dummy2` and `dummy3` are separate tables, each with its own `AFTER INSERT OR UPDATE` trigger and its own channel:
 
 | Table | Trigger function | Channel | Payload |
 |---|---|---|---|
 | `dummy1` | `notify_dummy1_change()` | `dummy1_events` | `{table, action, item_id, value, seq, ts}` |
 | `dummy2` | `notify_dummy2_change()` | `dummy2_events` | same shape |
+| `dummy3` | `notify_dummy3_change()` | `dummy3_events` | `{table, action, item_id, lon, lat, seq, ts}` |
+
+`dummy3.position` is `geography(Point, 4326)`, installed with PostGIS in the `extensions` schema. The producer does not compute latitude and longitude itself. It passes a fixed origin (Madrid), a radius (`amplitude`, metres) and a bearing, and the INSERT calls `ST_Project`. The same point is appended to `dummy3_history`. A GiST index covers the live table and every monthly partition.
 
 The controller runs one `std::jthread` per table. Every tick writes one statement: a CTE that UPSERTs the live row and appends the same sample to the history table in one transaction. The trigger fires on the live row, and PostgreSQL delivers the notification **only when the transaction commits**, so a listener never sees a value that was rolled back.
 
-On the server, one listener connection subscribes to all four channels. libpqxx keeps a handler per channel and calls the right one for each notification. The server forwards both data channels to the `EventHub`, which fans them out to SSE subscribers filtered by `?channels=`.
+On the server, one listener connection subscribes to every channel. libpqxx keeps a handler per channel and calls the right one for each notification. The server forwards the data channels to the `EventHub`, which fans them out to SSE subscribers filtered by `?channels=`.
 
 ```mermaid
 sequenceDiagram
     participant P1 as producer dummy1
     participant P2 as producer dummy2
+    participant P3 as producer dummy3
     participant PG as PostgreSQL
     participant L as server listener
     participant H as EventHub
     participant B as SSE client
     P1->>PG: UPSERT dummy1 + INSERT dummy1_history (COMMIT)
     P2->>PG: UPSERT dummy2 + INSERT dummy2_history (COMMIT)
+    P3->>PG: ST_Project + INSERT dummy3_history (COMMIT)
     PG-->>L: NOTIFY dummy1_events {item_id, value, seq}
     PG-->>L: NOTIFY dummy2_events {item_id, value, seq}
-    L->>H: publish("dummy1", ...) / publish("dummy2", ...)
-    H-->>B: event: dummy1 / event: dummy2
+    PG-->>L: NOTIFY dummy3_events {item_id, lon, lat}
+    L->>H: publish("dummy1" / "dummy2" / "dummy3")
+    H-->>B: event: dummy1 / event: dummy2 / event: dummy3
 ```
 
 `EventHub::publish` never blocks the listener thread. Each subscriber has a bounded queue, and a slow client loses its oldest events rather than stalling notification delivery for everybody.
@@ -180,7 +189,7 @@ Callbacks run on the listener thread. They may call query methods (that thread d
 
 ## 6. Monthly partitioning
 
-`dummy1_history` and `dummy2_history` are `PARTITION BY RANGE (recorded_at)`, with one partition per UTC month plus a `DEFAULT` partition:
+`dummy1_history`, `dummy2_history` and `dummy3_history` are `PARTITION BY RANGE (recorded_at)`, with one partition per UTC month plus a `DEFAULT` partition:
 
 ```text
 dummy1_history
@@ -223,7 +232,7 @@ COMMIT;                         -- the role reverts here
 
 | Object | `demo_normal` | `demo_admin` | `demo_controller` | `demo_server` |
 |---|---|---|---|---|
-| `dummy1`, `dummy2`, histories | SELECT | SELECT | SELECT, INSERT, UPDATE | – |
+| `dummy1`, `dummy2`, `dummy3`, histories | SELECT | SELECT | SELECT, INSERT, UPDATE | – |
 | `dummy_config` | SELECT | SELECT | SELECT, INSERT, UPDATE | – |
 | `dummy_config_pending` | SELECT | SELECT, INSERT | SELECT, UPDATE | – |
 | `dummy_config_errors`, `_history` | SELECT | SELECT | INSERT | – |

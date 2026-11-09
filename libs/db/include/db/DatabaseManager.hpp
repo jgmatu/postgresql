@@ -177,10 +177,22 @@ public:
     void upsert_dummy_with_history(DummyTable table, const DummySample& sample);
 
     /**
+     * @brief UPSERT a GPS fix and append it to the history, in one transaction.
+     *
+     * The point is `ST_Project` of the origin by `radius_m` along `bearing_rad`.
+     * Only `dummy3` accepts a track sample.
+     *
+     * @param table  must be `dummy3`; the trigger fires `dummy3_events` on commit
+     * @param sample origin, radius, bearing and tick
+     */
+    void upsert_dummy_with_history(DummyTable table, const TrackSample& sample);
+
+    /**
      * @brief Live rows of `table`, ordered by `item_id`.
      * @param role  group used for `SET LOCAL ROLE`
      * @param table table to read
-     * @return `[{"item_id","value","seq","updated_at"}, ...]`
+     * @return scalar tables: `[{"item_id","value","seq","updated_at"}, ...]`;
+     *         `dummy3`: `lon` and `lat` instead of `value`
      */
     boost::json::value fetch_dummy(DbRole role, DummyTable table);
 

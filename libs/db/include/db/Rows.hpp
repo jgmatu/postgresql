@@ -16,6 +16,17 @@ struct DummySample
     std::int64_t seq{0};  ///< producer tick counter, increases by one per tick
 };
 
+/// One GPS fix for `dummy3`. PostGIS projects the point from the origin.
+struct TrackSample
+{
+    int item_id{1};            ///< primary key of the live row (1..items)
+    double origin_lon{0.0};    ///< origin longitude, degrees
+    double origin_lat{0.0};    ///< origin latitude, degrees
+    double radius_m{0.0};      ///< orbit radius in metres (`amplitude`)
+    double bearing_rad{0.0};   ///< azimuth passed to `ST_Project`, radians clockwise from north
+    std::int64_t seq{0};       ///< producer tick counter, increases by one per tick
+};
+
 /// Applied configuration of one target (row of `dummy_config`).
 struct AppliedConfig
 {

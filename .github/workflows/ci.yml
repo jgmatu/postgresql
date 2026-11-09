@@ -16,7 +16,7 @@ jobs:
     container: ubuntu:26.04
     services:
       postgres:
-        image: postgres:18
+        image: postgis/postgis:18-3.7
         env:
           POSTGRES_PASSWORD: ci-only-postgres
         options: >-

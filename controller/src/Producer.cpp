@@ -81,7 +81,21 @@ void Producer::run(std::stop_token st)
             {
                 try
                 {
-                    db_.upsert_dummy_with_history(table_, db::DummySample{item, sample(item, seq), seq});
+                    if (table_ == db::DummyTable::Dummy3)
+                    {
+                        // Madrid. Bearing 0 is north; each item is offset by pi/4.
+                        constexpr double kOriginLon = -3.7038;
+                        constexpr double kOriginLat = 40.4168;
+                        const double phase = (item - 1) * std::numbers::pi / 4.0;
+                        const double bearing =
+                            2.0 * std::numbers::pi * static_cast<double>(seq) / 40.0 + phase;
+                        db_.upsert_dummy_with_history(
+                            table_, db::TrackSample{item, kOriginLon, kOriginLat, amplitude_.load(), bearing, seq});
+                    }
+                    else
+                    {
+                        db_.upsert_dummy_with_history(table_, db::DummySample{item, sample(item, seq), seq});
+                    }
                     written_.fetch_add(1);
                 }
                 catch (const std::exception& e)

@@ -32,13 +32,18 @@ CREATE SEQUENCE IF NOT EXISTS request_id_seq AS BIGINT;
 -- Applied state. CHECKs are a second line of defence behind the controller's
 -- own validation: the applied state can never hold an invalid configuration.
 CREATE TABLE IF NOT EXISTS dummy_config (
-    target      TEXT PRIMARY KEY CHECK (target IN ('dummy1', 'dummy2')),
+    target      TEXT PRIMARY KEY,
     rate_ms     INT NOT NULL CHECK (rate_ms BETWEEN 50 AND 10000),
     amplitude   DOUBLE PRECISION NOT NULL CHECK (amplitude > 0 AND amplitude <= 1000),
     is_active   BOOLEAN NOT NULL DEFAULT TRUE,
     request_id  BIGINT,
     applied_at  TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
 );
+
+-- Replaced on every run so an existing database picks up dummy3 without --reset.
+ALTER TABLE dummy_config DROP CONSTRAINT IF EXISTS dummy_config_target_check;
+ALTER TABLE dummy_config ADD CONSTRAINT dummy_config_target_check
+    CHECK (target IN ('dummy1', 'dummy2', 'dummy3'));
 
 -- Desired state / persistent queue. Values are only loosely constrained on
 -- purpose: an out-of-range request is accepted, travels the loop, and comes
@@ -104,7 +109,8 @@ CREATE INDEX IF NOT EXISTS dummy_config_pending_history_target_idx
 -- Initial applied state, so the producers have something to start from.
 INSERT INTO dummy_config (target, rate_ms, amplitude, is_active) VALUES
     ('dummy1', 500, 10.0, TRUE),
-    ('dummy2', 1000, 5.0, TRUE)
+    ('dummy2', 1000, 5.0, TRUE),
+    ('dummy3', 1000, 250.0, TRUE)
 ON CONFLICT (target) DO NOTHING;
 
 INSERT INTO dummy_config_history (target, rate_ms, amplitude, is_active, request_id)

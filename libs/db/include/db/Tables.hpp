@@ -6,7 +6,7 @@
 namespace pgdemo::db {
 
 /**
- * @brief The two data-plane tables. Each has its own trigger, NOTIFY channel and
+ * @brief The data-plane tables. Each has its own trigger, NOTIFY channel and
  * partitioned history table.
  *
  * SQL identifiers are never built from caller strings: every table and channel
@@ -15,27 +15,46 @@ namespace pgdemo::db {
 enum class DummyTable {
     Dummy1, ///< `dummy1`: sine wave, channel `dummy1_events`
     Dummy2, ///< `dummy2`: noisy sawtooth, channel `dummy2_events`
+    Dummy3, ///< `dummy3`: GPS orbit, channel `dummy3_events`
 };
 
-/// The control plane configures exactly the same two targets.
+/// The control plane configures exactly the same targets.
 using ConfigTarget = DummyTable;
 
-/// Live table name: `dummy1` or `dummy2`. Also the SSE channel and the `target` value.
+/// Live table name. Also the SSE channel and the `target` value.
 constexpr std::string_view table_name(DummyTable t) noexcept
 {
-    return t == DummyTable::Dummy1 ? "dummy1" : "dummy2";
+    switch (t)
+    {
+        case DummyTable::Dummy1: return "dummy1";
+        case DummyTable::Dummy2: return "dummy2";
+        case DummyTable::Dummy3: return "dummy3";
+    }
+    return "dummy3";
 }
 
-/// Partitioned history table: `dummy1_history` or `dummy2_history`.
+/// Partitioned history table.
 constexpr std::string_view history_table_name(DummyTable t) noexcept
 {
-    return t == DummyTable::Dummy1 ? "dummy1_history" : "dummy2_history";
+    switch (t)
+    {
+        case DummyTable::Dummy1: return "dummy1_history";
+        case DummyTable::Dummy2: return "dummy2_history";
+        case DummyTable::Dummy3: return "dummy3_history";
+    }
+    return "dummy3_history";
 }
 
-/// NOTIFY channel fired by the table's trigger: `dummy1_events` or `dummy2_events`.
+/// NOTIFY channel fired by the table's trigger.
 constexpr std::string_view channel_name(DummyTable t) noexcept
 {
-    return t == DummyTable::Dummy1 ? "dummy1_events" : "dummy2_events";
+    switch (t)
+    {
+        case DummyTable::Dummy1: return "dummy1_events";
+        case DummyTable::Dummy2: return "dummy2_events";
+        case DummyTable::Dummy3: return "dummy3_events";
+    }
+    return "dummy3_events";
 }
 
 /// Inverse of `table_name()`. `std::nullopt` for any other string.
@@ -43,11 +62,12 @@ constexpr std::optional<DummyTable> parse_dummy_table(std::string_view name) noe
 {
     if (name == "dummy1") return DummyTable::Dummy1;
     if (name == "dummy2") return DummyTable::Dummy2;
+    if (name == "dummy3") return DummyTable::Dummy3;
     return std::nullopt;
 }
 
-/// Every data-plane table, for loops that must cover both.
-constexpr DummyTable kAllTables[] = {DummyTable::Dummy1, DummyTable::Dummy2};
+/// Every data-plane table, for loops that must cover all of them.
+constexpr DummyTable kAllTables[] = {DummyTable::Dummy1, DummyTable::Dummy2, DummyTable::Dummy3};
 
 /// NOTIFY channels of the control plane (see sql/04_triggers.sql).
 namespace channel {

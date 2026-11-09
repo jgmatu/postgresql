@@ -5,8 +5,8 @@
 
   Object                         demo_normal  demo_admin        demo_controller   demo_server (base)
   -----------------------------  -----------  ----------------  ----------------  ------------------
-  dummy1, dummy2                 SELECT       SELECT            SELECT/INS/UPD    -
-  dummy1_history, dummy2_history SELECT       SELECT            INSERT            -
+  dummy1, dummy2, dummy3         SELECT       SELECT            SELECT/INS/UPD    -
+  *_history                      SELECT       SELECT            INSERT            -
   dummy_config                   SELECT       SELECT            SELECT/INS/UPD    -
   dummy_config_pending           SELECT       SELECT/INSERT     SELECT/UPDATE     -
   dummy_config_errors            SELECT       SELECT            INSERT            -
@@ -83,7 +83,7 @@ REVOKE CREATE ON SCHEMA public FROM PUBLIC;
 GRANT USAGE ON SCHEMA public TO demo_normal, demo_admin, demo_controller, demo_server;
 
 -- demo_normal: read-only monitoring
-GRANT SELECT ON dummy1, dummy2, dummy1_history, dummy2_history TO demo_normal;
+GRANT SELECT ON dummy1, dummy2, dummy3, dummy1_history, dummy2_history, dummy3_history TO demo_normal;
 GRANT SELECT ON dummy_config, dummy_config_pending, dummy_config_errors, dummy_config_history TO demo_normal;
 GRANT SELECT ON v_dummy_config_sync_status TO demo_normal;
 
@@ -103,6 +103,6 @@ GRANT EXECUTE ON FUNCTION auth_fetch_user(text) TO demo_server;
 GRANT SELECT, UPDATE ON dummy_config_pending TO demo_controller;
 GRANT SELECT, INSERT, UPDATE ON dummy_config TO demo_controller;
 GRANT INSERT ON dummy_config_history, dummy_config_errors TO demo_controller;
-GRANT SELECT, INSERT, UPDATE ON dummy1, dummy2 TO demo_controller;
-GRANT INSERT ON dummy1_history, dummy2_history TO demo_controller;
+GRANT SELECT, INSERT, UPDATE ON dummy1, dummy2, dummy3 TO demo_controller;
+GRANT INSERT ON dummy1_history, dummy2_history, dummy3_history TO demo_controller;
 GRANT EXECUTE ON FUNCTION ensure_monthly_partitions(regclass, date, int) TO demo_controller;

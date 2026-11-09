@@ -129,8 +129,8 @@ TEST_F(DbTest, ListenerMultiplexesBothDataChannels)
     }
     server_->run_listener_loop();
 
-    controller_->upsert_dummy_with_history(db::DummyTable::Dummy1, {901, 1.5, 1});
-    controller_->upsert_dummy_with_history(db::DummyTable::Dummy2, {902, 2.5, 1});
+    controller_->upsert_dummy_with_history(db::DummyTable::Dummy1, db::DummySample{901, 1.5, 1});
+    controller_->upsert_dummy_with_history(db::DummyTable::Dummy2, db::DummySample{902, 2.5, 1});
 
     EXPECT_TRUE(inbox_.wait([](const auto& m) {
         return has(m, "dummy1_events", 901) && has(m, "dummy2_events", 902);
@@ -157,9 +157,25 @@ TEST_F(DbTest, DisconnectEndsTheBlockedListenerPromptly)
     EXPECT_LT(std::chrono::steady_clock::now() - t0, 1s);
 }
 
+TEST_F(DbTest, GpsHistoryKeepsThePointAndThePartition)
+{
+    controller_->upsert_dummy_with_history(db::DummyTable::Dummy3,
+                                           db::TrackSample{904, -3.7038, 40.4168, 250.0, 0.0, 7});
+    const auto rows = server_->fetch_history(db::DbRole::Normal, db::DummyTable::Dummy3, std::nullopt,
+                                             std::nullopt, 904, 1);
+    ASSERT_EQ(rows.as_array().size(), 1u);
+    const auto& row = rows.as_array()[0].as_object();
+    EXPECT_EQ(row.at("seq").as_int64(), 7);
+    EXPECT_EQ(row.at("partition").as_string(), current_partition("dummy3_history"));
+    // Bearing 0 is north, so PostGIS moves the point off the origin.
+    EXPECT_TRUE(row.at("lon").is_number());
+    EXPECT_TRUE(row.at("lat").is_number());
+    EXPECT_GT(row.at("lat").to_number<double>(), 40.4168);
+}
+
 TEST_F(DbTest, HistoryRowsLandInTheCurrentMonthlyPartition)
 {
-    controller_->upsert_dummy_with_history(db::DummyTable::Dummy2, {903, 3.0, 42});
+    controller_->upsert_dummy_with_history(db::DummyTable::Dummy2, db::DummySample{903, 3.0, 42});
     const auto rows = server_->fetch_history(db::DbRole::Normal, db::DummyTable::Dummy2, std::nullopt,
                                              std::nullopt, 903, 1);
     ASSERT_EQ(rows.as_array().size(), 1u);

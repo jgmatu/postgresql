@@ -17,7 +17,7 @@ namespace pgdemo::server {
 struct Event
 {
     std::uint64_t id{0}; ///< SSE `id:`; increases by one per published event, starting at 1
-    std::string channel; ///< SSE `event:` name: dummy1 | dummy2 | config | error
+    std::string channel; ///< SSE `event:` name: dummy1 | dummy2 | dummy3 | config | error
     std::string data;    ///< JSON text
 };
 
@@ -64,7 +64,7 @@ public:
         bool closed_{false};
     };
 
-    /// Every channel name a client may ask for: dummy1, dummy2, config, error.
+    /// Every channel name a client may ask for: dummy1, dummy2, dummy3, config, error.
     static const std::set<std::string>& all_channels();
 
     /**

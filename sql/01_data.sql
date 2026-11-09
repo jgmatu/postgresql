@@ -1,11 +1,14 @@
 /*
 =============================================================================
-01_data.sql - data plane: two live tables and their monthly-partitioned history
+01_data.sql - data plane: three live tables and their monthly-partitioned history
 =============================================================================
 
-dummy1 and dummy2 are deliberately separate tables. Each one has its own
-trigger and its own NOTIFY channel (04_triggers.sql), so a single LISTEN
-connection can multiplex both and dispatch each event to its own callback.
+dummy1, dummy2 and dummy3 are deliberately separate tables. Each one has its
+own trigger and its own NOTIFY channel (04_triggers.sql), so a single LISTEN
+connection can multiplex them and dispatch each event to its own callback.
+
+dummy3 stores a GPS point. PostGIS lives in schema extensions, not public,
+so the later REVOKE on public does not hide ST_Project from the demo roles.
 
 Each live row is a snapshot (one row per item_id, UPSERT). Every write also
 appends a row to <table>_history in the same transaction. History tables are
@@ -19,6 +22,12 @@ range-partitioned by month on recorded_at:
 Queries with a recorded_at range only touch the matching partitions
 (partition pruning). Retention drops whole partitions instead of DELETE.
 */
+
+-- Superuser: the extension cannot be created by demo_owner.
+CREATE SCHEMA IF NOT EXISTS extensions;
+CREATE EXTENSION IF NOT EXISTS postgis SCHEMA extensions;
+GRANT USAGE ON SCHEMA extensions TO demo_owner, demo_normal, demo_admin, demo_controller, demo_server;
+SET search_path = public, extensions;
 
 SET ROLE demo_owner;
 
@@ -39,8 +48,17 @@ CREATE TABLE IF NOT EXISTS dummy2 (
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
 );
 
+-- GPS fix. amplitude on this target is the orbit radius in metres.
+CREATE TABLE IF NOT EXISTS dummy3 (
+    item_id     INT PRIMARY KEY CHECK (item_id > 0),
+    position    extensions.geography(Point, 4326) NOT NULL,
+    seq         BIGINT NOT NULL,
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+);
+
 COMMENT ON TABLE dummy1 IS 'Live snapshot written by the controller producer thread for dummy1 (sine wave).';
 COMMENT ON TABLE dummy2 IS 'Live snapshot written by the controller producer thread for dummy2 (counter with noise).';
+COMMENT ON TABLE dummy3 IS 'Live GPS fix written by the controller producer thread for dummy3 (orbit around a fixed origin).';
 
 -- ---------------------------------------------------------------------------
 -- Partitioned history. The partition key must be part of the primary key.
@@ -65,12 +83,25 @@ CREATE TABLE IF NOT EXISTS dummy2_history (
     PRIMARY KEY (history_id, recorded_at)
 ) PARTITION BY RANGE (recorded_at);
 
+CREATE TABLE IF NOT EXISTS dummy3_history (
+    history_id   BIGINT GENERATED ALWAYS AS IDENTITY,
+    item_id      INT NOT NULL,
+    position     extensions.geography(Point, 4326) NOT NULL,
+    seq          BIGINT NOT NULL,
+    recorded_at  TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (history_id, recorded_at)
+) PARTITION BY RANGE (recorded_at);
+
 CREATE TABLE IF NOT EXISTS dummy1_history_default PARTITION OF dummy1_history DEFAULT;
 CREATE TABLE IF NOT EXISTS dummy2_history_default PARTITION OF dummy2_history DEFAULT;
+CREATE TABLE IF NOT EXISTS dummy3_history_default PARTITION OF dummy3_history DEFAULT;
 
 -- Declared on the parent; PostgreSQL creates it on every partition.
 CREATE INDEX IF NOT EXISTS dummy1_history_item_time_idx ON dummy1_history (item_id, recorded_at DESC);
 CREATE INDEX IF NOT EXISTS dummy2_history_item_time_idx ON dummy2_history (item_id, recorded_at DESC);
+CREATE INDEX IF NOT EXISTS dummy3_history_item_time_idx ON dummy3_history (item_id, recorded_at DESC);
+CREATE INDEX IF NOT EXISTS dummy3_position_gix ON dummy3 USING GIST (position);
+CREATE INDEX IF NOT EXISTS dummy3_history_position_gix ON dummy3_history USING GIST (position);
 
 -- ---------------------------------------------------------------------------
 -- Partition maintenance
@@ -102,7 +133,8 @@ DECLARE
     child        text;
     moved        bigint;
 BEGIN
-    IF parent NOT IN ('public.dummy1_history'::regclass, 'public.dummy2_history'::regclass) THEN
+    IF parent NOT IN ('public.dummy1_history'::regclass, 'public.dummy2_history'::regclass,
+                      'public.dummy3_history'::regclass) THEN
         RAISE EXCEPTION 'ensure_monthly_partitions: unsupported parent %', parent;
     END IF;
     IF months_ahead < 0 OR months_ahead > 24 THEN
@@ -161,7 +193,8 @@ DECLARE
     ym     text[];
     m      date;
 BEGIN
-    IF parent NOT IN ('public.dummy1_history'::regclass, 'public.dummy2_history'::regclass) THEN
+    IF parent NOT IN ('public.dummy1_history'::regclass, 'public.dummy2_history'::regclass,
+                      'public.dummy3_history'::regclass) THEN
         RAISE EXCEPTION 'drop_monthly_partitions_before: unsupported parent %', parent;
     END IF;
 
@@ -189,5 +222,6 @@ $$;
 -- same function at startup and once a day.
 SELECT ensure_monthly_partitions('dummy1_history');
 SELECT ensure_monthly_partitions('dummy2_history');
+SELECT ensure_monthly_partitions('dummy3_history');
 
 RESET ROLE;

@@ -22,7 +22,7 @@ x-app: &app
 
 services:
   postgres:
-    image: postgres:18
+    image: postgis/postgis:18-3.7
     environment:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in docker/.env}
     volumes:
