@@ -5,3 +5,4 @@ run
 docker/.env
 docs
 tests
+frontend

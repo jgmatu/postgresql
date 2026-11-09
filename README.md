@@ -64,11 +64,13 @@ Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design: sequence diagr
 | [`controller/`](controller) | `pgdemo-controller`: supervises one `pgdemo-device` process per device (`fork` + `execv`, Unix socket, challenge-response, restart with backoff), writes their samples and works the configuration queue. |
 | [`device/`](device) | `pgdemo-device`: generates its key and CSR, proves its identity to the controller and streams samples from its generator. |
 | [`client/pgdemo.sh`](client/pgdemo.sh) | Command-line client: login, users, devices and certificates, PKI, telemetry, configuration, live monitor. |
-| [`scripts/`](scripts) | `db-init.sh`, `run-all.sh` (start the processes), `capture.sh` (network captures), key and certificate generation, including the device CA (`gen-device-ca.sh`). |
+| [`frontend/`](frontend) | The control panel: Next.js 16 static export with Tailwind CSS v4 and Catalyst, a visualization panel for every role and an administration panel for admins. [frontend/README.md](frontend/README.md) covers its design, architecture and screens. |
+| [`webroot/`](webroot) | Where the built panel goes (`pnpm build` or `scripts/fetch-webroot.sh`) and what `pgdemo-server --webroot` serves; only its README is in git. |
+| [`scripts/`](scripts) | `db-init.sh`, `run-all.sh` (start the processes), `fetch-webroot.sh` (download the built panel), `capture.sh` (network captures), key and certificate generation, including the device CA (`gen-device-ca.sh`). |
 | [`data/`](data) | Network captures of the client over HTTPS and over plain HTTP. |
 | [`patches/`](patches) | libpqxx 8.0.0 patch that adds a truly blocking `wait_notification()`. |
 | [`docker/`](docker) | Image and compose file with two isolated network zones. |
-| [`tests/`](tests) | GoogleTest (auth, dispatcher, database) and a Robot Framework end-to-end suite on docker compose. |
+| [`tests/`](tests) | GoogleTest (auth, dispatcher, static files, database) and a Robot Framework end-to-end suite on docker compose, API and browser. |
 
 ## Quick start (Ubuntu 26.04)
 
@@ -148,6 +150,25 @@ export PGDEMO_URL=https://127.0.0.1:8080 PGDEMO_CA=run/docker-tls.crt
 ```
 
 Inside its container the server listens on HTTPS port 8443, like `scripts/run-all.sh`; compose publishes it on `127.0.0.1:8080` only. `PGDEMO_URL` and `PGDEMO_CA` point the client at that address and at the container's certificate. The server sits on `zone_a` (172.28.10.0/24). The controller sits on `zone_b` (172.28.20.0/24, `internal`, no outbound route), with its device processes in the same container. PostgreSQL is attached to both zones and is the only path between them. The end-to-end suite checks that the controller cannot open a TCP connection to the server. The CA key lives in the `ca-keys` volume, mounted only by `init` and `server`; the device keys live in `device-keys`, mounted only by `controller`.
+
+## Control panel
+
+The server also serves a web control panel on the same origin as the API: `https://127.0.0.1:8443/` with `scripts/run-all.sh`, `http://127.0.0.1:8080/` with `--http`, and `https://127.0.0.1:8080/` from Docker. It opens on a login page; every user gets the visualization tabs (devices live over SSE, detail with chart and history, configuration, GPS map, PKI and CRL, events, system), and the `admin` user also gets an amber administration panel to enroll and delete devices, revoke, suspend and rotate certificates, change configurations and manage users.
+
+![Dispositivos](frontend/docs/screens/devices.png)
+
+| | |
+|---|---|
+| ![Device detail](frontend/docs/screens/device-detail.png) | ![Administration: identity](frontend/docs/screens/admin-identity-rotated.png) |
+
+The panel is a Next.js static export built with the licensed Catalyst components, so neither its sources nor the build are in git. Fill `webroot/` before starting the server (or before building the Docker image):
+
+```bash
+scripts/fetch-webroot.sh                     # the panel CI built and tested on main (sha256 checked)
+(cd frontend && pnpm install && pnpm build)  # or build it, with your copy of Catalyst
+```
+
+`scripts/run-all.sh` passes `--webroot webroot` when `webroot/index.html` exists and logs `panel: N files from …`; otherwise it warns "panel no disponible" and the server runs the API alone. [frontend/README.md](frontend/README.md) covers development, the design, the role model and every screen.
 
 ## TLS: oatpp-openssl, OpenSSL 3.5 and oqsprovider
 
@@ -235,6 +256,9 @@ Every route is TLS 1.3 on port 8443, or plain HTTP on port 8080 with `scripts/ru
 | `GET /api/users` | admin | User directory (no hashes) |
 | `POST /api/users` | admin | `{"username","password","role"}` |
 | `DELETE /api/users/{username}` | admin | The last admin cannot be removed |
+| `GET /*` outside `/api` | public | The control panel's static files, with `--webroot`: `index.html` per route, `404.html` for anything else. The pages hold no data; every call they make is to `/api` with a token |
+
+Every path under `/api`, matched by an endpoint or not, needs a bearer token except the login and the health check; an unknown one answers a JSON `404`. The token check and the panel never overlap: `/API/x`, `/%61pi/x` and `//api/x` count as `/api` too.
 
 `POST /api/config` returns `200` when the request is applied, `422` when the controller rejects it (or it expired), `202` when it is still queued after `--config-timeout-ms`, `404` for an unknown device, `409` for a device the controller has not initialised yet, and `503` when the Dispatcher already holds 500 waiters.
 
@@ -251,11 +275,17 @@ export PGDEMO_TEST_OWNER_CONNINFO="host=/var/run/postgresql dbname=pgdemo"   # o
 ctest --test-dir build -L db
 
 python3 -m venv .venv && .venv/bin/pip install -r tests/e2e/requirements.txt
-.venv/bin/robot --outputdir build/e2e tests/e2e                       # docker compose stack, 84 checks
+.venv/bin/rfbrowser init chromium                                     # the browser for the UI suites
+scripts/fetch-webroot.sh                                              # the panel the image will serve
+.venv/bin/robot --outputdir build/e2e tests/e2e                       # docker compose stack, API and UI
 .venv/bin/robot --variable E2E_DEBUG:true --outputdir build/e2e tests/e2e  # same, with live command output
+
+(cd frontend && pnpm test && pnpm lint)                               # the panel's own unit tests
 ```
 
 Run the end-to-end suite from a shell without `run/demo.env` sourced: the suite generates its own passwords, and exported `PGHOST` or `DEMO_*` variables would override them.
+
+The UI suites (`11` to `13`) drive the panel in Chromium with Robot Framework Browser: login and roles, every visualization tab as a normal user, and every administration action on a device of their own. They also produce the screenshots in [frontend/README.md](frontend/README.md) (`--variable UI_SCREENSHOTS:frontend/docs/screens`).
 
 The unit tests cover the PKI library (CSR signing and its refusals, the issued profile, chain and CRL verification, the challenge-response proof) and the device side of the wire protocol (frames, a configuration that cancels the producer's wait, pause and resume, end of stream) without a database.
 
@@ -263,7 +293,7 @@ The database tests cover channel multiplexing, the registration and shutdown rul
 
 The end-to-end suite ([`tests/e2e`](tests/e2e)) needs Docker with compose v2, `curl` and `jq`. [tests/e2e/README.md](tests/e2e/README.md) describes the disposable compose project, the two network zones and the lifecycle the suites drive.
 
-CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs the unit and database tests on `ubuntu:26.04` against `postgis/postgis:18-3.7`, and the end-to-end suite in a separate job on the compose stack.
+CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs the unit and database tests on `ubuntu:26.04` against `postgis/postgis:18-3.7`; builds the panel with Catalyst from a private repository (deploy key `CATALYST_DEPLOY_KEY`) and uploads it as the artifact `webroot`; runs the end-to-end suite, API and UI, on the compose stack with that panel; and on `main` publishes the tested panel to the Release `webroot-latest`, where `scripts/fetch-webroot.sh` finds it.
 
 ## Documentation
 

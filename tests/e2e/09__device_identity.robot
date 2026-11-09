@@ -123,13 +123,6 @@ Login And Enroll
     Wait Until Keyword Succeeds    15s    0.5s    Session Should Be    ${DEVICE}    ONLINE
     Wait Until Keyword Succeeds    10s    0.5s    Seq Should Advance    ${DEVICE}    0
 
-Normal User Headers
-    [Documentation]    A token of ``alice``, created in 05__users_and_roles; the admin token stays in place.
-    ${body}=    Create Dictionary    username=alice    password=normal-user-password
-    ${response}=    HTTP Status Should Be    200    POST    /api/auth/login    json=${body}
-    &{headers}=    Create Dictionary    Authorization=Bearer ${response.json()}[token]
-    RETURN    ${headers}
-
 Telemetry Should Have Stopped
     [Arguments]    ${device}
     ${seq}=    Last Seq    ${device}

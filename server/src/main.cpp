@@ -33,9 +33,11 @@
 #include "controllers/ConfigController.hpp"
 #include "controllers/DeviceController.hpp"
 #include "controllers/IdentityController.hpp"
+#include "controllers/PanelController.hpp"
 #include "controllers/UsersController.hpp"
 #include "http/AuthInterceptor.hpp"
 #include "http/ErrorHandler.hpp"
+#include "http/StaticSite.hpp"
 
 #include "oatpp-openssl/Config.hpp"
 #include "oatpp-openssl/server/ConnectionProvider.hpp"
@@ -70,7 +72,8 @@ void usage()
                  "  --ca-key PATH             device CA private key (default run/ca/ca.key)\n"
                  "  --ca-cert PATH            device CA certificate (default run/ca/ca.crt)\n"
                  "  --cert-validity-days N    lifetime of device certificates (default 365)\n"
-                 "  --enroll-timeout-ms N     POST /api/devices and rotate wait (default 5000)\n";
+                 "  --enroll-timeout-ms N     POST /api/devices and rotate wait (default 5000)\n"
+                 "  --webroot PATH            control panel (static export of frontend/) served on GET /*\n";
 }
 
 ServerConfig parse(int argc, char** argv)
@@ -97,6 +100,7 @@ ServerConfig parse(int argc, char** argv)
         else if (a == "--ca-cert") c.ca_cert = next();
         else if (a == "--cert-validity-days") c.cert_validity_days = std::stoi(next());
         else if (a == "--enroll-timeout-ms") c.enroll_timeout_ms = std::stoi(next());
+        else if (a == "--webroot") c.webroot = next();
         else if (a == "-h" || a == "--help") { usage(); std::exit(0); }
         else throw std::invalid_argument("unknown option " + std::string(a));
     }
@@ -218,6 +222,27 @@ std::shared_ptr<CertificateSigner> make_signer(const ServerConfig& cfg, std::sha
                                                std::chrono::days(cfg.cert_validity_days));
 }
 
+/// The control panel from `--webroot`, or null to serve the API only.
+std::shared_ptr<const http::StaticSite> load_panel(const ServerConfig& cfg)
+{
+    if (cfg.webroot.empty())
+    {
+        log::info(kLog, "panel: disabled (no --webroot); serving the API only");
+        return nullptr;
+    }
+    auto site = std::make_shared<const http::StaticSite>(http::StaticSite::load(cfg.webroot));
+    if (!site->has_index())
+    {
+        log::warn(kLog, "panel: no index.html in " + cfg.webroot +
+                            "; serving the API only (scripts/fetch-webroot.sh or pnpm build in frontend/)");
+        return nullptr;
+    }
+    const auto version = site->version();
+    log::info(kLog, std::format("panel: {} files from {} ({} KiB){}", site->size(), cfg.webroot, site->bytes() / 1024,
+                                version.empty() ? "" : ", " + version));
+    return site;
+}
+
 /// Point OpenSSL at the provider and the config copied beside this executable.
 /// oatpp-openssl creates its SSL_CTX afterwards and inherits both.
 void use_openssl_beside_executable()
@@ -239,6 +264,7 @@ int run(const ServerConfig& cfg)
 {
     const bool tls = !cfg.tls_key.empty();
     if (tls) use_openssl_beside_executable();
+    const auto panel = load_panel(cfg);
 
     sigset_t sigs;
     sigemptyset(&sigs);
@@ -270,6 +296,8 @@ int run(const ServerConfig& cfg)
     router->addController(std::make_shared<DeviceController>(services, mapper));
     router->addController(std::make_shared<IdentityController>(services, mapper));
     router->addController(std::make_shared<ConfigController>(services, mapper));
+    // Last: the router takes the first match, so GET * only gets what no endpoint claimed.
+    if (panel) router->addController(std::make_shared<PanelController>(panel, mapper));
 
     auto handler = oatpp::web::server::HttpConnectionHandler::createShared(router);
     handler->setErrorHandler(std::make_shared<http::JsonErrorHandler>());

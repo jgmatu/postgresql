@@ -19,6 +19,8 @@ set(DOXYGEN_USE_MDFILE_AS_MAINPAGE "${CMAKE_SOURCE_DIR}/README.md")
 set(DOXYGEN_FILE_PATTERNS *.hpp *.md *.dox)
 # Section links in the Markdown files use GitHub anchors (`#1-processes-and-zones`).
 set(DOXYGEN_MARKDOWN_ID_STYLE GITHUB)
+# Screenshots of the control panel, from the Robot UI suites (UI_SCREENSHOTS).
+set(DOXYGEN_IMAGE_PATH "${CMAKE_SOURCE_DIR}/frontend/docs/screens")
 set(DOXYGEN_EXTENSION_MAPPING hpp=C++)
 set(DOXYGEN_FULL_PATH_NAMES YES)
 set(DOXYGEN_STRIP_FROM_PATH "${CMAKE_SOURCE_DIR}")
@@ -76,6 +78,8 @@ doxygen_add_docs(docs
     "${CMAKE_SOURCE_DIR}/patches/README.md"
     "${CMAKE_SOURCE_DIR}/sql/README.md"
     "${CMAKE_SOURCE_DIR}/tests/e2e/README.md"
+    "${CMAKE_SOURCE_DIR}/frontend/README.md"
+    "${CMAKE_SOURCE_DIR}/webroot/README.md"
     "${CMAKE_SOURCE_DIR}/docs/namespaces.dox"
     "${CMAKE_SOURCE_DIR}/libs/log/include"
     "${CMAKE_SOURCE_DIR}/libs/db/include"

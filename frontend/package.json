@@ -1,0 +1,38 @@
+{
+  "name": "pgdemo-panel",
+  "version": "0.1.0",
+  "private": true,
+  "description": "pgdemo control panel: a static Next.js SPA served by pgdemo-server",
+  "scripts": {
+    "setup": "bash scripts/setup-catalyst.sh",
+    "predev": "pnpm run setup",
+    "dev": "next dev",
+    "prebuild": "pnpm run setup",
+    "build": "next build",
+    "postbuild": "bash scripts/export-webroot.sh",
+    "test": "vitest run",
+    "lint": "eslint ."
+  },
+  "dependencies": {
+    "@headlessui/react": "^2.2.9",
+    "@heroicons/react": "^2.2.0",
+    "clsx": "^2.1.1",
+    "motion": "^12.23.12",
+    "next": "16.4.3",
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^22",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "16.4.3",
+    "happy-dom": "^20.14.5",
+    "tailwindcss": "^4",
+    "typescript": "^5",
+    "vitest": "^5.0.2"
+  },
+  "packageManager": "pnpm@10.32.1"
+}

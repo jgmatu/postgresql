@@ -48,6 +48,9 @@ Compose
 
 Start Stack
     [Documentation]    Fresh database and the server alone; the controller is started by its own suite.
+    ...                The image copies ``webroot/``, so the panel must be there before it is built.
+    File Should Exist    ${ROOT}${/}webroot${/}index.html
+    ...    webroot/index.html missing: ejecuta scripts/fetch-webroot.sh o pnpm build en frontend/
     Remove Directory    ${WORK}    recursive=True
     Create Directory    ${WORK}
     ${postgres_password}=    Evaluate    secrets.token_hex(16)    modules=secrets

@@ -1,2 +1,4 @@
 robotframework>=7.1
 robotframework-requests>=0.9.7
+# UI suites (11-13); after installing: rfbrowser init chromium (needs Node.js and npm)
+robotframework-browser>=19

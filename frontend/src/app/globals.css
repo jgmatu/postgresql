@@ -1,0 +1,17 @@
+@import "tailwindcss";
+
+/* Catalyst is gitignored (scripts/setup-catalyst.sh), and Tailwind skips
+   gitignored files unless a path names them explicitly. */
+@source "../components/catalyst";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root {
+  /* Used by Catalyst's button and input (`rounded-[calc(var(--radius-lg)-1px)]`). */
+  --radius-lg: 0.5rem;
+}
+
+@theme {
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+}

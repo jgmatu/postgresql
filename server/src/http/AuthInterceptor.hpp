@@ -8,6 +8,7 @@
 #include <db/Tables.hpp>
 
 #include "Json.hpp"
+#include "Paths.hpp"
 #include "oatpp/web/server/interceptor/RequestInterceptor.hpp"
 
 namespace pgdemo::server::http {
@@ -18,13 +19,15 @@ inline constexpr const char* kBundleSubject = "auth.sub";
 inline constexpr const char* kBundleRole = "auth.role";
 
 /**
- * @brief Authentication gate: every route needs `Authorization: Bearer <JWT>`
- * except the two public ones below.
+ * @brief Authentication gate: every path under `/api` needs
+ * `Authorization: Bearer <JWT>` except the two public ones below.
  *
- * It is an allow-list of public paths, not a list of protected ones, so a route
- * added later is protected by default. On success the verified `sub` and `role`
- * claims go into the request bundle; authorization (which role may do what) is
- * the controllers' job and, underneath, PostgreSQL's.
+ * Within /api it is an allow-list of public paths, not a list of protected
+ * ones, so an endpoint added later is protected by default. Outside /api are
+ * only the files of the control panel (`PanelController`), which carry no
+ * data. On success the verified `sub` and `role` claims go into the request
+ * bundle; authorization (which role may do what) is the controllers' job and,
+ * underneath, PostgreSQL's.
  */
 class AuthInterceptor : public oatpp::web::server::interceptor::RequestInterceptor
 {
@@ -42,7 +45,8 @@ public:
     std::shared_ptr<OutgoingResponse> intercept(const std::shared_ptr<IncomingRequest>& request) override
     {
         std::string path = request->getStartingLine().path.std_str();
-        if (const auto q = path.find('?'); q != std::string::npos) path.resize(q);
+        if (const auto q = path.find_first_of("?#"); q != std::string::npos) path.resize(q);
+        if (!is_api_path(path)) return nullptr;
         if (path == "/api/auth/login" || path == "/api/health") return nullptr;
 
         const oatpp::String header = request->getHeader("Authorization");

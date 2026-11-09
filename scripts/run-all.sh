@@ -20,6 +20,7 @@
 #   PGDEMO_CA_DIR (run/ca)                    device CA key and certificate
 #   PGDEMO_DEVICES_DIR (run/devices)          device keys and the controller socket
 #   PGDEMO_MAX_DEVICES (16)                   device processes run at once
+#   PGDEMO_WEBROOT (webroot)                  control panel; served when it has index.html
 #   PGDEMO_SERVER_ARGS, PGDEMO_CONTROLLER_ARGS  extra command-line options
 set -euo pipefail
 
@@ -32,7 +33,7 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --https) SCHEME=https ;;
         --http) SCHEME=http ;;
-        -h|--help) sed -n '2,23p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,24p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
         server|controller|all) WHAT="$1" ;;
         *) printf '[run-all] ERROR: unknown argument %s\n' "$1" >&2; exit 1 ;;
     esac
@@ -96,6 +97,13 @@ start_server() {
         mode="TLS 1.3, openssl-oqs.cnf"
     fi
     local addr="${PGDEMO_LISTEN_ADDR:-127.0.0.1}"
+    local -a panel_args=()
+    local webroot="${PGDEMO_WEBROOT:-${ROOT}/webroot}"
+    if [[ -f "${webroot}/index.html" ]]; then
+        panel_args=(--webroot "${webroot}")
+    else
+        echo "[run-all] WARN: panel no disponible: scripts/fetch-webroot.sh o pnpm build en frontend/" >&2
+    fi
     : > "${LOGS}/server.log"
     logs+=("${LOGS}/server.log")
     # shellcheck disable=SC2086
@@ -105,7 +113,7 @@ start_server() {
         --listen-addr "${addr}" --port "${port}" \
         --jwt-key "${ROOT}/run/keys/jwt.key" --jwt-cert "${ROOT}/run/keys/jwt.crt" \
         --ca-key "${CA_DIR}/ca.key" --ca-cert "${CA_DIR}/ca.crt" \
-        "${tls_args[@]}" \
+        "${tls_args[@]}" "${panel_args[@]}" \
         ${PGDEMO_SERVER_ARGS:-} \
         >> "${LOGS}/server.log" 2>&1 &
     pids+=("$!")

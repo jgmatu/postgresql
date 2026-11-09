@@ -41,6 +41,9 @@ COPY --from=build /build/controller/pgdemo-controller build/controller/pgdemo-co
 COPY --from=build /build/device/pgdemo-device build/device/pgdemo-device
 COPY sql sql
 COPY scripts scripts
+# The control panel export: README.md only in a fresh clone, so run-all.sh
+# serves the API alone until scripts/fetch-webroot.sh or pnpm build fills it.
+COPY webroot webroot
 # run/ca and run/devices are mount points of the ca-keys and device-keys
 # volumes; a new volume copies this ownership and mode.
 RUN mkdir -p run/ca run/devices \

@@ -22,6 +22,12 @@ target_link_libraries(dispatcher_tests PRIVATE pgdemo::dispatcher GTest::gtest_m
 target_compile_options(dispatcher_tests PRIVATE ${PGDEMO_WARNINGS})
 gtest_discover_tests(dispatcher_tests)
 
+add_executable(static_site_tests unit/static_site_tests.cpp)
+target_include_directories(static_site_tests PRIVATE ${PROJECT_SOURCE_DIR}/server/src)
+target_link_libraries(static_site_tests PRIVATE GTest::gtest_main)
+target_compile_options(static_site_tests PRIVATE ${PGDEMO_WARNINGS})
+gtest_discover_tests(static_site_tests)
+
 add_executable(connection_pool_tests unit/connection_pool_tests.cpp)
 target_link_libraries(connection_pool_tests PRIVATE pgdemo::db GTest::gtest_main GTest::gmock)
 target_compile_options(connection_pool_tests PRIVATE ${PGDEMO_WARNINGS})

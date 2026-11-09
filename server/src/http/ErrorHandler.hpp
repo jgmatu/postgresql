@@ -5,6 +5,7 @@
 #include <log/Log.hpp>
 
 #include "Json.hpp"
+#include "oatpp/web/protocol/http/Http.hpp"
 #include "oatpp/web/server/handler/ErrorHandler.hpp"
 
 namespace pgdemo::server::http {
@@ -14,12 +15,18 @@ namespace pgdemo::server::http {
 class JsonErrorHandler : public oatpp::web::server::handler::ErrorHandler
 {
 public:
-    /// Uncaught exception from a handler: log it, reply `500 internal`.
+    /// Uncaught exception from a handler: log it, reply `500 internal`. An
+    /// oatpp HttpError (no route for this method and path) keeps its status.
     std::shared_ptr<Response> handleError(const std::exception_ptr& error) override
     {
         try
         {
             if (error) std::rethrow_exception(error);
+        }
+        catch (oatpp::web::protocol::http::HttpError& e)
+        {
+            const auto status = e.getInfo().status;
+            return handleError(status, status.description, e.getHeaders());
         }
         catch (const std::exception& e)
         {

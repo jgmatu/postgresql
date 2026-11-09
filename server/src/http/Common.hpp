@@ -13,6 +13,7 @@
 
 #include "AuthInterceptor.hpp"
 #include "Json.hpp"
+#include "Paths.hpp"
 #include "oatpp/web/protocol/http/incoming/Request.hpp"
 
 namespace pgdemo::server::http {
@@ -75,13 +76,13 @@ inline std::optional<int> int_param(const std::shared_ptr<IncomingRequest>& requ
     return v;
 }
 
-/// Optional string query parameter, unvalidated.
+/// Optional string query parameter, percent-decoded but otherwise unvalidated.
 inline std::optional<std::string> str_param(const std::shared_ptr<IncomingRequest>& request,
                                             const char* name)
 {
     const oatpp::String raw = request->getQueryParameter(name);
     if (!raw) return std::nullopt;
-    return std::string(*raw);
+    return percent_decode(*raw);
 }
 
 /**

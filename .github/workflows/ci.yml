@@ -90,18 +90,115 @@ jobs:
           name: docs-html
           path: build/docs/html
 
-  e2e:
-    name: end-to-end on docker compose (Robot Framework, two network zones)
+  # Catalyst is licensed and stays out of this public repository: the build
+  # reads it from the private jgmatu/management-sensors through a read-only
+  # deploy key. Without the secret (a pull request from a fork) nothing is
+  # built, and e2e tests the panel published by the last push to main.
+  frontend:
+    name: control panel (Next.js static export, Catalyst from the private repository)
     runs-on: ubuntu-latest
+    outputs:
+      built: ${{ steps.key.outputs.available }}
+    env:
+      CATALYST_KEY_SET: ${{ secrets.CATALYST_DEPLOY_KEY != '' }}
+      CATALYST_DIR: ${{ github.workspace }}/catalyst-src/frontend/private/catalyst-ui-kit/typescript
+    defaults:
+      run:
+        working-directory: frontend
     steps:
       - uses: actions/checkout@v4
+
+      - name: Is the Catalyst deploy key available?
+        id: key
+        working-directory: .
+        run: |
+          echo "available=${CATALYST_KEY_SET}" >> "$GITHUB_OUTPUT"
+          if [[ "${CATALYST_KEY_SET}" != true ]]; then
+            echo "::notice::CATALYST_DEPLOY_KEY is not available; the panel is not built and e2e uses scripts/fetch-webroot.sh"
+          fi
+
+      - name: Catalyst (private repository, sparse)
+        if: steps.key.outputs.available == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: jgmatu/management-sensors
+          ssh-key: ${{ secrets.CATALYST_DEPLOY_KEY }}
+          path: catalyst-src
+          sparse-checkout: frontend/private/catalyst-ui-kit/typescript
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@v4
+        if: steps.key.outputs.available == 'true'
+        with:
+          package_json_file: frontend/package.json
+
+      - uses: actions/setup-node@v4
+        if: steps.key.outputs.available == 'true'
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Install
+        if: steps.key.outputs.available == 'true'
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        if: steps.key.outputs.available == 'true'
+        run: pnpm run setup && pnpm lint
+
+      - name: Unit tests
+        if: steps.key.outputs.available == 'true'
+        run: pnpm test
+
+      # postbuild checks the export (no source maps, no Catalyst source text)
+      # and copies it to ../webroot/ with a VERSION file.
+      - name: Build
+        if: steps.key.outputs.available == 'true'
+        run: pnpm build
+
+      - name: Upload webroot
+        if: steps.key.outputs.available == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: webroot
+          path: webroot
+          retention-days: 30
+          if-no-files-found: error
+
+  e2e:
+    name: end-to-end on docker compose (Robot Framework API and UI, two network zones)
+    runs-on: ubuntu-latest
+    needs: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      # The image copies webroot/, so Robot tests exactly the panel that
+      # publish-webroot releases.
+      - name: Panel built by the frontend job
+        if: needs.frontend.outputs.built == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: webroot
+          path: webroot
+
+      - name: Panel from the webroot-latest Release
+        if: needs.frontend.outputs.built != 'true'
+        run: scripts/fetch-webroot.sh
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Install Robot Framework
-        run: pip install -r tests/e2e/requirements.txt
+      # Robot Framework Browser drives Playwright, which runs on Node.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install Robot Framework and the browser
+        run: |
+          pip install -r tests/e2e/requirements.txt
+          rfbrowser init chromium
 
       # The suite builds the image, brings the stack up and tears it down (down -v).
       - name: End-to-end
@@ -113,3 +210,47 @@ jobs:
         with:
           name: e2e-results
           path: e2e-results
+
+  # webroot.tar.gz for clones without Catalyst (scripts/fetch-webroot.sh).
+  # Only a panel built here and passed by the whole Robot suite is released.
+  publish-webroot:
+    name: publish the panel to the webroot-latest Release
+    runs-on: ubuntu-latest
+    needs: [frontend, e2e]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.frontend.outputs.built == 'true'
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: webroot-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: webroot
+          path: webroot
+
+      - name: Archive and checksum
+        run: |
+          tar -czf webroot.tar.gz -C webroot --exclude=./README.md .
+          sha256sum webroot.tar.gz > webroot.tar.gz.sha256
+          {
+            echo "Panel de control compilado (export estático de \`frontend/\`) del commit ${GITHUB_SHA}."
+            echo
+            echo "Descárgalo con \`scripts/fetch-webroot.sh\`, que comprueba \`webroot.tar.gz.sha256\` y lo extrae en \`webroot/\`."
+            echo
+            echo '```'
+            cat webroot/VERSION
+            echo "sha256=$(cut -d' ' -f1 webroot.tar.gz.sha256)"
+            echo '```'
+          } > notes.md
+
+      - name: Update the Release
+        run: |
+          if ! gh release view "${TAG}" >/dev/null 2>&1; then
+            gh release create "${TAG}" --target "${GITHUB_SHA}" --title "Panel de control (webroot)" \
+              --notes-file notes.md --latest=false
+          fi
+          gh api -X PATCH "repos/${GH_REPO}/git/refs/tags/${TAG}" -f sha="${GITHUB_SHA}" -F force=true >/dev/null
+          gh release upload "${TAG}" webroot.tar.gz webroot.tar.gz.sha256 --clobber
+          gh release edit "${TAG}" --notes-file notes.md

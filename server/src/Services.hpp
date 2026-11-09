@@ -31,6 +31,7 @@ struct ServerConfig
     std::string ca_cert = "run/ca/ca.crt";      ///< `--ca-cert`: device CA certificate
     int cert_validity_days = 365;               ///< `--cert-validity-days`: lifetime of device certificates
     int enroll_timeout_ms = 5000;               ///< `--enroll-timeout-ms`: POST /api/devices and rotate wait
+    std::string webroot;                        ///< `--webroot`: control panel files; empty serves the API only
 };
 
 /// Shared by every controller. Each member is thread-safe.

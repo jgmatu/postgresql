@@ -7,6 +7,18 @@ compile_commands.json
 /run/
 /docker/.env
 
+# Control panel: dependencies, Next build output, the licensed Catalyst kit
+# (copied in by frontend/scripts/setup-catalyst.sh), and the built panel, which
+# CI publishes as an artifact instead (scripts/fetch-webroot.sh).
+/frontend/node_modules/
+/frontend/.next/
+/frontend/out/
+/frontend/next-env.d.ts
+/frontend/tsconfig.tsbuildinfo
+/frontend/src/components/catalyst/
+/webroot/*
+!/webroot/README.md
+
 # Python virtual environment for the Robot Framework e2e suite
 /.venv/
 __pycache__/

@@ -68,6 +68,13 @@ Login As
     ${result}=    Run Client With    ${extra}    login    ${user}
     Should Be Equal As Integers    ${result.rc}    0    login ${user} failed:\n${result.stdout}    values=False
 
+Normal User Headers
+    [Documentation]    A token of ``alice``, created in 05__users_and_roles; the admin token stays in place.
+    ${body}=    Create Dictionary    username=alice    password=normal-user-password
+    ${response}=    HTTP Status Should Be    200    POST    /api/auth/login    json=${body}
+    &{headers}=    Create Dictionary    Authorization=Bearer ${response.json()}[token]
+    RETURN    ${headers}
+
 Device Field
     [Documentation]    ``field`` of ``device`` in ``config status``.
     [Arguments]    ${device}    ${field}
