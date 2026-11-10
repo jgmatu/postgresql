@@ -4,7 +4,7 @@
 // the controller: enrollments and desired configuration are queued in tables,
 // and results and live data come back as NOTIFY on the listener connection.
 //
-//   telemetry_scalar, telemetry_gps, telemetry_xy, device_events --> EventHub --> SSE /api/stream
+//   telemetry_scalar, telemetry_gps, telemetry_xy, telemetry_xyz, device_events --> EventHub --> SSE /api/stream
 //   config_events                --> Dispatcher::dispatch(SUCCESS) + SSE
 //   error_events                 --> Dispatcher::dispatch(ERROR)   + SSE
 //   enrollment_csr               --> CertificateSigner: sign, issue or reject

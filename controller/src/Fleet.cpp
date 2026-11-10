@@ -548,6 +548,7 @@ awaitable<void> Fleet::flush_telemetry()
     std::vector<db::DummySample> scalar;
     std::vector<db::TrackSample> gps;
     std::vector<db::XySample> xy;
+    std::vector<db::XyzSample> xyz;
     while (!telemetry_.empty())
     {
         auto item = std::move(telemetry_.front());
@@ -557,7 +558,8 @@ awaitable<void> Fleet::flush_telemetry()
                 using T = std::decay_t<decltype(sample)>;
                 if constexpr (std::is_same_v<T, db::DummySample>) scalar.push_back(sample);
                 else if constexpr (std::is_same_v<T, db::TrackSample>) gps.push_back(sample);
-                else xy.push_back(sample);
+                else if constexpr (std::is_same_v<T, db::XySample>) xy.push_back(sample);
+                else xyz.push_back(sample);
             },
             std::move(item));
     }
@@ -565,11 +567,12 @@ awaitable<void> Fleet::flush_telemetry()
     telemetry_dropped_ = 0;
     if (dropped != 0)
         log::warn(kLog, std::format("telemetry queue full; dropped {} sample(s)", dropped));
-    if (scalar.empty() && gps.empty() && xy.empty()) co_return;
+    if (scalar.empty() && gps.empty() && xy.empty() && xyz.empty()) co_return;
     try
     {
-        co_await on_db([this, scalar = std::move(scalar), gps = std::move(gps), xy = std::move(xy)] {
-            db_.write_telemetry_batch(scalar, gps, xy);
+        co_await on_db([this, scalar = std::move(scalar), gps = std::move(gps), xy = std::move(xy),
+                        xyz = std::move(xyz)] {
+            db_.write_telemetry_batch(scalar, gps, xy, xyz);
         });
     }
     catch (const std::exception& e)
@@ -812,6 +815,15 @@ awaitable<void> Fleet::read_samples(std::shared_ptr<Session> session, db::Device
                         return;
                     }
                     enqueue_telemetry(db::XySample{device.device_id, m.x, m.y, m.seq});
+                }
+                else if constexpr (std::is_same_v<T, pgdemo_msgs::msg::XyzSample>)
+                {
+                    if (device.payload != db::Payload::Xyz)
+                    {
+                        log::warn(kLog, std::format("{}: ignoring xyz sample", device.name));
+                        return;
+                    }
+                    enqueue_telemetry(db::XyzSample{device.device_id, m.x, m.y, m.z, m.seq});
                 }
                 else
                     log::warn(kLog, std::format("{}: ignoring message while online", device.name));

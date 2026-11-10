@@ -1,0 +1,11 @@
+module pgdemo_msgs {
+  module msg {
+    struct XyzSample {
+      string device;
+      int64 seq;
+      double x;
+      double y;
+      double z;
+    };
+  };
+};

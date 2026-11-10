@@ -47,7 +47,7 @@ export interface DbInfo {
   dispatcher_waiters: number;
 }
 
-export type Payload = "scalar" | "gps" | "xy";
+export type Payload = "scalar" | "gps" | "xy" | "xyz";
 
 export interface DeviceType {
   type_id: string;
@@ -73,6 +73,7 @@ export interface DeviceSummary {
   lat: number | null;
   x: number | null;
   y: number | null;
+  z: number | null;
   seq: number | null;
   updated_at: string | null;
   created_at: string;
@@ -149,6 +150,7 @@ export interface TelemetryRow {
   lat?: number;
   x?: number;
   y?: number;
+  z?: number;
   seq: number;
   recorded_at: string;
   partition: string;
@@ -279,7 +281,7 @@ export const REVOCATION_REASONS = [
 export type RevocationReason = (typeof REVOCATION_REASONS)[number];
 
 /** SSE channels of `GET /api/stream`, as named by `EventHub`. */
-export const CHANNELS = ["telemetry_scalar", "telemetry_gps", "telemetry_xy", "device", "config", "error", "enrollment"] as const;
+export const CHANNELS = ["telemetry_scalar", "telemetry_gps", "telemetry_xy", "telemetry_xyz", "device", "config", "error", "enrollment"] as const;
 export type Channel = (typeof CHANNELS)[number];
 
 export interface ScalarEvent {
@@ -307,6 +309,17 @@ export interface XyEvent {
   action: string;
   x: number;
   y: number;
+  seq: number;
+  ts: string;
+}
+
+export interface XyzEvent {
+  device_id: number;
+  device: string;
+  action: string;
+  x: number;
+  y: number;
+  z: number;
   seq: number;
   ts: string;
 }

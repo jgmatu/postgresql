@@ -116,6 +116,16 @@ struct XySample
     std::int64_t seq{0};  ///< producer tick counter, increases by one per tick
 };
 
+/// One sample of the 3D cube. Stored as a PostGIS `PointZ`.
+struct XyzSample
+{
+    int device_id{0};     ///< device that produced the sample
+    double x{0.0};        ///< `ST_X`
+    double y{0.0};        ///< `ST_Y`
+    double z{0.0};        ///< `ST_Z`
+    std::int64_t seq{0};  ///< producer tick counter, increases by one per tick
+};
+
 /// One GPS fix. PostGIS projects the point from the origin.
 struct TrackSample
 {

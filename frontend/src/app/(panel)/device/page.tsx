@@ -10,15 +10,18 @@ import { EnrollmentBadge, IdentityBadge, RevocationBadge, SessionBadge, SyncBadg
 import { GpsMap, LineChart, ScatterChart, type Point } from "@/components/charts";
 import { Callout, Empty, ErrorCallout, LiveIndicator, Loading, Mono, PageHeading, Section, Stat } from "@/components/ui";
 import { ApiError } from "@/lib/api";
-import { fmtDateTime, fmtLatLon, fmtNumber, fmtTime, fmtXy, shortHex } from "@/lib/format";
+import { fmtDateTime, fmtLatLon, fmtNumber, fmtTime, fmtXy, fmtXyz, shortHex } from "@/lib/format";
 import { useApi, useSession, useStream } from "@/lib/hooks";
 import type { SseEvent } from "@/lib/sse";
-import type { Certificate, ConfigHistoryRow, DeviceDetail, Enrollment, GpsEvent, ScalarEvent, TelemetryRow, XyEvent } from "@/lib/types";
+import type { Certificate, ConfigHistoryRow, DeviceDetail, Enrollment, GpsEvent, ScalarEvent, TelemetryRow, XyEvent, XyzEvent } from "@/lib/types";
 import { AdjustmentsHorizontalIcon, ArrowLeftIcon, FingerPrintIcon } from "@heroicons/react/16/solid";
+import dynamic from "next/dynamic";
 import { useSearchParams } from "next/navigation";
 import { Suspense, useCallback, useMemo, useState } from "react";
 
 const MAX_POINTS = 600;
+
+const PointCloudView = dynamic(() => import("@/components/point-cloud").then((m) => m.PointCloud), { ssr: false });
 
 interface Fix {
   seq: number;
@@ -28,6 +31,7 @@ interface Fix {
   lon?: number;
   x?: number;
   y?: number;
+  z?: number;
 }
 
 function DeviceView({ name }: { name: string }) {
@@ -47,12 +51,15 @@ function DeviceView({ name }: { name: string }) {
   const reloadConfig = configHistory.reload;
   const onEvent = useCallback(
     (ev: SseEvent) => {
-      const d = JSON.parse(ev.data) as Partial<ScalarEvent & GpsEvent & XyEvent>;
+      const d = JSON.parse(ev.data) as Partial<ScalarEvent & GpsEvent & XyEvent & XyzEvent>;
       switch (ev.event) {
         case "telemetry_scalar":
         case "telemetry_gps":
         case "telemetry_xy":
-          setLive((xs) => [...xs, { seq: d.seq!, t: Date.parse(d.ts!), value: d.value, lat: d.lat, lon: d.lon, x: d.x, y: d.y }].slice(-MAX_POINTS));
+        case "telemetry_xyz":
+          setLive((xs) =>
+            [...xs, { seq: d.seq!, t: Date.parse(d.ts!), value: d.value, lat: d.lat, lon: d.lon, x: d.x, y: d.y, z: d.z }].slice(-MAX_POINTS),
+          );
           return;
         case "config":
         case "error":
@@ -71,7 +78,7 @@ function DeviceView({ name }: { name: string }) {
 
   const fixes = useMemo(() => {
     const past: Fix[] = (history.data ?? [])
-      .map((r) => ({ seq: r.seq, t: Date.parse(r.recorded_at), value: r.value, lat: r.lat, lon: r.lon, x: r.x, y: r.y }))
+      .map((r) => ({ seq: r.seq, t: Date.parse(r.recorded_at), value: r.value, lat: r.lat, lon: r.lon, x: r.x, y: r.y, z: r.z }))
       .reverse();
     const lastSeq = past.length ? past[past.length - 1].seq : -1;
     const lastT = past.length ? past[past.length - 1].t : -Infinity;
@@ -97,12 +104,15 @@ function DeviceView({ name }: { name: string }) {
   const latest = fixes[fixes.length - 1];
   const gps = d?.payload === "gps";
   const xy = d?.payload === "xy";
-  const payloadLabel = gps ? "GPS (PostGIS)" : xy ? "dispersión 2D" : "escalar";
+  const xyz = d?.payload === "xyz";
+  const payloadLabel = gps ? "GPS (PostGIS)" : xy ? "dispersión 2D" : xyz ? "nube 3D" : "escalar";
   const sampleText = gps
     ? fmtLatLon(latest?.lat ?? d?.lat, latest?.lon ?? d?.lon)
-    : xy
-      ? fmtXy(latest?.x ?? d?.x, latest?.y ?? d?.y)
-      : fmtNumber(latest?.value ?? d?.value, 3);
+    : xyz
+      ? fmtXyz(latest?.x ?? d?.x, latest?.y ?? d?.y, latest?.z ?? d?.z)
+      : xy
+        ? fmtXy(latest?.x ?? d?.x, latest?.y ?? d?.y)
+        : fmtNumber(latest?.value ?? d?.value, 3);
 
   return (
     <>
@@ -147,14 +157,14 @@ function DeviceView({ name }: { name: string }) {
       ) : (
         <>
           <div className="mt-6 grid grid-cols-2 gap-4 lg:grid-cols-4">
-            <Stat label={gps ? "Posición" : xy ? "x, y" : "Valor"} value={sampleText} testId="stat-value" />
+            <Stat label={gps ? "Posición" : xyz ? "x, y, z" : xy ? "x, y" : "Valor"} value={sampleText} testId="stat-value" />
             <Stat label="seq" value={<span data-testid="device-seq">{latest?.seq ?? d.seq ?? "—"}</span>} />
             <Stat label="Última muestra" value={fmtTime(latest ? new Date(latest.t).toISOString() : d.updated_at)} />
             <Stat label="Proceso" value={d.process?.pid ? `PID ${d.process.pid}` : "—"} />
           </div>
 
           <Section
-            title={gps ? "Recorrido" : xy ? "Nube de puntos" : "Telemetría"}
+            title={gps ? "Recorrido" : xyz ? "Nube 3D" : xy ? "Nube de puntos" : "Telemetría"}
             testId="section-telemetry"
             actions={
               <Select aria-label="Muestras" value={limit} onChange={(e) => setLimit(Number(e.target.value))} className="max-w-40" data-testid="history-limit">
@@ -166,6 +176,11 @@ function DeviceView({ name }: { name: string }) {
           >
             {gps ? (
               <GpsMap tracks={[{ device: name, fixes: fixes.filter((f) => f.lat !== undefined).map((f) => ({ lat: f.lat!, lon: f.lon! })) }]} />
+            ) : xyz ? (
+              <PointCloudView
+                points={fixes.filter((f) => f.x !== undefined && f.y !== undefined && f.z !== undefined).map((f) => ({ x: f.x!, y: f.y!, z: f.z! }))}
+                extent={d.config?.applied_amplitude ?? 100}
+              />
             ) : xy ? (
               <ScatterChart
                 points={fixes.filter((f) => f.x !== undefined && f.y !== undefined).map((f) => ({ x: f.x!, y: f.y! }))}
@@ -245,7 +260,7 @@ function DeviceView({ name }: { name: string }) {
                 <TableRow>
                   <TableHeader>Registrada</TableHeader>
                   <TableHeader className="text-right">seq</TableHeader>
-                  <TableHeader>{gps ? "Posición" : xy ? "x, y" : "Valor"}</TableHeader>
+                  <TableHeader>{gps ? "Posición" : xyz ? "x, y, z" : xy ? "x, y" : "Valor"}</TableHeader>
                   <TableHeader>Partición</TableHeader>
                 </TableRow>
               </TableHead>
@@ -254,7 +269,9 @@ function DeviceView({ name }: { name: string }) {
                   <TableRow key={r.history_id}>
                     <TableCell className="tabular-nums">{fmtDateTime(r.recorded_at)}</TableCell>
                     <TableCell className="text-right tabular-nums">{r.seq}</TableCell>
-                    <TableCell className="tabular-nums">{gps ? fmtLatLon(r.lat, r.lon) : xy ? fmtXy(r.x, r.y) : fmtNumber(r.value, 3)}</TableCell>
+                    <TableCell className="tabular-nums">
+                      {gps ? fmtLatLon(r.lat, r.lon) : xyz ? fmtXyz(r.x, r.y, r.z) : xy ? fmtXy(r.x, r.y) : fmtNumber(r.value, 3)}
+                    </TableCell>
                     <TableCell>
                       <Mono className="text-zinc-500">
                         <span data-testid="history-partition">{r.partition}</span>

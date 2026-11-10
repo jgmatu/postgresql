@@ -18,13 +18,15 @@ enum class Payload {
     Scalar, ///< one `double` per sample: `telemetry_scalar`, channel `telemetry_scalar`
     Gps,    ///< one WGS84 point per sample: `telemetry_gps`, channel `telemetry_gps`
     Xy,     ///< one native `point` per sample: `telemetry_xy`, channel `telemetry_xy`
+    Xyz,    ///< one PostGIS `PointZ` per sample: `telemetry_xyz`, channel `telemetry_xyz`
 };
 
-/// Value of `device_type.payload`: `scalar`, `gps` or `xy`.
+/// Value of `device_type.payload`: `scalar`, `gps`, `xy` or `xyz`.
 constexpr std::string_view payload_name(Payload p) noexcept
 {
     if (p == Payload::Gps) return "gps";
     if (p == Payload::Xy) return "xy";
+    if (p == Payload::Xyz) return "xyz";
     return "scalar";
 }
 
@@ -34,6 +36,7 @@ constexpr std::optional<Payload> parse_payload(std::string_view name) noexcept
     if (name == "scalar") return Payload::Scalar;
     if (name == "gps") return Payload::Gps;
     if (name == "xy") return Payload::Xy;
+    if (name == "xyz") return Payload::Xyz;
     return std::nullopt;
 }
 
@@ -42,6 +45,7 @@ constexpr std::string_view telemetry_table(Payload p) noexcept
 {
     if (p == Payload::Gps) return "telemetry_gps";
     if (p == Payload::Xy) return "telemetry_xy";
+    if (p == Payload::Xyz) return "telemetry_xyz";
     return "telemetry_scalar";
 }
 
@@ -50,11 +54,12 @@ constexpr std::string_view telemetry_channel(Payload p) noexcept
 {
     if (p == Payload::Gps) return "telemetry_gps";
     if (p == Payload::Xy) return "telemetry_xy";
+    if (p == Payload::Xyz) return "telemetry_xyz";
     return "telemetry_scalar";
 }
 
 /// Every payload, for loops that must cover all telemetry tables.
-constexpr Payload kAllPayloads[] = {Payload::Scalar, Payload::Gps, Payload::Xy};
+constexpr Payload kAllPayloads[] = {Payload::Scalar, Payload::Gps, Payload::Xy, Payload::Xyz};
 
 /// Rows `take_unread_telemetry` reads and consumes in one transaction.
 constexpr std::size_t kTelemetryReadPage = 1024;

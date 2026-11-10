@@ -247,14 +247,16 @@ TEST_F(DbTest, ListenerMultiplexesBothTelemetryChannels)
     const auto b = make_device("sawtooth");
     const auto g = make_device("gps_orbit");
     const auto c = make_device("scatter");
+    const auto cube = make_device("cloud");
     controller_->write_scalar_sample(db::DummySample{a.device_id, 1.5, 1});
     controller_->write_scalar_sample(db::DummySample{b.device_id, 2.5, 1});
     controller_->write_gps_sample(db::TrackSample{g.device_id, -3.7038, 40.4168, 250.0, 0.0, 1});
     controller_->write_xy_sample(db::XySample{c.device_id, -12.5, 40.0, 1});
+    controller_->write_xyz_sample(db::XyzSample{cube.device_id, 1.0, -2.0, 3.5, 1});
 
     EXPECT_TRUE(inbox_.wait([&](const auto& m) {
         return count_channel(m, "telemetry_scalar") == 2 && count_channel(m, "telemetry_gps") == 1 &&
-               count_channel(m, "telemetry_xy") == 1;
+               count_channel(m, "telemetry_xy") == 1 && count_channel(m, "telemetry_xyz") == 1;
     }));
     EXPECT_TRUE(inbox_.wait(
         [&](const auto& m) {
@@ -328,6 +330,44 @@ TEST_F(DbTest, TelemetryCursorAdvancesPastABatch)
     EXPECT_DOUBLE_EQ(points[0].at("x").to_number<double>(), -12.5);
     EXPECT_DOUBLE_EQ(points[0].at("y").to_number<double>(), 40.0);
     EXPECT_TRUE(server_->take_unread_telemetry("telemetry_xy").empty());
+
+    const auto cube = make_device("cloud");
+    controller_->write_telemetry_batch({}, {}, {}, {db::XyzSample{cube.device_id, 4.0, -5.0, 6.5, 8}});
+    const auto cubes = server_->take_unread_telemetry("telemetry_xyz");
+    ASSERT_EQ(cubes.size(), 1u);
+    EXPECT_EQ(cubes[0].at("device").as_string(), cube.name);
+    EXPECT_EQ(cubes[0].at("seq").as_int64(), 8);
+    EXPECT_DOUBLE_EQ(cubes[0].at("x").to_number<double>(), 4.0);
+    EXPECT_DOUBLE_EQ(cubes[0].at("y").to_number<double>(), -5.0);
+    EXPECT_DOUBLE_EQ(cubes[0].at("z").to_number<double>(), 6.5);
+    EXPECT_TRUE(server_->take_unread_telemetry("telemetry_xyz").empty());
+}
+
+TEST_F(DbTest, XyzTelemetryKeepsThePointAndThePartition)
+{
+    for (;;)
+    {
+        if (server_->take_unread_telemetry("telemetry_xyz").size() < db::kTelemetryReadPage) break;
+    }
+    const auto d = make_device("cloud");
+    controller_->write_xyz_sample(db::XyzSample{d.device_id, 3.5, -8.0, 12.25, 9});
+    const auto rows = server_->fetch_telemetry(db::DbRole::Normal, d.name, std::nullopt, std::nullopt, 1);
+    ASSERT_TRUE(rows);
+    ASSERT_EQ(rows->as_array().size(), 1u);
+    const auto& row = rows->as_array()[0].as_object();
+    EXPECT_EQ(row.at("seq").as_int64(), 9);
+    EXPECT_DOUBLE_EQ(row.at("x").to_number<double>(), 3.5);
+    EXPECT_DOUBLE_EQ(row.at("y").to_number<double>(), -8.0);
+    EXPECT_DOUBLE_EQ(row.at("z").to_number<double>(), 12.25);
+    EXPECT_EQ(row.at("partition").as_string(), current_partition("telemetry_xyz"));
+
+    const auto device = server_->fetch_device(db::DbRole::Normal, d.name);
+    ASSERT_TRUE(device);
+    EXPECT_EQ(device->as_object().at("payload").as_string(), "xyz");
+    EXPECT_DOUBLE_EQ(device->as_object().at("x").to_number<double>(), 3.5);
+    EXPECT_DOUBLE_EQ(device->as_object().at("y").to_number<double>(), -8.0);
+    EXPECT_DOUBLE_EQ(device->as_object().at("z").to_number<double>(), 12.25);
+    EXPECT_TRUE(device->as_object().at("value").is_null());
 }
 
 TEST_F(DbTest, XyTelemetryKeepsThePointAndThePartition)

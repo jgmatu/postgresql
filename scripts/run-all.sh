@@ -13,7 +13,7 @@
 # and knows nothing about the other one. The server signs device CSRs with the
 # CA in run/ca/; the controller forks one pgdemo-device node per device, with its
 # keys in run/devices/<name>/. Workers publish pgdemo/worker; the manager publishes pgdemo/manager.
-# Logs go to run/logs/. Ctrl-C stops both.
+# Logs go to run/logs/. Ctrl-C stops both. scripts/stop-all.sh stops them from another terminal.
 #
 # Variables (defaults from run/demo.env):
 #   PGDEMO_PGHOST, PGDEMO_PGPORT, PGDEMO_DB   database location

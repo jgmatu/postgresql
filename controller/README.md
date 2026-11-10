@@ -89,7 +89,7 @@ One `Slot` per device name, or per enrollment that has no device row yet. The in
 `start_process()` creates `devices-dir/<name>` at mode `0700` and execs:
 
 ```text
-pgdemo-device --name NAME --type TYPE --payload scalar|gps|xy --dir DIR
+pgdemo-device --name NAME --type TYPE --payload scalar|gps|xy|xyz --dir DIR
               [--enroll REQUEST_ID | --rotate REQUEST_ID]
 ```
 
@@ -148,7 +148,7 @@ Shutdown, from `SIGINT` or `SIGTERM`, publishes `bye` and sends `SIGTERM` to eve
 
 Samples from every worker share one queue on the io thread. A `heartbeat`, a CSR, a proof and a session write do not enter it: those still call `on_db()` at once, on the same pool.
 
-The queue holds 4096 samples. Past that, the sample that just arrived is dropped and counted, and the session coroutine does not wait. `telemetry_loop()` flushes when 64 samples are queued or 100 ms have passed. One flush checks out one `Lease`, inserts every row into `telemetry_scalar`, `telemetry_gps` or `telemetry_xy` (one statement per payload present), and upserts `device_state` once per device with the highest `seq` in the batch. The statement trigger notifies the server once per insert. The server reads what it has not consumed yet and advances `telemetry_read_cursor` in that same read. A flush that fails is logged and those samples are not retried. Shutdown flushes whatever remains after the workers have been closed, before it resets `device_session`.
+The queue holds 4096 samples. Past that, the sample that just arrived is dropped and counted, and the session coroutine does not wait. `telemetry_loop()` flushes when 64 samples are queued or 100 ms have passed. One flush checks out one `Lease`, inserts every row into `telemetry_scalar`, `telemetry_gps`, `telemetry_xy` or `telemetry_xyz` (one statement per payload present), and upserts `device_state` once per device with the highest `seq` in the batch. The statement trigger notifies the server once per insert. The server reads what it has not consumed yet and advances `telemetry_read_cursor` in that same read. A flush that fails is logged and those samples are not retried. Shutdown flushes whatever remains after the workers have been closed, before it resets `device_session`.
 
 ## What changes the fleet
 

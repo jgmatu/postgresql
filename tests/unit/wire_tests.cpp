@@ -149,6 +149,13 @@ TEST(Generators, SamplesCarryThePayloadOfTheirType)
     EXPECT_EQ(cloud.seq, 1);
     EXPECT_DOUBLE_EQ(cloud.x, -100.0);
     EXPECT_DOUBLE_EQ(cloud.y, 100.0);
+
+    const auto cube = std::get<msg::XyzSample>(
+        device::make_sample(device::Generator::Cloud, 2, 100.0, 0.0, 0.0, 0.0, 1.0, 0.0));
+    EXPECT_EQ(cube.seq, 2);
+    EXPECT_DOUBLE_EQ(cube.x, -100.0);
+    EXPECT_DOUBLE_EQ(cube.y, 100.0);
+    EXPECT_DOUBLE_EQ(cube.z, -100.0);
 }
 
 TEST(Generators, TypeSelectsWhiteNoiseAndScatter)
@@ -157,4 +164,6 @@ TEST(Generators, TypeSelectsWhiteNoiseAndScatter)
     EXPECT_EQ(device::generator_for("scatter", "xy"), device::Generator::Scatter);
     EXPECT_EQ(device::generator_for("sine", "scalar"), device::Generator::Sine);
     EXPECT_EQ(device::generator_for("anything", "xy"), device::Generator::Scatter);
+    EXPECT_EQ(device::generator_for("cloud", "xyz"), device::Generator::Cloud);
+    EXPECT_EQ(device::generator_for("anything", "xyz"), device::Generator::Cloud);
 }

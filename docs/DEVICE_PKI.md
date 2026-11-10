@@ -186,7 +186,7 @@ sequenceDiagram
 `pgdemo-device` ([`device/src/main.cpp`](../device/src/main.cpp)) is one worker and one ROS 2 node. It has no database access. It publishes `pgdemo/worker/` and subscribes to `pgdemo/manager/`. The manager starts it with:
 
 ```text
-pgdemo-device --name NAME --type TYPE --payload scalar|gps|xy --dir run/devices/NAME
+pgdemo-device --name NAME --type TYPE --payload scalar|gps|xy|xyz --dir run/devices/NAME
               [--enroll REQUEST_ID | --rotate REQUEST_ID]
 ```
 

@@ -28,6 +28,7 @@
 #include <pgdemo_msgs/msg/rejected.hpp>
 #include <pgdemo_msgs/msg/scalar_sample.hpp>
 #include <pgdemo_msgs/msg/xy_sample.hpp>
+#include <pgdemo_msgs/msg/xyz_sample.hpp>
 
 #include <rclcpp/rclcpp.hpp>
 
@@ -61,12 +62,12 @@ enum Exit : int {
 
 void usage(std::ostream& out)
 {
-    out << "Usage: pgdemo-device --name NAME --type TYPE --payload scalar|gps|xy --dir DIR\n"
+    out << "Usage: pgdemo-device --name NAME --type TYPE --payload scalar|gps|xy|xyz --dir DIR\n"
            "                     [--enroll REQUEST_ID | --rotate REQUEST_ID]\n"
            "\n"
            "  --name      device name; also the CN of its certificate\n"
            "  --type      device type (selects the generator)\n"
-           "  --payload   scalar, gps or xy\n"
+           "  --payload   scalar, gps, xy or xyz\n"
            "  --dir       key directory: key.pem and cert.pem\n"
            "  --enroll    generate a key, send a CSR and store the issued certificate\n"
            "  --rotate    same, replacing the current key once the new certificate arrives\n";
@@ -113,8 +114,8 @@ Options parse_args(int argc, char** argv)
     }
     if (o.name.empty() || o.type.empty() || o.dir.empty())
         throw UsageError("--name, --type and --dir are required");
-    if (o.payload != "scalar" && o.payload != "gps" && o.payload != "xy")
-        throw UsageError("--payload must be scalar, gps or xy");
+    if (o.payload != "scalar" && o.payload != "gps" && o.payload != "xy" && o.payload != "xyz")
+        throw UsageError("--payload must be scalar, gps, xy or xyz");
     return o;
 }
 
@@ -191,6 +192,7 @@ public:
         scalar_ = create_publisher<msg::ScalarSample>(topics::kScalar, qos);
         gps_ = create_publisher<msg::GpsSample>(topics::kGps, qos);
         xy_ = create_publisher<msg::XySample>(topics::kXy, qos);
+        xyz_ = create_publisher<msg::XyzSample>(topics::kXyz, qos);
 
         bye_ = create_subscription<msg::Bye>(topics::kBye, qos, [this](msg::Bye::ConstSharedPtr m) { on_bye(*m); });
         rejected_ = create_subscription<msg::Rejected>(
@@ -222,6 +224,7 @@ private:
                 if constexpr (std::is_same_v<T, msg::ScalarSample>) scalar_->publish(m);
                 else if constexpr (std::is_same_v<T, msg::GpsSample>) gps_->publish(m);
                 else if constexpr (std::is_same_v<T, msg::XySample>) xy_->publish(m);
+                else if constexpr (std::is_same_v<T, msg::XyzSample>) xyz_->publish(m);
                 else heartbeat_->publish(m);
             },
             msg);
@@ -425,6 +428,7 @@ private:
     rclcpp::Publisher<msg::ScalarSample>::SharedPtr scalar_;
     rclcpp::Publisher<msg::GpsSample>::SharedPtr gps_;
     rclcpp::Publisher<msg::XySample>::SharedPtr xy_;
+    rclcpp::Publisher<msg::XyzSample>::SharedPtr xyz_;
     rclcpp::Subscription<msg::Bye>::SharedPtr bye_;
     rclcpp::Subscription<msg::Rejected>::SharedPtr rejected_;
     rclcpp::Subscription<msg::Certificate>::SharedPtr certificate_;

@@ -162,7 +162,7 @@ The **visualization panel** is the default and the whole app for a `normal` user
 | Tab | Route | Role | API | SSE channels |
 | --- | --- | --- | --- | --- |
 | Login | `/` (`/?expired=1` after a 401) | anyone | `POST /api/auth/login`, `GET /api/auth/me` | — |
-| Dispositivos | `/devices/` | all | `GET /api/devices` | `telemetry_scalar`, `telemetry_gps`, `telemetry_xy`, `device` |
+| Dispositivos | `/devices/` | all | `GET /api/devices` | `telemetry_scalar`, `telemetry_gps`, `telemetry_xy`, `telemetry_xyz`, `device` |
 | Detalle | `/device/?name=<device>` | all | `GET /api/devices/{name}`, `…/history?limit=`, `…/certificates`, `GET /api/enrollments?device=`, `GET /api/config/history?device=` | every channel, `devices=<name>` |
 | Configuración | `/config/` | all | `GET /api/config`, `GET /api/config/history`, `GET /api/config/requests/{id}` | `config`, `error` |
 | Mapa | `/map/` | all | `GET /api/devices`, `GET /api/devices/{name}/history` | `telemetry_gps` |
@@ -179,7 +179,7 @@ Routes end in `/` because the export writes `devices/index.html`; the server als
 
 ### Components
 
-Catalyst provides the primitives: layout, navbar, sidebar (mobile), dropdown, table, dialog, fieldset, input, select, switch, checkbox, badge, button, description list, auth layout. Our own components sit on top: `PanelShell` and `AdminShell` (session, role, navigation), `badges.tsx` (one badge per API state set, Spanish label, raw value in `data-state`), `ui.tsx` (headings, callouts, stats, the live indicator), `ConfirmDialog` and `Outcome`. The charts are plain SVG in `charts.tsx`: a line chart with round-number ticks, sparklines, a square scatter cloud for the `xy` payload, and a map in metres around the device origin (40.4168, −3.7038) with the track and the current fix. No chart library, no map tiles, no web fonts: the CSP allows nothing but the origin.
+Catalyst provides the primitives: layout, navbar, sidebar (mobile), dropdown, table, dialog, fieldset, input, select, switch, checkbox, badge, button, description list, auth layout. Our own components sit on top: `PanelShell` and `AdminShell` (session, role, navigation), `badges.tsx` (one badge per API state set, Spanish label, raw value in `data-state`), `ui.tsx` (headings, callouts, stats, the live indicator), `ConfirmDialog` and `Outcome`. The scalar, GPS and `xy` charts are plain SVG in `charts.tsx`: a line chart with round-number ticks, sparklines, a square scatter cloud, and a map in metres around the device origin (40.4168, −3.7038) with the track and the current fix. An `xyz` device uses [`point-cloud.tsx`](src/components/point-cloud.tsx): React Three Fiber draws each sample as one instanced sphere, the same blue, lit inside the canvas. `@react-three/drei` `OrbitControls` moves the camera on a sphere around the origin. The readout is the radius `r`, the azimuth `θ` around Y and the polar angle `φ` from +Y. The libraries are bundled; the CSP stays `'self'`. No map tiles, no web fonts.
 
 ### `data-testid`
 
@@ -187,7 +187,7 @@ Every element a test needs has a `data-testid` (`nav-devices`, `nav-admin`, `dev
 
 ## Screens
 
-Captured by the UI suites at 1440x900 (see [Tests](#tests)); every one is a real run against the Docker stack.
+Captured at 1440x900 (see [Tests](#tests)). The UI suites produce them against the Docker stack. The 3D cloud is the exception: `cloud` is enrolled by an admin, so that capture comes from a browser check.
 
 ### Login
 
@@ -207,7 +207,7 @@ Any other 401 (expired or forged token) ends the session and comes back here wit
 
 ![Dispositivos](docs/screens/devices.png)
 
-Dispositivos: `GET /api/devices` once, then the values, `seq`, sparklines and counters move with `telemetry_scalar`, `telemetry_gps`, `telemetry_xy` and `device` events; a `device` event (enrollment, removal, session change) reloads the list. A scalar device, including `white_noise`, keeps the sparkline. A scatter device shows `x, y` instead of the sparkline.
+Dispositivos: `GET /api/devices` once, then the values, `seq`, sparklines and counters move with `telemetry_scalar`, `telemetry_gps`, `telemetry_xy`, `telemetry_xyz` and `device` events; a `device` event (enrollment, removal, session change) reloads the list. A scalar device, including `white_noise`, keeps the sparkline. A scatter device shows `x, y` and a cloud device shows `x, y, z`, both instead of the sparkline.
 
 ![Detalle](docs/screens/device-detail.png)
 
@@ -216,6 +216,10 @@ Detalle de `dummy1`: the history window (`GET /api/devices/{name}/history`) plot
 ![Nube de puntos](docs/screens/device-scatter.png)
 
 Detalle de un dispositivo `xy`: the same window drawn as a square cloud (`ScatterChart`). The axes stay equal and cover at least `[-amplitude, amplitude]` (100 by default); a point outside that square widens both axes together. Points come from the history and then from `telemetry_xy`. The table lists `x, y` and the partition `telemetry_xy_yYYYYmMM`.
+
+![Nube 3D](docs/screens/device-cloud.png)
+
+Detalle de un dispositivo `xyz` (`cloud`): the same window, each sample an instanced sphere. Dragging orbits the camera and the wheel changes its distance. `r`, `θ` and `φ` next to the canvas are that position, in degrees for the two angles. The scene axes are the database axes, with Y up. Points arrive on `telemetry_xyz`. The table lists `x, y, z` and the partition `telemetry_xyz_yYYYYmMM`. The line chart, the GPS map and the square cloud are unchanged.
 
 ![Configuración](docs/screens/config.png)
 
@@ -231,7 +235,7 @@ PKI: the root CA and the fingerprint it signs with (`GET /api/pki/ca`), the sign
 
 ![Eventos](docs/screens/events.png)
 
-Eventos: the raw stream; channels and devices are filtered by the server (`?channels=&devices=`). `telemetry_xy` is labelled Dispersión 2D. It can be paused and emptied.
+Eventos: the raw stream; channels and devices are filtered by the server (`?channels=&devices=`). `telemetry_xy` is labelled Dispersión 2D and `telemetry_xyz` is labelled Nube 3D. It can be paused and emptied.
 
 ![Sistema](docs/screens/system.png)
 
@@ -239,7 +243,7 @@ Sistema: `GET /api/health`, `GET /api/db/info` (PostgreSQL, connection pool, SSE
 
 ![Histórico](docs/screens/history.png)
 
-Histórico: a read-only audit under the session role (`demo_normal` or `demo_admin`). Samples of one device (`GET /api/devices/{name}/history`, last hour when no dates are set, with the partition), applied configuration (`GET /api/config/history`), enrollments and rotations (`GET /api/enrollments`, including who asked), and revocations from `GET /api/pki/ca`. A scalar sample shows its value, a GPS sample its coordinates, and an `xy` sample `x, y`.
+Histórico: a read-only audit under the session role (`demo_normal` or `demo_admin`). Samples of one device (`GET /api/devices/{name}/history`, last hour when no dates are set, with the partition), applied configuration (`GET /api/config/history`), enrollments and rotations (`GET /api/enrollments`, including who asked), and revocations from `GET /api/pki/ca`. A scalar sample shows its value, a GPS sample its coordinates, an `xy` sample `x, y`, and an `xyz` sample `x, y, z`.
 
 ![Normal user menu](docs/screens/user-menu-normal.png)
 

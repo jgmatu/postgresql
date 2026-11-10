@@ -203,7 +203,7 @@ private:
     void apply_enrollment(const db::Enrollment& e);
     void apply_device(const db::Device& d);
     void admit(pgdemo_msgs::msg::Hello hello);
-    using TelemetryItem = std::variant<db::DummySample, db::TrackSample, db::XySample>;
+    using TelemetryItem = std::variant<db::DummySample, db::TrackSample, db::XySample, db::XyzSample>;
     void enqueue_telemetry(TelemetryItem sample);
     void send_bye(const std::string& device, const std::string& reason);
 

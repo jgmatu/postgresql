@@ -8,7 +8,7 @@ The suites cover the API (01 to 09), the panel as static files with its headers 
 
 ## CLI
 
-From the repository root. The development stack has to be stopped first: it publishes the same `127.0.0.1:8080` and uses the same `172.28.*` subnets. A host `scripts/run-all.sh --http` has to be stopped too, because it listens on `127.0.0.1:8080`. Docker with compose v2, `curl`, `jq` and Node.js with npm (for the browser) must be on the host.
+From the repository root. The development stack has to be stopped first (`scripts/stop-all.sh`): it publishes the same `127.0.0.1:8080` and uses the same `172.28.*` subnets. A host `scripts/run-all.sh --http` has to be stopped too, because it listens on `127.0.0.1:8080`. Docker with compose v2, `curl`, `jq` and Node.js with npm (for the browser) must be on the host.
 
 `webroot/` must hold the panel before the image is built: run `scripts/fetch-webroot.sh` (the panel CI released from `main`) or `pnpm build` in `frontend/` (needs Catalyst; see [frontend/README.md](../../frontend/README.md)). The suite setup checks for `webroot/index.html` and stops with "ejecuta scripts/fetch-webroot.sh o pnpm build en frontend/" otherwise, rather than failing in every UI test later.
 

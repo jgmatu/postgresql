@@ -28,7 +28,7 @@
 #   data DEVICE                       one device: last sample, config sync state, identity
 #   history DEVICE [limit=N] [from=TS] [to=TS]
 #   monitor [CHANNELS] [DEVICES]      live SSE; CHANNELS from telemetry_scalar,
-#                                     telemetry_gps,telemetry_xy,device,config,enrollment,error (default all),
+#                                     telemetry_gps,telemetry_xy,telemetry_xyz,device,config,enrollment,error (default all),
 #                                     DEVICES a comma-separated filter (default all)
 #
 #   config status                     applied vs desired, per device
@@ -204,7 +204,7 @@ cmd_burst() {
 }
 
 cmd_monitor() {
-    local channels="${1:-telemetry_scalar,telemetry_gps,telemetry_xy,device,config,enrollment,error}" devices="${2:-}"
+    local channels="${1:-telemetry_scalar,telemetry_gps,telemetry_xy,telemetry_xyz,device,config,enrollment,error}" devices="${2:-}"
     local -a a
     mapfile -t a < <(auth_args)
     echo "streaming ${channels}${devices:+ for ${devices}} (Ctrl-C to stop)" >&2

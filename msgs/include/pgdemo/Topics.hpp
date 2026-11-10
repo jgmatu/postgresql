@@ -31,5 +31,7 @@ inline constexpr const char* kScalar = "pgdemo/worker/telemetry/scalar";
 inline constexpr const char* kGps = "pgdemo/worker/telemetry/gps";
 /// Worker to manager. One sample of the 2D square.
 inline constexpr const char* kXy = "pgdemo/worker/telemetry/xy";
+/// Worker to manager. One sample of the 3D cube.
+inline constexpr const char* kXyz = "pgdemo/worker/telemetry/xyz";
 
 } // namespace pgdemo::topics

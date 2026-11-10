@@ -17,13 +17,14 @@
 #include <pgdemo_msgs/msg/rejected.hpp>
 #include <pgdemo_msgs/msg/scalar_sample.hpp>
 #include <pgdemo_msgs/msg/xy_sample.hpp>
+#include <pgdemo_msgs/msg/xyz_sample.hpp>
 
 namespace pgdemo::controller {
 
 /// What a worker publishes after `hello`. `hello` itself opens the session.
 using Uplink = std::variant<pgdemo_msgs::msg::Heartbeat, pgdemo_msgs::msg::Error, pgdemo_msgs::msg::Csr,
                             pgdemo_msgs::msg::Proof, pgdemo_msgs::msg::ScalarSample, pgdemo_msgs::msg::GpsSample,
-                            pgdemo_msgs::msg::XySample>;
+                            pgdemo_msgs::msg::XySample, pgdemo_msgs::msg::XyzSample>;
 
 /// Publishers the manager owns. Fleet calls them; it does not include rclcpp.
 struct Downlink

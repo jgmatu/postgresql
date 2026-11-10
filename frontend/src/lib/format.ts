@@ -36,6 +36,17 @@ export function fmtXy(x: number | null | undefined, y: number | null | undefined
   return `${fmtNumber(x, digits)}, ${fmtNumber(y, digits)}`;
 }
 
+/** `12,30, -4,50, 8,00` for a point in the cube, or a dash. */
+export function fmtXyz(
+  x: number | null | undefined,
+  y: number | null | undefined,
+  z: number | null | undefined,
+  digits = 2,
+): string {
+  if (x === null || x === undefined || y === null || y === undefined || z === null || z === undefined) return "—";
+  return `${fmtNumber(x, digits)}, ${fmtNumber(y, digits)}, ${fmtNumber(z, digits)}`;
+}
+
 /** `40,41610, -3,70660` for a GPS fix, or a dash. */
 export function fmtLatLon(lat: number | null | undefined, lon: number | null | undefined): string {
   if (lat === null || lat === undefined || lon === null || lon === undefined) return "—";

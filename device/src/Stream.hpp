@@ -31,7 +31,7 @@ class SampleStream
 public:
     /// A sample or a heartbeat. The node adds the device name and the topic.
     using Emission = std::variant<pgdemo_msgs::msg::ScalarSample, pgdemo_msgs::msg::GpsSample, pgdemo_msgs::msg::XySample,
-                                 pgdemo_msgs::msg::Heartbeat>;
+                                 pgdemo_msgs::msg::XyzSample, pgdemo_msgs::msg::Heartbeat>;
     /// Publish one uplink message. Empty is allowed in a test that only reads state.
     using Send = std::function<void(Emission)>;
 
@@ -94,7 +94,7 @@ public:
             std::normal_distribution<double> noise(0.0, 1.0);
             std::uniform_real_distribution<double> unit(0.0, 1.0);
             std::visit([this](auto sample) { send_(std::move(sample)); },
-                       make_sample(generator_, ++seq_, amplitude_, phase_, noise(rng_), unit(rng_), unit(rng_)));
+                       make_sample(generator_, ++seq_, amplitude_, phase_, noise(rng_), unit(rng_), unit(rng_), unit(rng_)));
             last_frame_ = now;
             return;
         }
@@ -119,7 +119,7 @@ public:
     [[nodiscard]] int device_id() const noexcept { return device_id_; }
     /// Period between samples.
     [[nodiscard]] int rate_ms() const noexcept { return rate_ms_; }
-    /// Peak value, standard deviation, orbit radius in metres, or half-extent of the square.
+    /// Peak value, standard deviation, orbit radius in metres, or half-extent of the square or the cube.
     [[nodiscard]] double amplitude() const noexcept { return amplitude_; }
     /// False while paused: heartbeats only.
     [[nodiscard]] bool active() const noexcept { return active_; }

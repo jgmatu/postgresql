@@ -17,7 +17,7 @@ namespace pgdemo::server {
 struct Event
 {
     std::uint64_t id{0}; ///< SSE `id:`; increases by one per published event, starting at 1
-    std::string channel; ///< SSE `event:` name: telemetry_scalar | telemetry_gps | telemetry_xy | device | config | error
+    std::string channel; ///< SSE `event:` name: telemetry_scalar | telemetry_gps | telemetry_xy | telemetry_xyz | device | config | error
     std::string device;  ///< device name the event is about; empty when it concerns none
     std::string data;    ///< JSON text
 };

@@ -2,7 +2,7 @@
 
 The seven files in this directory are the whole contract between `pgdemo-server` (zone A) and `pgdemo-controller` (zone B). Neither process knows the other; both only know these tables, views, functions and channels.
 
-The model is IoT-shaped. A device is a row of `device`, not a table: adding one needs no schema change, no new channel and no rebuild. Tables are cut by the *shape* of the data instead (`telemetry_scalar`, `telemetry_gps`, `telemetry_xy`), and configuration hangs off `device_id`. Every device is bound to an X.509 certificate issued by an internal root CA; nobody inserts into `device` directly, a device appears when its first certificate is issued ([docs/DEVICE_PKI.md](../docs/DEVICE_PKI.md)).
+The model is IoT-shaped. A device is a row of `device`, not a table: adding one needs no schema change, no new channel and no rebuild. Tables are cut by the *shape* of the data instead (`telemetry_scalar`, `telemetry_gps`, `telemetry_xy`, `telemetry_xyz`), and configuration hangs off `device_id`. Every device is bound to an X.509 certificate issued by an internal root CA; nobody inserts into `device` directly, a device appears when its first certificate is issued ([docs/DEVICE_PKI.md](../docs/DEVICE_PKI.md)).
 
 ## Loading order
 
@@ -13,7 +13,7 @@ A database created with an earlier schema (one table per dummy, or devices witho
 | File | Contents |
 |---|---|
 | [`00_roles.sql`](00_roles.sql) | Cluster roles and role memberships |
-| [`01_data.sql`](01_data.sql) | PostGIS, `device_type`, `device`, `device_state`, the monthly-partitioned `telemetry_scalar`, `telemetry_gps` and `telemetry_xy`, the server's `telemetry_read_cursor`, and the partition maintenance functions |
+| [`01_data.sql`](01_data.sql) | PostGIS, `device_type`, `device`, `device_state`, the monthly-partitioned `telemetry_scalar`, `telemetry_gps`, `telemetry_xy` and `telemetry_xyz`, the server's `telemetry_read_cursor`, and the partition maintenance functions |
 | [`02_config.sql`](02_config.sql) | Control plane: request id sequence, applied configuration, request queue, errors and audits, all keyed by `device_id` |
 | [`03_identity.sql`](03_identity.sql) | Device identity: `root_ca`, `device_certificate`, `crl`, `device_enrollment`, `device_session`, the binding foreign keys, `issue_device_certificate()`, `reject_enrollment()`, and the seed enrollments |
 | [`03_users.sql`](03_users.sql) | `app_users`, the `app_role` type, `auth_fetch_user()` and the last-admin guard |
@@ -36,9 +36,11 @@ erDiagram
     device ||..o{ telemetry_scalar : "device_id (no FK)"
     device ||..o{ telemetry_gps : "device_id (no FK)"
     device ||..o{ telemetry_xy : "device_id (no FK)"
+    device ||..o{ telemetry_xyz : "device_id (no FK)"
     telemetry_read_cursor ||..|| telemetry_scalar : "channel, no FK"
     telemetry_read_cursor ||..|| telemetry_gps : "channel, no FK"
     telemetry_read_cursor ||..|| telemetry_xy : "channel, no FK"
+    telemetry_read_cursor ||..|| telemetry_xyz : "channel, no FK"
     device ||..o{ device_config_history : "device_id (audit)"
     device_config_pending |o..|| device_config_pending_history : "request_id (audit)"
     device ||--|{ device_certificate : "has had 1..n, ON DELETE CASCADE"
@@ -51,8 +53,8 @@ erDiagram
     device ||--o| device_session : "ON DELETE CASCADE"
 
     device_type {
-        text type_id PK "sine | sawtooth | white_noise | gps_orbit | scatter"
-        text payload "scalar | gps | xy"
+        text type_id PK "sine | sawtooth | white_noise | gps_orbit | scatter | cloud"
+        text payload "scalar | gps | xy | xyz"
         int default_rate_ms "50..10000"
         double default_amplitude "(0, 1000]"
         text description
@@ -121,6 +123,7 @@ erDiagram
         double value "scalar devices"
         geography position "gps devices, Point SRID 4326"
         point xy "scatter devices"
+        geometry xyz "cloud devices, PointZ SRID 0"
         bigint seq
         timestamptz updated_at
     }
@@ -145,8 +148,15 @@ erDiagram
         point xy "NOT NULL, native point"
         bigint seq
     }
+    telemetry_xyz {
+        bigint history_id PK
+        timestamptz recorded_at PK "partition key"
+        int device_id
+        geometry xyz "PointZ, SRID 0, NOT NULL"
+        bigint seq
+    }
     telemetry_read_cursor {
-        text channel PK "telemetry_scalar | telemetry_gps | telemetry_xy"
+        text channel PK "telemetry_scalar | telemetry_gps | telemetry_xy | telemetry_xyz"
         bigint history_id "last consumed, 0 before the first read"
     }
     device_config {
@@ -211,11 +221,11 @@ erDiagram
 
 | Table | Columns | Constraints and indexes |
 |---|---|---|
-| `device_type` | `type_id TEXT`, `payload TEXT`, `default_rate_ms INT`, `default_amplitude DOUBLE PRECISION`, `description TEXT` | PK `type_id`; `payload IN ('scalar', 'gps', 'xy')`; the defaults obey the same ranges as `device_config` |
+| `device_type` | `type_id TEXT`, `payload TEXT`, `default_rate_ms INT`, `default_amplitude DOUBLE PRECISION`, `description TEXT` | PK `type_id`; `payload IN ('scalar', 'gps', 'xy', 'xyz')`; the defaults obey the same ranges as `device_config` |
 | `device` | `device_id INT` identity, `name TEXT`, `type_id TEXT`, `cert_id INT`, `created_at TIMESTAMPTZ` | PK `device_id`; `name` unique and `~ '^[a-z][a-z0-9_.-]{1,63}$'`; FK `type_id`; index on `type_id`; `cert_id NOT NULL UNIQUE` with FK `(cert_id, device_id)` to `device_certificate` (see [Device identity](#device-identity)) |
-| `device_state` | `device_id INT`, `value DOUBLE PRECISION`, `position geography(Point, 4326)`, `xy point`, `seq BIGINT`, `updated_at TIMESTAMPTZ` | PK and FK `device_id ON DELETE CASCADE`; exactly one of `value`, `position` and `xy`; GiST on `position` |
+| `device_state` | `device_id INT`, `value DOUBLE PRECISION`, `position geography(Point, 4326)`, `xy point`, `xyz geometry(PointZ, 0)`, `seq BIGINT`, `updated_at TIMESTAMPTZ` | PK and FK `device_id ON DELETE CASCADE`; exactly one of `value`, `position`, `xy` and `xyz`; GiST on `position` |
 
-`device_type` is seeded with five types. `amplitude` is the peak for `sine` and `sawtooth`, the standard deviation for `white_noise`, the orbit radius in metres for `gps_orbit`, and the half-extent of the square for `scatter`. `white_noise` and `scatter` are not enrolled by `03_identity.sql`; they appear when an admin registers a device of that type.
+`device_type` is seeded with six types. `amplitude` is the peak for `sine` and `sawtooth`, the standard deviation for `white_noise`, the orbit radius in metres for `gps_orbit`, the half-extent of the square for `scatter`, and the half-extent of the cube for `cloud`. `white_noise`, `scatter` and `cloud` are not enrolled by `03_identity.sql`; they appear when an admin registers a device of that type.
 
 | `type_id` | `payload` | Default rate | Default amplitude | Generator |
 |---|---|---|---|---|
@@ -224,12 +234,13 @@ erDiagram
 | `white_noise` | `scalar` | 500 ms | 1 | normal draw with standard deviation `amplitude` |
 | `gps_orbit` | `gps` | 1000 ms | 250 m | orbit around Madrid, point built with `ST_Project` |
 | `scatter` | `xy` | 500 ms | 100 | independent uniform `x` and `y` in `[-amplitude, amplitude]` |
+| `cloud` | `xyz` | 500 ms | 100 | independent uniform `x`, `y` and `z` in `[-amplitude, amplitude]` |
 
-`device` starts empty. `03_identity.sql` queues three enrollments, `dummy1` (`sine`), `dummy2` (`sawtooth`) and `dummy3` (`gps_orbit`), so the client, the captures and the end-to-end suite keep their arguments; the devices appear when the controller first runs and their certificates are issued. A later scalar type without a generator of its own gets `sine`. `gps` uses the orbit and `xy` uses the square.
+`device` starts empty. `03_identity.sql` queues three enrollments, `dummy1` (`sine`), `dummy2` (`sawtooth`) and `dummy3` (`gps_orbit`), so the client, the captures and the end-to-end suite keep their arguments; the devices appear when the controller first runs and their certificates are issued. A later scalar type without a generator of its own gets `sine`. `gps` uses the orbit, `xy` uses the square and `xyz` uses the cube.
 
 ### Writing a sample
 
-Each device is a `pgdemo-device` worker that publishes its samples on `pgdemo/worker/telemetry/scalar`, `pgdemo/worker/telemetry/gps` or `pgdemo/worker/telemetry/xy`. The manager queues them and writes a batch in one transaction: every sample is inserted into the history table of its payload, and `device_state` is updated once per device with the latest `seq`. The `INSERT` into each history table fires that table's channel once for the statement. The notification names the table. The server reads the rows with `history_id` above `telemetry_read_cursor` and sets that cursor to the last row of the select, in the same transaction.
+Each device is a `pgdemo-device` worker that publishes its samples on `pgdemo/worker/telemetry/scalar`, `pgdemo/worker/telemetry/gps`, `pgdemo/worker/telemetry/xy` or `pgdemo/worker/telemetry/xyz`. The manager queues them and writes a batch in one transaction: every sample is inserted into the history table of its payload, and `device_state` is updated once per device with the latest `seq`. The `INSERT` into each history table fires that table's channel once for the statement. The notification names the table. The server reads the rows with `history_id` above `telemetry_read_cursor` and sets that cursor to the last row of the select, in the same transaction.
 
 ```sql
 WITH up AS (
@@ -241,13 +252,13 @@ INSERT INTO telemetry_scalar (device_id, value, seq, recorded_at)
 SELECT device_id, value, seq, updated_at FROM up;
 ```
 
-For a GPS device the value is `ST_Project(ST_SetSRID(ST_MakePoint(lon, lat), 4326)::geography, radius, bearing)`, with the distance and azimuth cast to `double precision` because PostGIS also has an `ST_Project(geography, geography, float8)` overload. A scatter sample is one native `point(x, y)`; the read takes `xy[0]` and `xy[1]`. The message still carries two doubles, because the IDL has no point type.
+For a GPS device the value is `ST_Project(ST_SetSRID(ST_MakePoint(lon, lat), 4326)::geography, radius, bearing)`, with the distance and azimuth cast to `double precision` because PostGIS also has an `ST_Project(geography, geography, float8)` overload. A scatter sample is one native `point(x, y)`; the read takes `xy[0]` and `xy[1]`. The message still carries two doubles, because the IDL has no point type. A cloud sample is `ST_SetSRID(ST_MakePoint(x, y, z), 0)`, a `geometry(PointZ, 0)`; the read takes `ST_X`, `ST_Y` and `ST_Z`.
 
 ### Partitioned telemetry
 
-`telemetry_scalar`, `telemetry_gps` and `telemetry_xy` are append-only and `PARTITION BY RANGE (recorded_at)`, one partition per UTC month plus a `DEFAULT` partition. Each carries `device_id` and the sample, and adds `history_id BIGINT GENERATED ALWAYS AS IDENTITY` and `recorded_at TIMESTAMPTZ`.
+`telemetry_scalar`, `telemetry_gps`, `telemetry_xy` and `telemetry_xyz` are append-only and `PARTITION BY RANGE (recorded_at)`, one partition per UTC month plus a `DEFAULT` partition. Each carries `device_id` and the sample, and adds `history_id BIGINT GENERATED ALWAYS AS IDENTITY` and `recorded_at TIMESTAMPTZ`.
 
-`telemetry_read_cursor` has one row per history table. `channel` is `telemetry_scalar`, `telemetry_gps` or `telemetry_xy`, and `history_id` is the last one the server consumed (`0` before the first read). The server locks that row, selects rows with a greater `history_id`, and sets the cursor to the last selected `history_id` before it commits. The next read starts after that row. The predicate is `history_id` only: `recorded_at` is not an order across transactions.
+`telemetry_read_cursor` has one row per history table. `channel` is `telemetry_scalar`, `telemetry_gps`, `telemetry_xy` or `telemetry_xyz`, and `history_id` is the last one the server consumed (`0` before the first read). The server locks that row, selects rows with a greater `history_id`, and sets the cursor to the last selected `history_id` before it commits. The next read starts after that row. The predicate is `history_id` only: `recorded_at` is not an order across transactions.
 
 - **No foreign key to `device`.** Removing a device keeps its telemetry. A foreign key would also have to be checked on every one of the most frequent writes.
 - **Primary key `(history_id, recorded_at)`.** PostgreSQL requires the partition key inside every unique constraint of a partitioned table.
@@ -255,7 +266,7 @@ For a GPS device the value is `ST_Project(ST_SetSRID(ST_MakePoint(lon, lat), 432
 - **Partition names** follow `<table>_yYYYYmMM`, and the bounds are `[first day of the month, first day of the next month)` in UTC.
 - **Grants live on the parent only.** Partitions carry no privileges for the demo roles, so every read and write goes through the parent and its routing.
 
-The partitions in a database installed in November 2026 (`\d+ telemetry_scalar`; `telemetry_gps` and `telemetry_xy` have the same months). `telemetry_xy` stores each sample in a native `point`:
+The partitions in a database installed in November 2026 (`\d+ telemetry_scalar`; `telemetry_gps`, `telemetry_xy` and `telemetry_xyz` have the same months). `telemetry_xy` stores each sample in a native `point`. `telemetry_xyz` stores each sample in a `geometry(PointZ, 0)`:
 
 ```text
 telemetry_scalar
@@ -397,7 +408,7 @@ The controller runs a process only for an `ACTIVE` device, and refuses an authen
 
 | View | Contents | Readers |
 |---|---|---|
-| `v_devices` | Every device with its type, `payload`, last sample, `identity` and `session`. GPS devices expose `lon` and `lat` (`ST_X`/`ST_Y`); scatter devices expose `x` and `y` (`xy[0]`, `xy[1]`). Backs `GET /api/devices`. | `demo_normal`, `demo_admin` |
+| `v_devices` | Every device with its type, `payload`, last sample, `identity` and `session`. GPS devices expose `lon` and `lat` (`ST_X`/`ST_Y` of `position`). Scatter devices expose `x` and `y` from the native `point`. Cloud devices expose `x`, `y` and `z` from `ST_X`, `ST_Y` and `ST_Z` of the `PointZ`; `x` and `y` fall back to the point when `xyz` is null. Backs `GET /api/devices`. | `demo_normal`, `demo_admin` |
 | `v_device_identity` | Every device with its current certificate (`serial`, `fingerprint`, validity), its CA, its CRL entry if any, the derived `identity`, the number of certificates it has had, and its session (`session`, `pid`, `connected_at`, `last_seen`, `last_error`). Backs `GET /api/devices/{name}` and the controller's decisions. | `demo_normal`, `demo_admin`, `demo_controller` |
 | `v_device_config_sync_status` | Per device: the applied configuration, the latest request (`LEFT JOIN LATERAL`, newest `requested_at`) and the latest error. `sync` is `PENDING` while that request is `PENDING`, `ERROR` when it ended in `ERROR` or `TIMEOUT`, `UNINITIALISED` while the device has no applied state, and `SYNC` otherwise. Backs `GET /api/config`. | `demo_normal`, `demo_admin` |
 | `v_users_directory` | `app_users` without `password_hash` | `demo_admin` |
@@ -416,7 +427,7 @@ The controller runs a process only for an `ACTIVE` device, and refuses an authen
 | `check_certificate_subject()`, `protect_crl()`, `check_enrollment()`, `check_enrollment_transition()` | trigger | The identity invariants of `03_identity.sql` |
 | `notify_telemetry_batch()`, `notify_device_change()`, `notify_crl_change()`, `notify_session_change()`, `notify_enrollment()`, `notify_config_request()`, `notify_config_change()`, `notify_config_error()` | trigger | Build the JSON payload and call `pg_notify` |
 
-Both partition functions accept only `telemetry_scalar`, `telemetry_gps` and `telemetry_xy` as `parent`, pin `search_path` and `TimeZone = 'UTC'`, and take `pg_advisory_xact_lock(parent)` so that concurrent callers on the same table run one after another. Being `SECURITY DEFINER`, they run as `demo_owner`: creating or dropping a partition requires owning the parent, and the controller must not own tables.
+Both partition functions accept only `telemetry_scalar`, `telemetry_gps`, `telemetry_xy` and `telemetry_xyz` as `parent`, pin `search_path` and `TimeZone = 'UTC'`, and take `pg_advisory_xact_lock(parent)` so that concurrent callers on the same table run one after another. Being `SECURITY DEFINER`, they run as `demo_owner`: creating or dropping a partition requires owning the parent, and the controller must not own tables.
 
 ## Triggers and NOTIFY channels
 
@@ -427,6 +438,7 @@ The telemetry triggers are `AFTER INSERT FOR EACH STATEMENT` on the history tabl
 | `telemetry_scalar` | `telemetry_scalar` INSERT | `trg_telemetry_scalar_notify` | server | `table` |
 | `telemetry_gps` | `telemetry_gps` INSERT | `trg_telemetry_gps_notify` | server | `table` |
 | `telemetry_xy` | `telemetry_xy` INSERT | `trg_telemetry_xy_notify` | server | `table` |
+| `telemetry_xyz` | `telemetry_xyz` INSERT | `trg_telemetry_xyz_notify` | server | `table` |
 | `device_events` | `device` INSERT, DELETE (`action` `INSERT`, `DELETE`), UPDATE of `cert_id` (`ROTATED`) | `trg_device_notify`, `trg_device_rotate_notify` | controller, server | `action`, `device_id`, `device`, `type_id`, `cert_id` |
 | `device_events` | `crl` INSERT, UPDATE (`REVOKED`), DELETE (`UNREVOKED`) | `trg_crl_notify` | controller, server | `action`, `device_id`, `device`, `serial`, `reason`, `current` (whether it is the device's current certificate) |
 | `device_events` | `device_session` INSERT, change of `state` (`action` is the new state) | `trg_device_session_notify` | server | `action`, `device_id`, `device`, `pid`, `last_error` |
@@ -437,7 +449,7 @@ The telemetry triggers are `AFTER INSERT FOR EACH STATEMENT` on the history tabl
 | `config_events` | `device_config` INSERT, UPDATE | `trg_config_notify` | server | `action`, `device_id`, `device`, `rate_ms`, `amplitude`, `is_active`, `request_id`, `applied_at` |
 | `error_events` | `device_config_errors` INSERT; `device_session` state becomes `AUTH_FAILED` (`error_code` `AUTH_FAILED`, no `request_id`) | `trg_config_error_notify`, `trg_device_session_notify` | server | `request_id`, `device_id`, `device`, `error_code`, `error_detail`, `occurred_at` |
 
-Outside telemetry, the device name is read from `device` by primary key inside the trigger, so a listener can filter or display without a second query. On each telemetry table the server queries the unread rows, advances `telemetry_read_cursor` to the last `history_id` of that select, and then republishes one SSE event per row (`device_id`, `device`, `action` `INSERT`, `seq`, `ts`, and `value`, `lon`/`lat` or `x`/`y`). The other channels are republished as the SSE events `device`, `enrollment`, `config` and `error`. `GET /api/stream?devices=` filters them by name.
+Outside telemetry, the device name is read from `device` by primary key inside the trigger, so a listener can filter or display without a second query. On each telemetry table the server queries the unread rows, advances `telemetry_read_cursor` to the last `history_id` of that select, and then republishes one SSE event per row (`device_id`, `device`, `action` `INSERT`, `seq`, `ts`, and `value`, `lon`/`lat`, `x`/`y` or `x`/`y`/`z`). The other channels are republished as the SSE events `device`, `enrollment`, `config` and `error`. `GET /api/stream?devices=` filters them by name.
 
 ```mermaid
 flowchart LR
@@ -447,7 +459,7 @@ flowchart LR
     pending[("device_config_pending")]
     applied[("device_config")]
     errors[("device_config_errors")]
-    data[("device_state + telemetry_scalar / telemetry_gps / telemetry_xy")]
+    data[("device_state + telemetry_scalar / telemetry_gps / telemetry_xy / telemetry_xyz")]
 
     enrollment[("device_enrollment")]
     identity[("device_certificate + crl")]
@@ -474,7 +486,7 @@ flowchart LR
     controller -->|"UPSERT + append"| data
     applied -.->|config_events| server
     errors -.->|error_events| server
-    data -.->|"telemetry_scalar, telemetry_gps, telemetry_xy"| server
+    data -.->|"telemetry_scalar, telemetry_gps, telemetry_xy, telemetry_xyz"| server
 ```
 
 `pg_notify()` is transactional: the notification leaves when the writing transaction commits, so a listener never sees state that might roll back. The payload limit is 8000 bytes, and these payloads stay well below it. A notification is a wake-up signal, not the message: the tables are the source of truth, and a listener that was down catches up by reading them (the controller reads every device and every open enrollment and drains `PENDING` rows at start-up, and the server signs any `CSR_SUBMITTED` enrollment it finds when it starts).
@@ -501,7 +513,7 @@ Passwords for the two login roles are set by `scripts/db-init.sh`, never in thes
 | `device_enrollment` | SELECT | SELECT; INSERT `request_id`, `kind`, `name`, `type_id`, `device_id`, `requested_by` | SELECT; UPDATE `status`, `csr_pem`, `csr_at`, `error_code`, `error_detail`, `decided_at` | SELECT `request_id`, `kind`, `name`, `type_id`, `status`, `csr_pem`, `requested_by` |
 | `device_session` | SELECT | SELECT | SELECT, INSERT, UPDATE | – |
 | `device_state` | SELECT | SELECT | SELECT, INSERT, UPDATE | – |
-| `telemetry_scalar`, `telemetry_gps`, `telemetry_xy` | SELECT | SELECT | INSERT | SELECT |
+| `telemetry_scalar`, `telemetry_gps`, `telemetry_xy`, `telemetry_xyz` | SELECT | SELECT | INSERT | SELECT |
 | `telemetry_read_cursor` | – | – | – | SELECT, UPDATE |
 | `device_config` | SELECT | SELECT | SELECT, INSERT, UPDATE | – |
 | `device_config_pending` | SELECT | SELECT, INSERT | SELECT, UPDATE | – |
