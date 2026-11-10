@@ -72,7 +72,7 @@ CREATE TABLE IF NOT EXISTS device_state (
 CREATE INDEX IF NOT EXISTS device_state_position_gix ON device_state USING GIST (position);
 
 COMMENT ON TABLE device IS 'Registered devices, each bound to its current certificate. Created only by issue_device_certificate().';
-COMMENT ON TABLE device_state IS 'Last sample of each device, written by the controller producer for that device.';
+COMMENT ON TABLE device_state IS 'Last sample of each device. The manager upserts it in the telemetry batch with the highest seq of that device.';
 
 -- amplitude: peak value for the scalar types, orbit radius in metres for gps_orbit.
 INSERT INTO device_type (type_id, payload, default_rate_ms, default_amplitude, description) VALUES

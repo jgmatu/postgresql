@@ -192,7 +192,7 @@ pgdemo-device --name NAME --type TYPE --payload scalar|gps --dir run/devices/NAM
 
 The same binary, started on another host in the same ROS domain, is admitted when its `hello` names a slot the controller wants and no session is attached yet. Exit codes: `0` bye or signal, `1` protocol or I/O error, `2` usage, `3` enrollment refused, `4` no key or certificate on disk.
 
-`hello` is published transient-local and repeated once a second until the challenge, so a controller that starts while the node is waiting still sees it. After authentication, [`device/src/Stream.hpp`](../device/src/Stream.hpp) emits a `sample` every `rate_ms` while active and a `heartbeat` every 5 s while paused. A `config` frame applies at once and the timer is re-armed at the new rate. `bye`, SIGINT or SIGTERM ends the process.
+`hello` is published transient-local and repeated once a second until the challenge, so a controller that starts while the node is waiting still sees it. After authentication, [`device/src/Stream.hpp`](../device/src/Stream.hpp) emits a `sample` every `rate_ms` while active and a `heartbeat` every 5 s while paused. A `pgdemo/manager/config` message applies at once and the timer is re-armed at the new rate. `bye`, SIGINT or SIGTERM ends the process.
 
 ### Messages
 

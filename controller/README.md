@@ -74,7 +74,7 @@ One `Slot` per device name, or per enrollment that has no device row yet. The in
 |---|---|
 | `next`, `next_request` | How the next process starts: `Run`, `Enroll` or `Rotate`, and the enrollment id when it is not `Run` |
 | `pid`, `running`, `running_request` | The live process, how it was started, and the enrollment it is still waiting on |
-| `session` | Its accepted connection, once `hello` has matched |
+| `session` | The worker's session, once `hello` has matched |
 | `wanted` | Cleared after `AUTH_FAILED`, until the identity changes |
 | `stopping` | This controller asked the process to exit |
 | `removed` | The device was deleted; the slot goes away with the process |
@@ -105,7 +105,7 @@ The pid is recorded before the child can publish. `set_state` writes `STARTING`.
 2. A child that was just forked has 5 s to publish that `hello`.
 3. `Enroll` and `Rotate` then wait up to 30 s for a `csr`, store it with `submit_csr`, and wait on the session's decision channel for up to `--enrollment-timeout-s`. `enrollment_events` delivers the outcome into that channel. `ISSUED` is forwarded as `cert` and the process continues as `Run`; anything else is forwarded as `rejected` and the session ends. A process that exits before the certificate is delivered fails the enrollment with `DEVICE_EXITED`.
 4. Challenge-response, 5 s for the proof. The controller re-reads the device, the active roots and the CRL, so a revocation committed a moment ago counts. The checks themselves are [docs/DEVICE_PKI.md](../docs/DEVICE_PKI.md#5-authentication). An identity that is not `ACTIVE` ends the session as `DISABLED`. A failed proof ends it as `AUTH_FAILED` and clears `wanted`: the process is left down until the identity changes.
-5. `serve()` marks the session online **before** reading the applied configuration, so a configuration committed from here on is published after the initial `config` frame. It writes `ONLINE` and reads samples until the session closes.
+5. `serve()` marks the session online **before** reading the applied configuration, so a configuration committed from here on is published after the initial `pgdemo/manager/config`. It writes `ONLINE` and reads samples until the session closes.
 
 `read_samples()` refreshes `last_frame` on every message, including `heartbeat`, and pushes samples onto the shared telemetry queue. It does not open a database session. The manager publishes `pgdemo/manager/` (`config`, `bye`, the handshake) with the device name stamped on it. The inbox holds 64 uplink messages; one that does not fit is dropped.
 
@@ -138,7 +138,7 @@ An exit the controller did not request, while the next launch is `Run`, waits `1
 
 `stop_process()` publishes `bye` with the reason. A child is then sent `SIGTERM` (`stopping` is set, so the reaper starts the next one at once). A node this controller did not create is released.
 
-`heartbeat_loop()` runs every 10 s. An online device with no frame for 30 s (the device heartbeats every 5 s while paused) is `SIGKILL`ed when it is a child, and only released when it is not. Devices that spoke are touched in `device_session.last_seen`.
+`heartbeat_loop()` runs every 10 s. An online device with no message for 30 s (the device heartbeats every 5 s while paused) is `SIGKILL`ed when it is a child, and only released when it is not. Devices that spoke are touched in `device_session.last_seen`.
 
 `maintenance_loop()` runs every 30 s. It expires enrollments older than `--enrollment-timeout-s`, sweeps (re-reads every device and every pending enrollment, drops slots whose device row is gone, reconciles), and, every `--maintenance-interval-s`, creates the upcoming history partitions. The sweep is what notices a certificate that expired without a write. If `listener_alive()` is false it shuts down with exit code 1.
 
@@ -148,7 +148,7 @@ Shutdown, from `SIGINT` or `SIGTERM`, publishes `bye` and sends `SIGTERM` to eve
 
 Samples from every worker share one queue on the io thread. A `heartbeat`, a CSR, a proof and a session write do not enter it: those still call `on_db()` at once, on the same pool.
 
-The queue holds 4096 samples. Past that, the sample that just arrived is dropped and counted, and the session coroutine does not wait. `telemetry_loop()` flushes when 64 samples are queued or 100 ms have passed. One flush checks out one `Lease`, inserts every row into `telemetry_scalar` or `telemetry_gps`, and upserts `device_state` once per device with the highest `seq` in the batch. The statement trigger notifies the server once per insert. The server reads what it has not consumed yet and advances `telemetry_read_cursor` in that same read. Shutdown flushes whatever remains after the workers have been closed, before it resets `device_session`.
+The queue holds 4096 samples. Past that, the sample that just arrived is dropped and counted, and the session coroutine does not wait. `telemetry_loop()` flushes when 64 samples are queued or 100 ms have passed. One flush checks out one `Lease`, inserts every row into `telemetry_scalar` or `telemetry_gps`, and upserts `device_state` once per device with the highest `seq` in the batch. The statement trigger notifies the server once per insert. The server reads what it has not consumed yet and advances `telemetry_read_cursor` in that same read. A flush that fails is logged and those samples are not retried. Shutdown flushes whatever remains after the workers have been closed, before it resets `device_session`.
 
 ## What changes the fleet
 
@@ -159,7 +159,7 @@ The queue holds 4096 samples. Past that, the sample that just arrived is dropped
 | `enrollment_requested` | Load the `PENDING` row. `ENROLL` creates a slot and sets `next` to `Enroll`. `ROTATE` requires a slot that already has a device. A running process is stopped so the next one starts in the new mode. |
 | `enrollment_events` | If that process is waiting in `obtain_certificate()`, the outcome is delivered on its decision channel. A refusal that arrived earlier stops the process, or forgets a slot that never had a device. |
 | `device_events` | `DELETE` marks the slot removed, stops the process, and `forget()` deletes `devices-dir/<name>`. `INSERT`, `ROTATED`, `REVOKED` and `UNREVOKED` reload the device. An identity that is not `ACTIVE` stops a `Run` process and writes `DISABLED`. `ACTIVE` again, or a new fingerprint, sets `wanted` and starts the process when it is down. |
-| `config_requested` | `drain()` takes every `PENDING` row (`FOR UPDATE SKIP LOCKED`), validates `rate_ms` in `[50, 10000]` and `amplitude` in `(0, 1000]`, and commits `SUCCESS`, `ERROR` or `TIMEOUT`. Each applied configuration is sent as a `config` frame to that device's online session. The same drain runs once from `boot()`. |
+| `config_requested` | `drain()` takes every `PENDING` row (`FOR UPDATE SKIP LOCKED`), validates `rate_ms` in `[50, 10000]` and `amplitude` in `(0, 1000]`, and commits `SUCCESS`, `ERROR` or `TIMEOUT`. Each applied configuration is published on `pgdemo/manager/config` to that device's online session. The same drain runs once from `boot()`. |
 
 Session states written to `device_session`, and shown by `GET /api/devices/NAME` as `session` and `process`:
 

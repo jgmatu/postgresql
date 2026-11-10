@@ -314,8 +314,8 @@ sequenceDiagram
     ctl->>ctl: deliver the certificate to the same process
     ctl->>ctl: challenge-response
     ctl->>pg: UPSERT device_session ONLINE
-    ctl->>pg: INSERT telemetry_scalar + UPSERT device_state
-    pg-->>server: NOTIFY telemetry_scalar {table}
+    ctl->>pg: flush: one INSERT per payload present, UPSERT device_state (one COMMIT)
+    pg-->>server: NOTIFY once per payload {table}
     server->>pg: SELECT unread rows, UPDATE telemetry_read_cursor, COMMIT
     client->>server: DELETE /api/devices/name
     server->>pg: DELETE device (cascade: certificates, session, state, config, queue)
@@ -508,7 +508,7 @@ The model scales in the number of devices without schema changes, but the demo k
 - **Partitioning only by time.** Every device of one payload shares each month's partition. With many devices and long retention, subpartition each month by `HASH (device_id)`, or move the telemetry to TimescaleDB hypertables, which do both.
 - **One `device_state` row per device.** It is UPDATE-heavy: keep `fillfactor` below 100 so the updates stay HOT, and let autovacuum run often on it.
 - **Row Level Security.** All authenticated users see every device. Tenants or owners would add an owner column to `device` and RLS policies on `device`, `device_state` and the telemetry tables keyed by `device_id`.
-- **One process per device, one database write per sample.** The controller supervises a `pgdemo-device` process per device (bounded by `--max-devices`) and writes every sample it receives itself. Fine for a demo; a fleet would batch the writes, or run devices on their own hosts with mutual TLS to an ingestion endpoint, using the same certificates.
+- **One process per device, one batch per window.** The manager supervises a `pgdemo-device` worker per device (bounded by `--max-devices`). Samples share one queue and are written when 64 are queued or 100 ms have passed: one transaction, one `INSERT` per payload, and one `NOTIFY` per statement. A larger fleet would run devices on their own hosts with mutual TLS to an ingestion endpoint, using the same certificates.
 - **No OCSP, no intermediate CA.** Revocation is checked against the `crl` table at every authentication and pushed to the controller by `NOTIFY`; the signed X.509 CRL (`GET /api/pki/crl`) is for external verifiers. A real PKI would keep the root offline and sign with an intermediate.
 
 ## Inspecting the live schema
