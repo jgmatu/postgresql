@@ -232,8 +232,8 @@ int count_channel(const std::vector<boost::json::object>& msgs, std::string_view
     return n;
 }
 
-// Two payload shapes, two channels, one listener socket. A telemetry
-// notification names the table, once per INSERT statement.
+// One channel per payload, one listener socket. A telemetry notification
+// names the table, once per INSERT statement.
 TEST_F(DbTest, ListenerMultiplexesBothTelemetryChannels)
 {
     for (const auto p : db::kAllPayloads)
@@ -246,12 +246,15 @@ TEST_F(DbTest, ListenerMultiplexesBothTelemetryChannels)
     const auto a = make_device("sine");
     const auto b = make_device("sawtooth");
     const auto g = make_device("gps_orbit");
+    const auto c = make_device("scatter");
     controller_->write_scalar_sample(db::DummySample{a.device_id, 1.5, 1});
     controller_->write_scalar_sample(db::DummySample{b.device_id, 2.5, 1});
     controller_->write_gps_sample(db::TrackSample{g.device_id, -3.7038, 40.4168, 250.0, 0.0, 1});
+    controller_->write_xy_sample(db::XySample{c.device_id, -12.5, 40.0, 1});
 
     EXPECT_TRUE(inbox_.wait([&](const auto& m) {
-        return count_channel(m, "telemetry_scalar") == 2 && count_channel(m, "telemetry_gps") == 1;
+        return count_channel(m, "telemetry_scalar") == 2 && count_channel(m, "telemetry_gps") == 1 &&
+               count_channel(m, "telemetry_xy") == 1;
     }));
     EXPECT_TRUE(inbox_.wait(
         [&](const auto& m) {
@@ -268,6 +271,7 @@ TEST_F(DbTest, ListenerMultiplexesBothTelemetryChannels)
         {});
     EXPECT_TRUE(inbox_.wait([&](const auto& m) { return count_channel(m, "telemetry_scalar") == 3; }));
     EXPECT_TRUE(inbox_.wait([&](const auto& m) { return count_channel(m, "telemetry_gps") == 1; }, 200ms));
+    EXPECT_TRUE(inbox_.wait([&](const auto& m) { return count_channel(m, "telemetry_xy") == 1; }, 200ms));
 }
 
 // The cursor moves to the last row of the select. A second read is empty,
@@ -314,6 +318,41 @@ TEST_F(DbTest, TelemetryCursorAdvancesPastABatch)
     EXPECT_EQ(fixes[0].at("seq").as_int64(), 1);
     EXPECT_GT(fixes[0].at("lat").to_number<double>(), 40.4168);
     EXPECT_TRUE(server_->take_unread_telemetry("telemetry_gps").empty());
+
+    const auto cloud = make_device("scatter");
+    controller_->write_telemetry_batch({}, {}, {db::XySample{cloud.device_id, -12.5, 40.0, 4}});
+    const auto points = server_->take_unread_telemetry("telemetry_xy");
+    ASSERT_EQ(points.size(), 1u);
+    EXPECT_EQ(points[0].at("device").as_string(), cloud.name);
+    EXPECT_EQ(points[0].at("seq").as_int64(), 4);
+    EXPECT_DOUBLE_EQ(points[0].at("x").to_number<double>(), -12.5);
+    EXPECT_DOUBLE_EQ(points[0].at("y").to_number<double>(), 40.0);
+    EXPECT_TRUE(server_->take_unread_telemetry("telemetry_xy").empty());
+}
+
+TEST_F(DbTest, XyTelemetryKeepsThePointAndThePartition)
+{
+    for (;;)
+    {
+        if (server_->take_unread_telemetry("telemetry_xy").size() < db::kTelemetryReadPage) break;
+    }
+    const auto d = make_device("scatter");
+    controller_->write_xy_sample(db::XySample{d.device_id, 3.5, -8.0, 9});
+    const auto rows = server_->fetch_telemetry(db::DbRole::Normal, d.name, std::nullopt, std::nullopt, 1);
+    ASSERT_TRUE(rows);
+    ASSERT_EQ(rows->as_array().size(), 1u);
+    const auto& row = rows->as_array()[0].as_object();
+    EXPECT_EQ(row.at("seq").as_int64(), 9);
+    EXPECT_DOUBLE_EQ(row.at("x").to_number<double>(), 3.5);
+    EXPECT_DOUBLE_EQ(row.at("y").to_number<double>(), -8.0);
+    EXPECT_EQ(row.at("partition").as_string(), current_partition("telemetry_xy"));
+
+    const auto device = server_->fetch_device(db::DbRole::Normal, d.name);
+    ASSERT_TRUE(device);
+    EXPECT_EQ(device->as_object().at("payload").as_string(), "xy");
+    EXPECT_DOUBLE_EQ(device->as_object().at("x").to_number<double>(), 3.5);
+    EXPECT_DOUBLE_EQ(device->as_object().at("y").to_number<double>(), -8.0);
+    EXPECT_TRUE(device->as_object().at("value").is_null());
 }
 
 TEST_F(DbTest, RegisteringAfterTheLoopStartedThrows)

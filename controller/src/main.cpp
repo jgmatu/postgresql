@@ -44,6 +44,7 @@
 #include <pgdemo_msgs/msg/proof.hpp>
 #include <pgdemo_msgs/msg/rejected.hpp>
 #include <pgdemo_msgs/msg/scalar_sample.hpp>
+#include <pgdemo_msgs/msg/xy_sample.hpp>
 
 #include <rclcpp/rclcpp.hpp>
 
@@ -199,6 +200,8 @@ int main(int argc, char** argv)
             topics::kScalar, qos, [&fleet](msg::ScalarSample::ConstSharedPtr m) { fleet.on_uplink(*m); });
         auto gps = ros_node->create_subscription<msg::GpsSample>(
             topics::kGps, qos, [&fleet](msg::GpsSample::ConstSharedPtr m) { fleet.on_uplink(*m); });
+        auto xy = ros_node->create_subscription<msg::XySample>(
+            topics::kXy, qos, [&fleet](msg::XySample::ConstSharedPtr m) { fleet.on_uplink(*m); });
         fleet.acquire_lock();
 
         // Registration phase, then activation. Callbacks only post to the io thread.

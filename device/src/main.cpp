@@ -27,6 +27,7 @@
 #include <pgdemo_msgs/msg/proof.hpp>
 #include <pgdemo_msgs/msg/rejected.hpp>
 #include <pgdemo_msgs/msg/scalar_sample.hpp>
+#include <pgdemo_msgs/msg/xy_sample.hpp>
 
 #include <rclcpp/rclcpp.hpp>
 
@@ -60,12 +61,12 @@ enum Exit : int {
 
 void usage(std::ostream& out)
 {
-    out << "Usage: pgdemo-device --name NAME --type TYPE --payload scalar|gps --dir DIR\n"
+    out << "Usage: pgdemo-device --name NAME --type TYPE --payload scalar|gps|xy --dir DIR\n"
            "                     [--enroll REQUEST_ID | --rotate REQUEST_ID]\n"
            "\n"
            "  --name      device name; also the CN of its certificate\n"
            "  --type      device type (selects the generator)\n"
-           "  --payload   scalar or gps\n"
+           "  --payload   scalar, gps or xy\n"
            "  --dir       key directory: key.pem and cert.pem\n"
            "  --enroll    generate a key, send a CSR and store the issued certificate\n"
            "  --rotate    same, replacing the current key once the new certificate arrives\n";
@@ -112,7 +113,8 @@ Options parse_args(int argc, char** argv)
     }
     if (o.name.empty() || o.type.empty() || o.dir.empty())
         throw UsageError("--name, --type and --dir are required");
-    if (o.payload != "scalar" && o.payload != "gps") throw UsageError("--payload must be scalar or gps");
+    if (o.payload != "scalar" && o.payload != "gps" && o.payload != "xy")
+        throw UsageError("--payload must be scalar, gps or xy");
     return o;
 }
 
@@ -188,6 +190,7 @@ public:
         proof_ = create_publisher<msg::Proof>(topics::kProof, qos);
         scalar_ = create_publisher<msg::ScalarSample>(topics::kScalar, qos);
         gps_ = create_publisher<msg::GpsSample>(topics::kGps, qos);
+        xy_ = create_publisher<msg::XySample>(topics::kXy, qos);
 
         bye_ = create_subscription<msg::Bye>(topics::kBye, qos, [this](msg::Bye::ConstSharedPtr m) { on_bye(*m); });
         rejected_ = create_subscription<msg::Rejected>(
@@ -218,6 +221,7 @@ private:
                 using T = std::decay_t<decltype(m)>;
                 if constexpr (std::is_same_v<T, msg::ScalarSample>) scalar_->publish(m);
                 else if constexpr (std::is_same_v<T, msg::GpsSample>) gps_->publish(m);
+                else if constexpr (std::is_same_v<T, msg::XySample>) xy_->publish(m);
                 else heartbeat_->publish(m);
             },
             msg);
@@ -251,22 +255,30 @@ private:
         hello.mode = mode_code(opts_.mode);
         hello.request_id = opts_.request_id;
         hello_->publish(hello);
-        if (phase_ == Phase::Cert && !csr_sent_) send_csr();
+        // The CSR topic is volatile. Repeat the same request until the
+        // certificate arrives, the way hello is repeated, so a subscriber that
+        // matches late still receives it.
+        if (phase_ == Phase::Cert) send_csr();
     }
 
     void send_csr()
     {
         try
         {
-            next_key_ = std::make_unique<pki::DeviceKey>(pki::DeviceKey::generate());
-            const fs::path next = opts_.dir / "key.next.pem";
-            next_key_->save(next.string());
+            if (!next_key_)
+            {
+                next_key_ = std::make_unique<pki::DeviceKey>(pki::DeviceKey::generate());
+                next_key_->save((opts_.dir / "key.next.pem").string());
+            }
             msg::Csr csr;
             csr.device = opts_.name;
             csr.csr = next_key_->csr_pem(opts_.name);
             csr_->publish(csr);
-            csr_sent_ = true;
-            log::info(tag(), std::format("{}: CSR sent for request {}", opts_.mode, opts_.request_id));
+            if (!csr_sent_)
+            {
+                csr_sent_ = true;
+                log::info(tag(), std::format("{}: CSR sent for request {}", opts_.mode, opts_.request_id));
+            }
         }
         catch (const std::exception& e)
         {
@@ -412,6 +424,7 @@ private:
     rclcpp::Publisher<msg::Proof>::SharedPtr proof_;
     rclcpp::Publisher<msg::ScalarSample>::SharedPtr scalar_;
     rclcpp::Publisher<msg::GpsSample>::SharedPtr gps_;
+    rclcpp::Publisher<msg::XySample>::SharedPtr xy_;
     rclcpp::Subscription<msg::Bye>::SharedPtr bye_;
     rclcpp::Subscription<msg::Rejected>::SharedPtr rejected_;
     rclcpp::Subscription<msg::Certificate>::SharedPtr certificate_;

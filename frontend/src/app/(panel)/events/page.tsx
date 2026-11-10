@@ -21,6 +21,7 @@ const DEVICE_RE = /^[a-z][a-z0-9_.-]{1,63}$/;
 const COLOR: Record<Channel, NonNullable<ComponentProps<typeof Badge>["color"]>> = {
   telemetry_scalar: "sky",
   telemetry_gps: "cyan",
+  telemetry_xy: "blue",
   device: "violet",
   config: "green",
   error: "red",
@@ -30,6 +31,7 @@ const COLOR: Record<Channel, NonNullable<ComponentProps<typeof Badge>["color"]>>
 const LABEL: Record<Channel, string> = {
   telemetry_scalar: "Telemetría escalar",
   telemetry_gps: "Telemetría GPS",
+  telemetry_xy: "Dispersión 2D",
   device: "Dispositivos y sesiones",
   config: "Configuración aplicada",
   error: "Errores",

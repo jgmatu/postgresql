@@ -6,7 +6,7 @@
 A device is a row, not a table. Registering one adds a row to device; the
 schema and the code do not change. Tables are per data shape instead:
 
-  device_type        what a device produces (payload scalar | gps) and its
+  device_type        what a device produces (payload scalar | gps | xy) and its
                      default configuration
   device             the registered devices. Each one points at its current
                      X.509 certificate (cert_id, NOT NULL); 03_identity.sql
@@ -14,6 +14,7 @@ schema and the code do not change. Tables are per data shape instead:
   device_state       the last sample of each device (one row per device, UPSERT)
   telemetry_scalar      every scalar sample, range-partitioned by month
   telemetry_gps         every GPS fix, range-partitioned by month
+  telemetry_xy          every 2D sample, a native point, range-partitioned by month
   telemetry_read_cursor where pgdemo-server stopped reading each history table
 
 The controller appends samples to the telemetry table of their payload and
@@ -43,7 +44,7 @@ SET ROLE demo_owner;
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS device_type (
     type_id            TEXT PRIMARY KEY,
-    payload            TEXT NOT NULL CHECK (payload IN ('scalar', 'gps')),
+    payload            TEXT NOT NULL CHECK (payload IN ('scalar', 'gps', 'xy')),
     default_rate_ms    INT NOT NULL CHECK (default_rate_ms BETWEEN 50 AND 10000),
     default_amplitude  DOUBLE PRECISION NOT NULL CHECK (default_amplitude > 0 AND default_amplitude <= 1000),
     description        TEXT NOT NULL
@@ -59,14 +60,17 @@ CREATE TABLE IF NOT EXISTS device (
 
 CREATE INDEX IF NOT EXISTS device_type_idx ON device (type_id);
 
--- Last sample. Exactly one of value / position, matching the device's payload.
+-- Last sample. Exactly one of value / position / xy, matching the device's payload.
+-- The CHECK is applied again below: CREATE TABLE IF NOT EXISTS does not alter a live table.
 CREATE TABLE IF NOT EXISTS device_state (
     device_id   INT PRIMARY KEY REFERENCES device (device_id) ON DELETE CASCADE,
     value       DOUBLE PRECISION,
     position    extensions.geography(Point, 4326),
+    xy          point,
     seq         BIGINT NOT NULL,
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
-    CHECK ((value IS NULL) <> (position IS NULL))
+    CONSTRAINT device_state_one_shape CHECK (
+        (value IS NOT NULL)::int + (position IS NOT NULL)::int + (xy IS NOT NULL)::int = 1)
 );
 
 CREATE INDEX IF NOT EXISTS device_state_position_gix ON device_state USING GIST (position);
@@ -74,11 +78,25 @@ CREATE INDEX IF NOT EXISTS device_state_position_gix ON device_state USING GIST 
 COMMENT ON TABLE device IS 'Registered devices, each bound to its current certificate. Created only by issue_device_certificate().';
 COMMENT ON TABLE device_state IS 'Last sample of each device. The manager upserts it in the telemetry batch with the highest seq of that device.';
 
--- amplitude: peak value for the scalar types, orbit radius in metres for gps_orbit.
+-- Widen checks and add xy on a database created before the scatter payload.
+ALTER TABLE device_type DROP CONSTRAINT IF EXISTS device_type_payload_check;
+ALTER TABLE device_type ADD CONSTRAINT device_type_payload_check
+    CHECK (payload IN ('scalar', 'gps', 'xy'));
+
+ALTER TABLE device_state ADD COLUMN IF NOT EXISTS xy point;
+ALTER TABLE device_state DROP CONSTRAINT IF EXISTS device_state_check;
+ALTER TABLE device_state DROP CONSTRAINT IF EXISTS device_state_one_shape;
+ALTER TABLE device_state ADD CONSTRAINT device_state_one_shape CHECK (
+    (value IS NOT NULL)::int + (position IS NOT NULL)::int + (xy IS NOT NULL)::int = 1);
+
+-- amplitude: peak for sine and sawtooth, standard deviation for white_noise,
+-- orbit radius in metres for gps_orbit, half-extent of the square for scatter.
 INSERT INTO device_type (type_id, payload, default_rate_ms, default_amplitude, description) VALUES
-    ('sine',      'scalar', 500,  10.0,  'Sine wave'),
-    ('sawtooth',  'scalar', 1000, 5.0,   'Sawtooth with noise'),
-    ('gps_orbit', 'gps',    1000, 250.0, 'GPS fix orbiting a fixed origin (ST_Project)')
+    ('sine',        'scalar', 500,  10.0,  'Sine wave'),
+    ('sawtooth',    'scalar', 1000, 5.0,   'Sawtooth with noise'),
+    ('white_noise', 'scalar', 500,  1.0,   'White noise, normal with standard deviation equal to the amplitude'),
+    ('gps_orbit',   'gps',    1000, 250.0, 'GPS fix orbiting a fixed origin (ST_Project)'),
+    ('scatter',     'xy',     500,  100.0, 'Uniform sample in the square [-amplitude, amplitude]')
 ON CONFLICT (type_id) DO NOTHING;
 
 -- ---------------------------------------------------------------------------
@@ -105,21 +123,40 @@ CREATE TABLE IF NOT EXISTS telemetry_gps (
 CREATE TABLE IF NOT EXISTS telemetry_scalar_default PARTITION OF telemetry_scalar DEFAULT;
 CREATE TABLE IF NOT EXISTS telemetry_gps_default PARTITION OF telemetry_gps DEFAULT;
 
+-- One native point per sample. x is xy[0], y is xy[1]. Not a geography: the
+-- square is a plane, not WGS84.
+CREATE TABLE IF NOT EXISTS telemetry_xy (
+    history_id   BIGINT GENERATED ALWAYS AS IDENTITY,
+    device_id    INT NOT NULL,
+    xy           point NOT NULL,
+    seq          BIGINT NOT NULL,
+    recorded_at  TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (history_id, recorded_at)
+) PARTITION BY RANGE (recorded_at);
+
+CREATE TABLE IF NOT EXISTS telemetry_xy_default PARTITION OF telemetry_xy DEFAULT;
+
 -- Declared on the parent; PostgreSQL creates it on every partition.
 CREATE INDEX IF NOT EXISTS telemetry_scalar_device_time_idx ON telemetry_scalar (device_id, recorded_at DESC);
 CREATE INDEX IF NOT EXISTS telemetry_gps_device_time_idx ON telemetry_gps (device_id, recorded_at DESC);
 CREATE INDEX IF NOT EXISTS telemetry_gps_position_gix ON telemetry_gps USING GIST (position);
+CREATE INDEX IF NOT EXISTS telemetry_xy_device_time_idx ON telemetry_xy (device_id, recorded_at DESC);
 
 -- Where the server stopped reading. history_id 0 means nothing has been read.
 -- Re-applying this script must not rewind a cursor that has already moved.
 CREATE TABLE IF NOT EXISTS telemetry_read_cursor (
-    channel     TEXT PRIMARY KEY CHECK (channel IN ('telemetry_scalar', 'telemetry_gps')),
+    channel     TEXT PRIMARY KEY CHECK (channel IN ('telemetry_scalar', 'telemetry_gps', 'telemetry_xy')),
     history_id  BIGINT NOT NULL
 );
 
+ALTER TABLE telemetry_read_cursor DROP CONSTRAINT IF EXISTS telemetry_read_cursor_channel_check;
+ALTER TABLE telemetry_read_cursor ADD CONSTRAINT telemetry_read_cursor_channel_check
+    CHECK (channel IN ('telemetry_scalar', 'telemetry_gps', 'telemetry_xy'));
+
 INSERT INTO telemetry_read_cursor (channel, history_id) VALUES
     ('telemetry_scalar', 0),
-    ('telemetry_gps', 0)
+    ('telemetry_gps', 0),
+    ('telemetry_xy', 0)
 ON CONFLICT (channel) DO NOTHING;
 
 COMMENT ON TABLE telemetry_read_cursor IS
@@ -155,7 +192,9 @@ DECLARE
     child        text;
     moved        bigint;
 BEGIN
-    IF parent NOT IN ('public.telemetry_scalar'::regclass, 'public.telemetry_gps'::regclass) THEN
+    IF parent NOT IN ('public.telemetry_scalar'::regclass,
+                      'public.telemetry_gps'::regclass,
+                      'public.telemetry_xy'::regclass) THEN
         RAISE EXCEPTION 'ensure_monthly_partitions: unsupported parent %', parent;
     END IF;
     IF months_ahead < 0 OR months_ahead > 24 THEN
@@ -214,7 +253,9 @@ DECLARE
     ym     text[];
     m      date;
 BEGIN
-    IF parent NOT IN ('public.telemetry_scalar'::regclass, 'public.telemetry_gps'::regclass) THEN
+    IF parent NOT IN ('public.telemetry_scalar'::regclass,
+                      'public.telemetry_gps'::regclass,
+                      'public.telemetry_xy'::regclass) THEN
         RAISE EXCEPTION 'drop_monthly_partitions_before: unsupported parent %', parent;
     END IF;
 
@@ -242,5 +283,6 @@ $$;
 -- same function at startup and every --maintenance-interval-s.
 SELECT ensure_monthly_partitions('telemetry_scalar');
 SELECT ensure_monthly_partitions('telemetry_gps');
+SELECT ensure_monthly_partitions('telemetry_xy');
 
 RESET ROLE;

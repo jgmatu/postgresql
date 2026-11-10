@@ -15,8 +15,8 @@ This document explains how two processes that never talk to each other run a rea
 
 | Process | Zone | PostgreSQL login | Writes | Listens to |
 |---|---|---|---|---|
-| `pgdemo-server` | A | `demo_server` (NOINHERIT) | `device_enrollment` (enroll, rotate), `device` and `device_certificate` (issue through `issue_device_certificate()`, remove), `crl`, `device_config_pending`, `app_users` | `telemetry_scalar`, `telemetry_gps`, `device_events`, `enrollment_csr`, `enrollment_events`, `config_events`, `error_events` |
-| `pgdemo-controller` | B | `demo_controller` | `device_enrollment` (CSR, status), `device_session`, `device_state`, `telemetry_scalar`, `telemetry_gps`, `device_config`, `device_config_errors` | `enrollment_requested`, `enrollment_events`, `device_events`, `config_requested` |
+| `pgdemo-server` | A | `demo_server` (NOINHERIT) | `device_enrollment` (enroll, rotate), `device` and `device_certificate` (issue through `issue_device_certificate()`, remove), `crl`, `device_config_pending`, `app_users` | `telemetry_scalar`, `telemetry_gps`, `telemetry_xy`, `device_events`, `enrollment_csr`, `enrollment_events`, `config_events`, `error_events` |
+| `pgdemo-controller` | B | `demo_controller` | `device_enrollment` (CSR, status), `device_session`, `device_state`, `telemetry_scalar`, `telemetry_gps`, `telemetry_xy`, `device_config`, `device_config_errors` | `enrollment_requested`, `enrollment_events`, `device_events`, `config_requested` |
 | `pgdemo-device` | B | none | samples on `pgdemo/worker/` (telemetry, hello, proof) | `pgdemo/manager/`: challenge, certificate, configuration, bye |
 | `client/pgdemo.sh` | host | none | over HTTPS (8443) or, with `--http`, plain HTTP (8080) | SSE `/api/stream` |
 | control panel ([`frontend/`](../frontend)) | browser | none | `/api` with a bearer token, on the server's own origin | SSE `/api/stream`, read with `fetch()` |
@@ -70,10 +70,10 @@ A device is a row of `device`, typed by `device_type`. The type fixes the *paylo
 
 | Table | Rows | Written by |
 |---|---|---|
-| `device_type` | `sine`, `sawtooth` (scalar), `gps_orbit` (gps) | install |
+| `device_type` | `sine`, `sawtooth`, `white_noise` (scalar), `gps_orbit` (gps), `scatter` (xy). Install enrolls `sine`, `sawtooth` and `gps_orbit` | install |
 | `device` | one per device, created with its first certificate; `dummy1`, `dummy2`, `dummy3` are enrolled at the first controller start | server, through `issue_device_certificate()` |
-| `device_state` | the last sample of each device (`value` or `position`, never both) | controller |
-| `telemetry_scalar`, `telemetry_gps` | every sample, monthly-partitioned, no foreign key to `device` | controller |
+| `device_state` | the last sample of each device: exactly one of `value`, `position` or `xy` | controller |
+| `telemetry_scalar`, `telemetry_gps`, `telemetry_xy` | every sample, monthly-partitioned, no foreign key to `device` | controller |
 | `telemetry_read_cursor` | one row per history table: the last `history_id` the server has read | server |
 
 An `AFTER INSERT` statement trigger on each history table wakes the server once per insert. The notification names the table. The server reads the unread rows and then publishes one SSE event per row, with the device in that event:
@@ -82,9 +82,10 @@ An `AFTER INSERT` statement trigger on each history table wakes the server once 
 |---|---|
 | `telemetry_scalar` | `{device_id, device, action, value, seq, ts}` |
 | `telemetry_gps` | `{device_id, device, action, lon, lat, seq, ts}` |
+| `telemetry_xy` | `{device_id, device, action, x, y, seq, ts}` |
 | `device_events` | `{action, device_id, device, ...}`: `INSERT`, `DELETE`, `ROTATED`, `REVOKED`, `UNREVOKED`, and each session state (`ONLINE`, `OFFLINE`, `AUTH_FAILED`, ...) |
 
-GPS positions are `geography(Point, 4326)`, installed with PostGIS in the `extensions` schema. The device does not compute latitude and longitude itself. It sends a fixed origin (Madrid), a radius (`amplitude`, metres) and a bearing, and the controller's INSERT calls `ST_Project`. GiST indexes cover `device_state` and every monthly partition of `telemetry_gps`.
+GPS positions are `geography(Point, 4326)`, installed with PostGIS in the `extensions` schema. The device does not compute latitude and longitude itself. It sends a fixed origin (Madrid), a radius (`amplitude`, metres) and a bearing, and the controller's INSERT calls `ST_Project`. GiST indexes cover `device_state` and every monthly partition of `telemetry_gps`. A scatter sample is a native PostgreSQL `point` in `telemetry_xy` and in `device_state.xy`. The worker publishes `x` and `y`; the INSERT builds `point(x, y)` and the read takes `xy[0]` and `xy[1]`. The square is not WGS84, so it is not a `geography`.
 
 Each device is a `pgdemo-device` worker, started by the controller (the manager) with `fork` + `execv`, or started on another host in the same ROS domain. Workers publish `pgdemo/worker/` and subscribe to `pgdemo/manager/`. The structs are [msgs/README.md](../msgs/README.md). ROS 2 discovers the nodes as peers; that discovery is not authority. The manager admits, challenges, configures and stops. Workers do not talk to each other and have no database login. After a worker has proved its identity (challenge-response with its private key; see [DEVICE_PKI.md](DEVICE_PKI.md#5-authentication)), it streams samples from a generator chosen by `type_id`, with a phase derived from `device_id`, at the configured rate. The manager runs every session, the child reaper, the heartbeat, the telemetry flush and the maintenance loops on one `io_context` thread, so its process table needs no lock; the ROS executor only posts each worker message onto that thread. Database calls block (libpqxx), so `on_db()` checks a connection out of [`ConnectionPool`](../libs/db/include/db/ConnectionPool.hpp) on a thread pool and the coroutine resumes with the result. Samples are queued and written in batches, one lease per flush. A node the manager did not fork is admitted by the same `hello` and is not signaled when it goes silent: the session is released. The lifecycle is [controller/README.md](../controller/README.md).
 
@@ -92,7 +93,7 @@ The controller appends a batch of samples in one `INSERT` per payload and UPSERT
 
 The fleet changes at run time. The controller listens to `enrollment_requested` (start a process with `--enroll` to generate a key and a CSR, or replace the running one with a `--rotate` process), `enrollment_events` (deliver the issued certificate to that same process, which then authenticates and streams) and `device_events` (stop the process on `DELETE` or a revocation of the current certificate, start it again when a hold is lifted). At start-up it does the same for every device and every open enrollment, after `LISTEN` is active, so nothing falls between the two; every 30 s it reconciles again, which catches a certificate that expired. The listener thread only posts each notification to the `io_context` thread. A process that exits is restarted with a backoff (1 s, doubling to 30 s), and `--max-devices` bounds how many run; the rest are `UNMANAGED`.
 
-On the server, one listener connection subscribes to every channel. libpqxx keeps a handler per channel and calls the right one for each notification. A telemetry notification is a wake-up: the server reads `telemetry_scalar` or `telemetry_gps` from `telemetry_read_cursor`, advances the cursor to the last `history_id` of that select in the same transaction, and publishes one event per row. It does the same once at start-up, after `LISTEN` is active. The other channels are republished as they arrive. The SSE events are `telemetry_scalar`, `telemetry_gps`, `device`, `enrollment`, `config` and `error`, each tagged with its device name. Subscribers filter by `?channels=` and, optionally, by `?devices=`.
+On the server, one listener connection subscribes to every channel. libpqxx keeps a handler per channel and calls the right one for each notification. A telemetry notification is a wake-up: the server reads `telemetry_scalar`, `telemetry_gps` or `telemetry_xy` from `telemetry_read_cursor`, advances the cursor to the last `history_id` of that select in the same transaction, and publishes one event per row. It does the same once at start-up, after `LISTEN` is active. The other channels are republished as they arrive. The SSE events are `telemetry_scalar`, `telemetry_gps`, `telemetry_xy`, `device`, `enrollment`, `config` and `error`, each tagged with its device name. Subscribers filter by `?channels=` and, optionally, by `?devices=`.
 
 ```mermaid
 sequenceDiagram
@@ -217,7 +218,7 @@ Callbacks run on the listener thread. They may call query methods (that thread d
 
 ## 6. Monthly partitioning
 
-`telemetry_scalar` and `telemetry_gps` are `PARTITION BY RANGE (recorded_at)`, with one partition per UTC month plus a `DEFAULT` partition. Every device of the same payload shares them; the `(device_id, recorded_at DESC)` index narrows a partition to one device.
+`telemetry_scalar`, `telemetry_gps` and `telemetry_xy` are `PARTITION BY RANGE (recorded_at)`, with one partition per UTC month plus a `DEFAULT` partition. Every device of the same payload shares them; the `(device_id, recorded_at DESC)` index narrows a partition to one device.
 
 ```text
 telemetry_scalar
@@ -289,7 +290,7 @@ COMMIT;                         -- the role reverts here
 | `device_session` | SELECT | SELECT | SELECT, INSERT, UPDATE | – |
 | `root_ca` | SELECT | SELECT | SELECT | SELECT |
 | `device_state` | SELECT | SELECT | SELECT, INSERT, UPDATE | – |
-| `telemetry_scalar`, `telemetry_gps` | SELECT | SELECT | INSERT | SELECT |
+| `telemetry_scalar`, `telemetry_gps`, `telemetry_xy` | SELECT | SELECT | INSERT | SELECT |
 | `telemetry_read_cursor` | – | – | – | SELECT, UPDATE |
 | `device_config` | SELECT | SELECT | SELECT, INSERT, UPDATE | – |
 | `device_config_pending` | SELECT | SELECT, INSERT | SELECT, UPDATE | – |

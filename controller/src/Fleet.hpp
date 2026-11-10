@@ -126,6 +126,7 @@ public:
 
     /// A `hello` from a worker, any thread: posted to the io thread.
     void on_hello(pgdemo_msgs::msg::Hello hello);
+
     /// One other worker message, any thread: posted to the io thread.
     void on_uplink(Uplink msg);
 
@@ -202,7 +203,8 @@ private:
     void apply_enrollment(const db::Enrollment& e);
     void apply_device(const db::Device& d);
     void admit(pgdemo_msgs::msg::Hello hello);
-    void enqueue_telemetry(std::variant<db::DummySample, db::TrackSample> sample);
+    using TelemetryItem = std::variant<db::DummySample, db::TrackSample, db::XySample>;
+    void enqueue_telemetry(TelemetryItem sample);
     void send_bye(const std::string& device, const std::string& reason);
 
     // Process table.
@@ -229,7 +231,7 @@ private:
     /// Publishes on `pgdemo/manager`. Empty callbacks drop the message.
     Downlink downlink_;
     /// Samples from every worker, flushed by `telemetry_loop()` on this thread.
-    std::deque<std::variant<db::DummySample, db::TrackSample>> telemetry_;
+    std::deque<TelemetryItem> telemetry_;
     /// Samples dropped because `telemetry_` was at `kTelemetryCapacity`.
     std::size_t telemetry_dropped_{0};
     /// Wakes `telemetry_loop()` early once a batch is full.

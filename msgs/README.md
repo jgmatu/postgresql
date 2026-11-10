@@ -47,5 +47,6 @@ A worker publishes only the topic that matches `--payload`.
 |---|---|---|
 | `pgdemo/worker/telemetry/scalar` | `ScalarSample` | `device`, `seq`, `value` |
 | `pgdemo/worker/telemetry/gps` | `GpsSample` | `device`, `seq`, `origin_lon`, `origin_lat`, `radius_m`, `bearing_rad` |
+| `pgdemo/worker/telemetry/xy` | `XySample` | `device`, `seq`, `x`, `y` |
 
 The manager does not insert each sample on its own. It queues every worker's samples on the `io_context` thread and flushes them in one database transaction. That queue, and the rest of the process lifecycle, is [controller/README.md](../controller/README.md).

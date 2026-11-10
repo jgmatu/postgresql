@@ -7,7 +7,7 @@ The demo models a small IoT fleet of simulated devices. A device is a row of `de
 - **Reactive IPC across network zones.** The server (zone A) and the controller (zone B) share no socket, no broker and no addresses. Each one only knows the database.
 - **Device identity by certificate.** Every device is bound to an X.509 certificate (ECDSA P-384) signed by an internal root CA. The device process generates its key and a CSR, the server signs it, and the database records it through one `SECURITY DEFINER` function. A device is never without a certificate and may have had several; deleting its current certificate deletes it; revoking it (CRL) takes it out of service without deleting it. See [docs/DEVICE_PKI.md](docs/DEVICE_PKI.md).
 - **Supervised device processes.** The controller is the manager. It starts each device, a worker, with `fork` + `execv`. The worker publishes `pgdemo/worker/` and subscribes to `pgdemo/manager/`, proves its key with a signed challenge, and is restarted with a backoff when it dies. A node started on another host in the same ROS domain is admitted the same way. Workers do not talk to each other or to the database. `--max-devices` bounds the fleet.
-- **Channel multiplexing on one connection.** One channel per payload shape, `telemetry_scalar` and `telemetry_gps`, plus `device_events`, three enrollment channels and three control-plane channels, arrive on a single `LISTEN` socket, whatever the number of devices. A telemetry notification names the table; the server reads the new rows from `telemetry_read_cursor`. Every SSE event carries the device, and clients can filter by it.
+- **Channel multiplexing on one connection.** One channel per payload shape, `telemetry_scalar`, `telemetry_gps` and `telemetry_xy`, plus `device_events`, three enrollment channels and three control-plane channels, arrive on a single `LISTEN` socket, whatever the number of devices. A telemetry notification names the table; the server reads the new rows from `telemetry_read_cursor`. Every SSE event carries the device, and clients can filter by it.
 - **PostGIS.** GPS devices send an origin, a radius and a bearing; `ST_Project` builds the point, and the same point is appended to the monthly telemetry.
 - **Desired vs applied configuration.** An admin posts a desired configuration. The controller validates it and applies or rejects it. The HTTP request waits for the outcome through a request-id **Dispatcher**, so a concurrent, synchronous API sits on top of an asynchronous queue.
 - **Monthly-partitioned telemetry.** Every sample is appended to a `RANGE`-partitioned table shared by all devices of its payload. Partitions are created ahead of time, rows that landed in `DEFAULT` are moved, and retention drops whole months.
@@ -25,7 +25,7 @@ flowchart LR
         registry[("device + device_certificate + crl<br/>(identity)")]
         queue[("device_config_pending<br/>(queue)")]
         applied[("device_config<br/>(applied)")]
-        data[("device_state<br/>+ telemetry_scalar / telemetry_gps<br/>(monthly partitions)")]
+        data[("device_state<br/>+ telemetry_scalar / telemetry_gps / telemetry_xy<br/>(monthly partitions)")]
     end
     subgraph zoneB["zone B"]
         controller["pgdemo-controller<br/>supervisor + queue worker"]
@@ -45,7 +45,7 @@ flowchart LR
     controller -- "UPSERT applied / errors" --> applied
     applied -. "NOTIFY config_events / error_events" .-> server
     controller -- "UPSERT + append" --> data
-    data -. "NOTIFY telemetry_scalar / telemetry_gps" .-> server
+    data -. "NOTIFY telemetry_scalar / telemetry_gps / telemetry_xy" .-> server
     server -- "SSE /api/stream" --> client
 ```
 
@@ -251,7 +251,7 @@ Every route is TLS 1.3 on port 8443, or plain HTTP on port 8080 with `scripts/ru
 | `GET /api/enrollments?device=&limit=`, `GET /api/enrollments/{id}` | any | Enrollment and rotation requests and their outcome |
 | `GET /api/pki/ca` | any | The root CAs, the signing CA's fingerprint and the revoked serials |
 | `GET /api/pki/crl` | any | The X.509 CRL in PEM, signed by the CA when requested |
-| `GET /api/stream?channels=&devices=` | any | Server-Sent Events. Channels: `telemetry_scalar`, `telemetry_gps`, `device`, `enrollment`, `config`, `error` (default all); `devices` filters by name |
+| `GET /api/stream?channels=&devices=` | any | Server-Sent Events. Channels: `telemetry_scalar`, `telemetry_gps`, `telemetry_xy`, `device`, `enrollment`, `config`, `error` (default all); `devices` filters by name |
 | `GET /api/config` | any | `v_device_config_sync_status`: applied, desired, `SYNC`/`PENDING`/`ERROR`/`UNINITIALISED` |
 | `POST /api/config` | admin | `{"device", "rate_ms"?, "amplitude"?, "is_active"?}`, partial update |
 | `GET /api/config/requests/{id}` | any | One request and its error, if any |

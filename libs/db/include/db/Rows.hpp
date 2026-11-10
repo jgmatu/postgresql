@@ -107,6 +107,15 @@ struct DummySample
     std::int64_t seq{0};  ///< producer tick counter, increases by one per tick
 };
 
+/// One sample of the 2D square. Stored as a native `point`.
+struct XySample
+{
+    int device_id{0};     ///< device that produced the sample
+    double x{0.0};        ///< first coordinate, `point` subscript 0
+    double y{0.0};        ///< second coordinate, `point` subscript 1
+    std::int64_t seq{0};  ///< producer tick counter, increases by one per tick
+};
+
 /// One GPS fix. PostGIS projects the point from the origin.
 struct TrackSample
 {

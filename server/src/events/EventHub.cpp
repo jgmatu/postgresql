@@ -65,8 +65,8 @@ void EventHub::Subscription::close()
 
 const std::set<std::string>& EventHub::all_channels()
 {
-    static const std::set<std::string> kAll{"telemetry_scalar", "telemetry_gps", "device", "config", "error",
-                                            "enrollment"};
+    static const std::set<std::string> kAll{"telemetry_scalar", "telemetry_gps", "telemetry_xy", "device",
+                                            "config", "error", "enrollment"};
     return kAll;
 }
 

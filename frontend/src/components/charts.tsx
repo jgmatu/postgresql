@@ -173,3 +173,65 @@ export function GpsMap({ tracks, testId = "gps-map" }: { tracks: Track[]; testId
     </svg>
   );
 }
+
+export interface ScatterPoint {
+  x: number;
+  y: number;
+}
+
+const SCATTER = 520;
+const SCATTER_PAD = 44;
+
+/**
+ * A cloud of points on a square. Axes stay equal and cover at least
+ * `[-extent, extent]`; a point outside that square widens both axes together.
+ */
+export function ScatterChart({
+  points,
+  extent = 100,
+  testId = "scatter-chart",
+}: {
+  points: ScatterPoint[];
+  extent?: number;
+  testId?: string;
+}) {
+  if (points.length === 0) {
+    return (
+      <div className="flex h-40 items-center justify-center rounded-lg bg-zinc-50 text-sm text-zinc-500 ring-1 ring-zinc-950/5" data-testid={testId} data-points={0}>
+        Esperando muestras…
+      </div>
+    );
+  }
+  const span = Math.max(Math.abs(extent) || 1, ...points.map((p) => Math.max(Math.abs(p.x), Math.abs(p.y))));
+  const plot = SCATTER - SCATTER_PAD * 2;
+  const sx = (x: number) => SCATTER_PAD + ((x + span) / (2 * span)) * plot;
+  const sy = (y: number) => SCATTER_PAD + ((span - y) / (2 * span)) * plot;
+  const ticks = [-span, -span / 2, 0, span / 2, span];
+  return (
+    <svg viewBox={`0 0 ${SCATTER} ${SCATTER}`} className="h-auto w-full max-w-xl text-sky-600" role="img" data-testid={testId} data-points={points.length}>
+      {ticks.map((v) => (
+        <g key={v} className="stroke-zinc-200">
+          <line x1={sx(v)} x2={sx(v)} y1={sy(span)} y2={sy(-span)} />
+          <line x1={sx(-span)} x2={sx(span)} y1={sy(v)} y2={sy(v)} />
+        </g>
+      ))}
+      <line x1={sx(-span)} x2={sx(span)} y1={sy(0)} y2={sy(0)} className="stroke-zinc-400" />
+      <line x1={sx(0)} x2={sx(0)} y1={sy(span)} y2={sy(-span)} className="stroke-zinc-400" />
+      {ticks.map((v) => (
+        <g key={`l${v}`} className="fill-zinc-500 text-[11px]">
+          <text x={sx(v)} y={sy(-span) + 16} textAnchor="middle">
+            {fmtNumber(v, span >= 10 ? 0 : 1)}
+          </text>
+          {v !== 0 && (
+            <text x={sx(-span) - 6} y={sy(v) + 4} textAnchor="end">
+              {fmtNumber(v, span >= 10 ? 0 : 1)}
+            </text>
+          )}
+        </g>
+      ))}
+      {points.map((p, i) => (
+        <circle key={i} cx={sx(p.x)} cy={sy(p.y)} r={2.5} />
+      ))}
+    </svg>
+  );
+}

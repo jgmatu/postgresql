@@ -11,6 +11,7 @@ every other payload carries the device.
   -----------------  ------------------------------  -----------  ------------------------------
   telemetry_scalar      telemetry_scalar INSERT          server       a batch was appended; read on
   telemetry_gps         telemetry_gps INSERT            server       a batch was appended; read on
+  telemetry_xy          telemetry_xy INSERT             server       a batch was appended; read on
   device_events         device INSERT/DELETE             controller,  INSERT, DELETE
                         device UPDATE OF cert_id         server       ROTATED
                         crl INSERT/UPDATE/DELETE                      REVOKED, UNREVOKED
@@ -63,6 +64,10 @@ CREATE OR REPLACE TRIGGER trg_telemetry_scalar_notify
 
 CREATE OR REPLACE TRIGGER trg_telemetry_gps_notify
     AFTER INSERT ON telemetry_gps
+    FOR EACH STATEMENT EXECUTE FUNCTION notify_telemetry_batch();
+
+CREATE OR REPLACE TRIGGER trg_telemetry_xy_notify
+    AFTER INSERT ON telemetry_xy
     FOR EACH STATEMENT EXECUTE FUNCTION notify_telemetry_batch();
 
 -- ---------------------------------------------------------------------------

@@ -30,6 +30,12 @@ export function fmtNumber(v: number | null | undefined, digits = 2): string {
   return v.toLocaleString("es-ES", { minimumFractionDigits: digits, maximumFractionDigits: digits });
 }
 
+/** `12,30, -4,50` for a point in the square, or a dash. */
+export function fmtXy(x: number | null | undefined, y: number | null | undefined, digits = 2): string {
+  if (x === null || x === undefined || y === null || y === undefined) return "—";
+  return `${fmtNumber(x, digits)}, ${fmtNumber(y, digits)}`;
+}
+
 /** `40,41610, -3,70660` for a GPS fix, or a dash. */
 export function fmtLatLon(lat: number | null | undefined, lon: number | null | undefined): string {
   if (lat === null || lat === undefined || lon === null || lon === undefined) return "—";

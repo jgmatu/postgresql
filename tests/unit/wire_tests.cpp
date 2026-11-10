@@ -140,4 +140,21 @@ TEST(Generators, SamplesCarryThePayloadOfTheirType)
     EXPECT_EQ(gps.origin_lat, device::kOriginLat);
     EXPECT_EQ(gps.radius_m, 500.0);
     EXPECT_NEAR(gps.bearing_rad, std::numbers::pi / 2.0, 1e-9);
+
+    const auto noise = std::get<msg::ScalarSample>(device::make_sample(device::Generator::WhiteNoise, 3, 2.0, 0.0, 1.5));
+    EXPECT_EQ(noise.seq, 3);
+    EXPECT_DOUBLE_EQ(noise.value, 3.0);
+
+    const auto cloud = std::get<msg::XySample>(device::make_sample(device::Generator::Scatter, 1, 100.0, 0.0, 0.0, 0.0, 1.0));
+    EXPECT_EQ(cloud.seq, 1);
+    EXPECT_DOUBLE_EQ(cloud.x, -100.0);
+    EXPECT_DOUBLE_EQ(cloud.y, 100.0);
+}
+
+TEST(Generators, TypeSelectsWhiteNoiseAndScatter)
+{
+    EXPECT_EQ(device::generator_for("white_noise", "scalar"), device::Generator::WhiteNoise);
+    EXPECT_EQ(device::generator_for("scatter", "xy"), device::Generator::Scatter);
+    EXPECT_EQ(device::generator_for("sine", "scalar"), device::Generator::Sine);
+    EXPECT_EQ(device::generator_for("anything", "xy"), device::Generator::Scatter);
 }

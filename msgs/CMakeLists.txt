@@ -16,7 +16,8 @@ set(PGDEMO_IDL
     msg/Proof.idl
     msg/Config.idl
     msg/ScalarSample.idl
-    msg/GpsSample.idl)
+    msg/GpsSample.idl
+    msg/XySample.idl)
 
 # SKIP_INSTALL: this tree is not an ament package. The binaries link the
 # generated type support directly, and the image copies those libraries.

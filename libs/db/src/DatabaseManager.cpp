@@ -352,7 +352,7 @@ void DatabaseManager::write_scalar_sample(const DummySample& sample)
     txn.exec("WITH up AS ("
              "  INSERT INTO device_state (device_id, value, seq, updated_at)"
              "  VALUES ($1, $2, $3, clock_timestamp())"
-             "  ON CONFLICT (device_id) DO UPDATE SET value = EXCLUDED.value, seq = EXCLUDED.seq,"
+             "  ON CONFLICT (device_id) DO UPDATE SET value = EXCLUDED.value, xy = NULL, seq = EXCLUDED.seq,"
              "    updated_at = EXCLUDED.updated_at"
              "  RETURNING device_id, value, seq, updated_at)"
              " INSERT INTO telemetry_scalar (device_id, value, seq, recorded_at)"
@@ -362,9 +362,27 @@ void DatabaseManager::write_scalar_sample(const DummySample& sample)
     txn.commit();
 }
 
-void DatabaseManager::write_telemetry_batch(const std::vector<DummySample>& scalar, const std::vector<TrackSample>& gps)
+void DatabaseManager::write_xy_sample(const XySample& sample)
 {
-    if (scalar.empty() && gps.empty()) return;
+    auto lease = pool_.acquire();
+    pqxx::work txn(lease.get());
+    txn.exec("WITH up AS ("
+             "  INSERT INTO device_state (device_id, value, position, xy, seq, updated_at)"
+             "  VALUES ($1, NULL, NULL, point($2::float8, $3::float8), $4, clock_timestamp())"
+             "  ON CONFLICT (device_id) DO UPDATE SET value = NULL, position = NULL, xy = EXCLUDED.xy,"
+             "    seq = EXCLUDED.seq, updated_at = EXCLUDED.updated_at"
+             "  RETURNING device_id, xy, seq, updated_at)"
+             " INSERT INTO telemetry_xy (device_id, xy, seq, recorded_at)"
+             " SELECT device_id, xy, seq, updated_at FROM up",
+             pqxx::params{sample.device_id, sample.x, sample.y, sample.seq})
+        .no_rows();
+    txn.commit();
+}
+
+void DatabaseManager::write_telemetry_batch(const std::vector<DummySample>& scalar, const std::vector<TrackSample>& gps,
+                                            const std::vector<XySample>& xy)
+{
+    if (scalar.empty() && gps.empty() && xy.empty()) return;
     auto lease = pool_.acquire();
     pqxx::work txn(lease.get());
 
@@ -403,7 +421,7 @@ void DatabaseManager::write_telemetry_batch(const std::vector<DummySample>& scal
             ++n;
         }
         txn.exec("INSERT INTO device_state (device_id, value, position, seq, updated_at) VALUES " + rows +
-                     " ON CONFLICT (device_id) DO UPDATE SET value = EXCLUDED.value, position = NULL,"
+                     " ON CONFLICT (device_id) DO UPDATE SET value = EXCLUDED.value, position = NULL, xy = NULL,"
                      " seq = EXCLUDED.seq, updated_at = EXCLUDED.updated_at",
                  state)
             .no_rows();
@@ -454,7 +472,51 @@ void DatabaseManager::write_telemetry_batch(const std::vector<DummySample>& scal
             ++n;
         }
         txn.exec("INSERT INTO device_state (device_id, value, position, seq, updated_at) VALUES " + rows +
-                     " ON CONFLICT (device_id) DO UPDATE SET value = NULL, position = EXCLUDED.position,"
+                     " ON CONFLICT (device_id) DO UPDATE SET value = NULL, position = EXCLUDED.position, xy = NULL,"
+                     " seq = EXCLUDED.seq, updated_at = EXCLUDED.updated_at",
+                 state)
+            .no_rows();
+    }
+
+    if (!xy.empty())
+    {
+        pqxx::params history;
+        std::string values;
+        for (std::size_t i = 0; i < xy.size(); ++i)
+        {
+            if (i != 0) values += ',';
+            const int b = static_cast<int>(i * 4 + 1);
+            values += std::format("(${}, point(${}::float8, ${}::float8), ${}, clock_timestamp())", b, b + 1, b + 2, b + 3);
+            history.append(xy[i].device_id);
+            history.append(xy[i].x);
+            history.append(xy[i].y);
+            history.append(xy[i].seq);
+        }
+        txn.exec("INSERT INTO telemetry_xy (device_id, xy, seq, recorded_at) VALUES " + values, history).no_rows();
+
+        std::map<int, const XySample*> latest;
+        for (const auto& sample : xy)
+        {
+            const auto it = latest.find(sample.device_id);
+            if (it == latest.end() || sample.seq >= it->second->seq) latest[sample.device_id] = &sample;
+        }
+        pqxx::params state;
+        std::string rows;
+        int n = 0;
+        for (const auto& [_, sample] : latest)
+        {
+            if (n != 0) rows += ',';
+            const int b = n * 4 + 1;
+            rows += std::format("(${}, NULL, NULL, point(${}::float8, ${}::float8), ${}, clock_timestamp())", b, b + 1,
+                                b + 2, b + 3);
+            state.append(sample->device_id);
+            state.append(sample->x);
+            state.append(sample->y);
+            state.append(sample->seq);
+            ++n;
+        }
+        txn.exec("INSERT INTO device_state (device_id, value, position, xy, seq, updated_at) VALUES " + rows +
+                     " ON CONFLICT (device_id) DO UPDATE SET value = NULL, position = NULL, xy = EXCLUDED.xy,"
                      " seq = EXCLUDED.seq, updated_at = EXCLUDED.updated_at",
                  state)
             .no_rows();
@@ -464,8 +526,12 @@ void DatabaseManager::write_telemetry_batch(const std::vector<DummySample>& scal
 
 std::vector<boost::json::object> DatabaseManager::take_unread_telemetry(std::string_view channel)
 {
-    const bool gps = channel == telemetry_channel(Payload::Gps);
-    if (!gps && channel != telemetry_channel(Payload::Scalar))
+    const auto payload = [&]() -> std::optional<Payload> {
+        for (const auto p : kAllPayloads)
+            if (channel == telemetry_channel(p)) return p;
+        return std::nullopt;
+    }();
+    if (!payload)
     {
         throw std::invalid_argument("take_unread_telemetry: unknown channel " + std::string(channel));
     }
@@ -481,24 +547,20 @@ std::vector<boost::json::object> DatabaseManager::take_unread_telemetry(std::str
     const auto cursor = cur[0][0].as<std::int64_t>();
 
     // '{{}}' is the format escape for the JSON operator '{}'.
-    const auto sql = gps ? std::format("SELECT t.history_id, t.device_id, d.name AS device, t.seq,"
-                                       " to_json(t.recorded_at)#>>'{{}}' AS ts,"
-                                       " extensions.ST_X(t.position::extensions.geometry) AS lon,"
-                                       " extensions.ST_Y(t.position::extensions.geometry) AS lat"
-                                       " FROM telemetry_gps t"
-                                       " JOIN device d ON d.device_id = t.device_id"
-                                       " WHERE t.history_id > $1"
-                                       " ORDER BY t.history_id"
-                                       " LIMIT {}",
-                                       kTelemetryReadPage)
-                         : std::format("SELECT t.history_id, t.device_id, d.name AS device, t.seq,"
-                                       " to_json(t.recorded_at)#>>'{{}}' AS ts, t.value"
-                                       " FROM telemetry_scalar t"
-                                       " JOIN device d ON d.device_id = t.device_id"
-                                       " WHERE t.history_id > $1"
-                                       " ORDER BY t.history_id"
-                                       " LIMIT {}",
-                                       kTelemetryReadPage);
+    const char* columns = "t.value";
+    if (*payload == Payload::Gps)
+        columns = "extensions.ST_X(t.position::extensions.geometry) AS lon,"
+                  " extensions.ST_Y(t.position::extensions.geometry) AS lat";
+    else if (*payload == Payload::Xy)
+        columns = "(t.xy)[0] AS x, (t.xy)[1] AS y";
+    const auto sql = std::format("SELECT t.history_id, t.device_id, d.name AS device, t.seq,"
+                                 " to_json(t.recorded_at)#>>'{{}}' AS ts, {}"
+                                 " FROM {} t"
+                                 " JOIN device d ON d.device_id = t.device_id"
+                                 " WHERE t.history_id > $1"
+                                 " ORDER BY t.history_id"
+                                 " LIMIT {}",
+                                 columns, telemetry_table(*payload), kTelemetryReadPage);
     const auto rows = txn.exec(sql, pqxx::params{cursor});
 
     std::vector<boost::json::object> out;
@@ -516,10 +578,15 @@ std::vector<boost::json::object> DatabaseManager::take_unread_telemetry(std::str
             sample["device"] = row["device"].view();
             sample["seq"] = row["seq"].as<std::int64_t>();
             sample["ts"] = row["ts"].view();
-            if (gps)
+            if (*payload == Payload::Gps)
             {
                 sample["lon"] = row["lon"].as<double>();
                 sample["lat"] = row["lat"].as<double>();
+            }
+            else if (*payload == Payload::Xy)
+            {
+                sample["x"] = row["x"].as<double>();
+                sample["y"] = row["y"].as<double>();
             }
             else
             {
@@ -544,7 +611,7 @@ void DatabaseManager::write_gps_sample(const TrackSample& sample)
              "    $1, ST_Project(ST_SetSRID(ST_MakePoint($2, $3), 4326)::geography,"
              "      $4::double precision, $5::double precision),"
              "    $6, clock_timestamp())"
-             "  ON CONFLICT (device_id) DO UPDATE SET position = EXCLUDED.position, seq = EXCLUDED.seq,"
+             "  ON CONFLICT (device_id) DO UPDATE SET position = EXCLUDED.position, xy = NULL, seq = EXCLUDED.seq,"
              "    updated_at = EXCLUDED.updated_at"
              "  RETURNING device_id, position, seq, updated_at)"
              " INSERT INTO telemetry_gps (device_id, position, seq, recorded_at)"
@@ -619,11 +686,14 @@ std::optional<boost::json::value> DatabaseManager::fetch_telemetry(DbRole role, 
         const int device_id = dev[0][0].as<int>();
         const auto payload = parse_payload(dev[0][1].view()).value_or(Payload::Scalar);
 
-        const std::string_view columns =
-            payload == Payload::Gps
-                ? "history_id, device_id, ST_X(position::geometry) AS lon, ST_Y(position::geometry) AS lat,"
-                  " seq, recorded_at, tableoid::regclass::text AS partition"
-                : "history_id, device_id, value, seq, recorded_at, tableoid::regclass::text AS partition";
+        const char* columns =
+            "history_id, device_id, value, seq, recorded_at, tableoid::regclass::text AS partition";
+        if (payload == Payload::Gps)
+            columns = "history_id, device_id, ST_X(position::geometry) AS lon, ST_Y(position::geometry) AS lat,"
+                      " seq, recorded_at, tableoid::regclass::text AS partition";
+        else if (payload == Payload::Xy)
+            columns = "history_id, device_id, (xy)[0] AS x, (xy)[1] AS y,"
+                      " seq, recorded_at, tableoid::regclass::text AS partition";
         const std::string sql = std::format(
             "SELECT COALESCE(json_agg(r ORDER BY r.recorded_at DESC), '[]'::json)::text FROM ("
             "  SELECT {}"

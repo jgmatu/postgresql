@@ -190,18 +190,30 @@ public:
     void write_gps_sample(const TrackSample& sample);
 
     /**
+     * @brief UPSERT a 2D sample into `device_state` and append it to `telemetry_xy`.
+     *
+     * The column is `point(x, y)`. The insert into `telemetry_xy` fires that
+     * channel once, on commit. `value` and `position` are set NULL.
+     *
+     * @param sample device, coordinates and tick
+     */
+    void write_xy_sample(const XySample& sample);
+
+    /**
      * @brief Append a batch of samples and refresh `device_state` once per device.
      *
      * One transaction, one pool lease. Every sample is inserted into its history
      * table in one statement per payload, which notifies that channel once.
      * `device_state` is updated with the highest `seq` of that device in the
-     * batch and does not notify. Scalar rows set `position` NULL and GPS rows
-     * set `value` NULL, matching the table check.
+     * batch and does not notify. Each row sets the other two shapes NULL, so
+     * exactly one of `value`, `position` and `xy` is present.
      *
      * @param scalar samples for `telemetry_scalar`
      * @param gps    samples for `telemetry_gps`
+     * @param xy     samples for `telemetry_xy`
      */
-    void write_telemetry_batch(const std::vector<DummySample>& scalar, const std::vector<TrackSample>& gps);
+    void write_telemetry_batch(const std::vector<DummySample>& scalar, const std::vector<TrackSample>& gps,
+                               const std::vector<XySample>& xy = {});
 
     /**
      * @brief Read one page of telemetry past the cursor and advance it.
@@ -212,9 +224,9 @@ public:
      * before committing. An empty page leaves the cursor where it is.
      * The caller publishes the rows after the commit.
      *
-     * @param channel `telemetry_scalar` or `telemetry_gps`
+     * @param channel `telemetry_scalar`, `telemetry_gps` or `telemetry_xy`
      * @return samples in `history_id` order, each with `action` `INSERT`
-     * @throws std::invalid_argument when `channel` is not one of the two
+     * @throws std::invalid_argument when `channel` is not one of the three
      * @throws std::runtime_error when the cursor row is missing
      */
     std::vector<boost::json::object> take_unread_telemetry(std::string_view channel);
@@ -235,7 +247,7 @@ public:
     /**
      * @brief `v_devices`: every device, its type and its last sample.
      * @param role group used for `SET LOCAL ROLE`
-     * @return JSON array ordered by `device_id`; GPS devices carry `lon` and `lat`
+     * @return JSON array ordered by `device_id`; GPS devices carry `lon` and `lat`, scatter devices `x` and `y`
      */
     boost::json::value fetch_devices(DbRole role);
 
@@ -252,7 +264,7 @@ public:
      * @brief Telemetry of one device in `[from, to)`, newest first. Each row carries
      * the name of the partition it was read from. NULL bounds default to the last hour.
      *
-     * The device's type selects `telemetry_scalar` or `telemetry_gps`.
+     * The device's type selects `telemetry_scalar`, `telemetry_gps` or `telemetry_xy`.
      *
      * @param role  group used for `SET LOCAL ROLE`
      * @param name  device name

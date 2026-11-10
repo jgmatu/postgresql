@@ -6,16 +6,16 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { IdentityBadge, SessionBadge } from "@/components/badges";
 import { Sparkline } from "@/components/charts";
 import { Empty, ErrorCallout, LiveIndicator, Loading, PageHeading, Stat } from "@/components/ui";
-import { fmtLatLon, fmtNumber, fmtTime } from "@/lib/format";
+import { fmtLatLon, fmtNumber, fmtTime, fmtXy } from "@/lib/format";
 import { useApi, useSession, useStream } from "@/lib/hooks";
 import type { SseEvent } from "@/lib/sse";
-import type { DeviceSummary, GpsEvent, ScalarEvent } from "@/lib/types";
+import type { DeviceSummary, GpsEvent, ScalarEvent, XyEvent } from "@/lib/types";
 import { WrenchScrewdriverIcon } from "@heroicons/react/16/solid";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 const SPARK = 40;
 
-type Live = Pick<DeviceSummary, "value" | "lat" | "lon" | "seq" | "updated_at">;
+type Live = Pick<DeviceSummary, "value" | "lat" | "lon" | "x" | "y" | "seq" | "updated_at">;
 
 export default function DevicesPage() {
   const session = useSession();
@@ -31,14 +31,16 @@ export default function DevicesPage() {
   const onEvent = useCallback(
     (ev: SseEvent) => {
       setEvents((n) => n + 1);
-      if (ev.event === "telemetry_scalar" || ev.event === "telemetry_gps") {
-        const d = JSON.parse(ev.data) as ScalarEvent & GpsEvent;
+      if (ev.event === "telemetry_scalar" || ev.event === "telemetry_gps" || ev.event === "telemetry_xy") {
+        const d = JSON.parse(ev.data) as ScalarEvent & GpsEvent & XyEvent;
         setLive((m) => ({
           ...m,
           [d.device]: {
             value: ev.event === "telemetry_scalar" ? d.value : null,
             lat: ev.event === "telemetry_gps" ? d.lat : null,
             lon: ev.event === "telemetry_gps" ? d.lon : null,
+            x: ev.event === "telemetry_xy" ? d.x : null,
+            y: ev.event === "telemetry_xy" ? d.y : null,
             seq: d.seq,
             updated_at: d.ts,
           },
@@ -53,7 +55,7 @@ export default function DevicesPage() {
     },
     [reload],
   );
-  const stream = useStream({ channels: ["telemetry_scalar", "telemetry_gps", "device"] }, onEvent);
+  const stream = useStream({ channels: ["telemetry_scalar", "telemetry_gps", "telemetry_xy", "device"] }, onEvent);
 
   const rows = useMemo(
     () => (list.data ?? []).map((d) => ({ ...d, ...(live[d.device] && (live[d.device].seq ?? 0) >= (d.seq ?? 0) ? live[d.device] : {}) })),
@@ -116,10 +118,14 @@ export default function DevicesPage() {
                   </TableCell>
                   <TableCell className="text-zinc-500">{d.type_id}</TableCell>
                   <TableCell className="tabular-nums" data-testid="device-value">
-                    {d.payload === "gps" ? fmtLatLon(d.lat, d.lon) : fmtNumber(d.value, 3)}
+                    {d.payload === "gps" ? fmtLatLon(d.lat, d.lon) : d.payload === "xy" ? fmtXy(d.x, d.y) : fmtNumber(d.value, 3)}
                   </TableCell>
                   <TableCell className="hidden md:table-cell">
-                    {d.payload === "scalar" ? <Sparkline values={spark[d.device] ?? []} /> : <span className="text-xs text-zinc-400">GPS</span>}
+                    {d.payload === "scalar" ? (
+                      <Sparkline values={spark[d.device] ?? []} />
+                    ) : (
+                      <span className="text-xs text-zinc-400">{d.payload === "xy" ? "x, y" : "GPS"}</span>
+                    )}
                   </TableCell>
                   <TableCell className="text-right tabular-nums" data-testid="device-seq">
                     {d.seq ?? "—"}

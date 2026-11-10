@@ -8,7 +8,7 @@
   device_type                     SELECT       SELECT            SELECT            -
   device                          SELECT       SELECT/DELETE     SELECT            SELECT device_id, name
   device_state                    SELECT       SELECT            SELECT/INS/UPD    -
-  telemetry_scalar, telemetry_gps SELECT       SELECT            INSERT            SELECT
+  telemetry_*                     SELECT       SELECT            INSERT            SELECT
   telemetry_read_cursor           -            -                 -                 SELECT/UPDATE
   device_config                   SELECT       SELECT            SELECT/INS/UPD    -
   device_config_pending           SELECT       SELECT/INSERT     SELECT/UPDATE     -
@@ -82,7 +82,8 @@ JOIN root_ca r ON r.ca_id = c.ca_id
 LEFT JOIN crl x ON x.ca_id = c.ca_id AND x.serial = c.serial
 LEFT JOIN device_session s ON s.device_id = d.device_id;
 
--- Every device with its type, last sample and identity. GPS devices expose lon and lat.
+-- Every device with its type, last sample and identity.
+-- GPS devices expose lon and lat. Scatter devices expose x and y (point subscripts).
 CREATE OR REPLACE VIEW v_devices AS
 SELECT
     d.device_id,
@@ -96,7 +97,9 @@ SELECT
     s.updated_at,
     d.created_at,
     i.identity,
-    i.session
+    i.session,
+    (s.xy)[0]                      AS x,
+    (s.xy)[1]                      AS y
 FROM device d
 JOIN device_type t USING (type_id)
 LEFT JOIN device_state s USING (device_id)
@@ -163,7 +166,7 @@ REVOKE CREATE ON SCHEMA public FROM PUBLIC;
 GRANT USAGE ON SCHEMA public TO demo_normal, demo_admin, demo_controller, demo_server;
 
 -- demo_normal: read-only monitoring
-GRANT SELECT ON device_type, device, device_state, telemetry_scalar, telemetry_gps TO demo_normal;
+GRANT SELECT ON device_type, device, device_state, telemetry_scalar, telemetry_gps, telemetry_xy TO demo_normal;
 GRANT SELECT ON device_config, device_config_pending, device_config_errors, device_config_history TO demo_normal;
 GRANT SELECT ON v_devices, v_device_config_sync_status, v_device_identity TO demo_normal;
 GRANT SELECT ON root_ca, device_certificate, crl, device_enrollment, device_session TO demo_normal;
@@ -185,7 +188,7 @@ GRANT SELECT ON v_users_directory TO demo_admin;
 
 -- demo_server base role: login lookup, the certificate authority, and the
 -- telemetry read cursor. The cursor is not granted to the JWT groups.
-GRANT SELECT ON telemetry_scalar, telemetry_gps TO demo_server;
+GRANT SELECT ON telemetry_scalar, telemetry_gps, telemetry_xy TO demo_server;
 GRANT SELECT (device_id, name) ON device TO demo_server;
 GRANT SELECT, UPDATE ON telemetry_read_cursor TO demo_server;
 GRANT EXECUTE ON FUNCTION auth_fetch_user(text) TO demo_server;
@@ -198,7 +201,7 @@ GRANT EXECUTE ON FUNCTION reject_enrollment(bigint, text, text) TO demo_server;
 -- demo_controller: zone B worker
 GRANT SELECT ON device_type, device TO demo_controller;
 GRANT SELECT, INSERT, UPDATE ON device_state, device_config TO demo_controller;
-GRANT INSERT ON telemetry_scalar, telemetry_gps TO demo_controller;
+GRANT INSERT ON telemetry_scalar, telemetry_gps, telemetry_xy TO demo_controller;
 GRANT SELECT, UPDATE ON device_config_pending TO demo_controller;
 GRANT INSERT ON device_config_history, device_config_errors TO demo_controller;
 GRANT SELECT ON root_ca, device_certificate, crl, device_enrollment, v_device_identity TO demo_controller;

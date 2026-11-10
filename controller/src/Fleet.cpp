@@ -342,7 +342,7 @@ void Fleet::on_uplink(Uplink msg)
     });
 }
 
-void Fleet::enqueue_telemetry(std::variant<db::DummySample, db::TrackSample> sample)
+void Fleet::enqueue_telemetry(TelemetryItem sample)
 {
     if (telemetry_.size() >= kTelemetryCapacity)
     {
@@ -547,6 +547,7 @@ awaitable<void> Fleet::flush_telemetry()
     if (telemetry_.empty() && telemetry_dropped_ == 0) co_return;
     std::vector<db::DummySample> scalar;
     std::vector<db::TrackSample> gps;
+    std::vector<db::XySample> xy;
     while (!telemetry_.empty())
     {
         auto item = std::move(telemetry_.front());
@@ -555,7 +556,8 @@ awaitable<void> Fleet::flush_telemetry()
             [&](auto&& sample) {
                 using T = std::decay_t<decltype(sample)>;
                 if constexpr (std::is_same_v<T, db::DummySample>) scalar.push_back(sample);
-                else gps.push_back(sample);
+                else if constexpr (std::is_same_v<T, db::TrackSample>) gps.push_back(sample);
+                else xy.push_back(sample);
             },
             std::move(item));
     }
@@ -563,11 +565,11 @@ awaitable<void> Fleet::flush_telemetry()
     telemetry_dropped_ = 0;
     if (dropped != 0)
         log::warn(kLog, std::format("telemetry queue full; dropped {} sample(s)", dropped));
-    if (scalar.empty() && gps.empty()) co_return;
+    if (scalar.empty() && gps.empty() && xy.empty()) co_return;
     try
     {
-        co_await on_db([this, scalar = std::move(scalar), gps = std::move(gps)] {
-            db_.write_telemetry_batch(scalar, gps);
+        co_await on_db([this, scalar = std::move(scalar), gps = std::move(gps), xy = std::move(xy)] {
+            db_.write_telemetry_batch(scalar, gps, xy);
         });
     }
     catch (const std::exception& e)
@@ -801,6 +803,15 @@ awaitable<void> Fleet::read_samples(std::shared_ptr<Session> session, db::Device
                     }
                     enqueue_telemetry(db::TrackSample{device.device_id, m.origin_lon, m.origin_lat, m.radius_m,
                                                       m.bearing_rad, m.seq});
+                }
+                else if constexpr (std::is_same_v<T, pgdemo_msgs::msg::XySample>)
+                {
+                    if (device.payload != db::Payload::Xy)
+                    {
+                        log::warn(kLog, std::format("{}: ignoring xy sample", device.name));
+                        return;
+                    }
+                    enqueue_telemetry(db::XySample{device.device_id, m.x, m.y, m.seq});
                 }
                 else
                     log::warn(kLog, std::format("{}: ignoring message while online", device.name));

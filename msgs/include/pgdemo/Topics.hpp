@@ -29,5 +29,7 @@ inline constexpr const char* kConfig = "pgdemo/manager/config";
 inline constexpr const char* kScalar = "pgdemo/worker/telemetry/scalar";
 /// Worker to manager. One GPS fix.
 inline constexpr const char* kGps = "pgdemo/worker/telemetry/gps";
+/// Worker to manager. One sample of the 2D square.
+inline constexpr const char* kXy = "pgdemo/worker/telemetry/xy";
 
 } // namespace pgdemo::topics

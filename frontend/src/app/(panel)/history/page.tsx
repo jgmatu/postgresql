@@ -7,7 +7,7 @@ import { Select } from "@/components/catalyst/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/catalyst/table";
 import { EnrollmentBadge, RevocationBadge } from "@/components/badges";
 import { Empty, ErrorCallout, Loading, Mono, PageHeading, Section } from "@/components/ui";
-import { fmtDateTime, fmtLatLon, fmtNumber } from "@/lib/format";
+import { fmtDateTime, fmtLatLon, fmtNumber, fmtXy } from "@/lib/format";
 import { useApi, useSession } from "@/lib/hooks";
 import type { ConfigHistoryRow, DeviceSummary, Enrollment, PkiCa, TelemetryRow } from "@/lib/types";
 import { useState } from "react";
@@ -64,7 +64,9 @@ function DeviceFilter({
 }
 
 function sampleValue(row: TelemetryRow): string {
-  return row.value !== undefined ? fmtNumber(row.value, 3) : fmtLatLon(row.lat, row.lon);
+  if (row.x !== undefined && row.y !== undefined) return fmtXy(row.x, row.y);
+  if (row.value !== undefined) return fmtNumber(row.value, 3);
+  return fmtLatLon(row.lat, row.lon);
 }
 
 export default function HistoryPage() {

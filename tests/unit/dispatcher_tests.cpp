@@ -114,8 +114,8 @@ TEST(Dispatcher, ConcurrentWaitersGetTheirOwnCompletion)
 
 TEST(EventHub, ChannelsArePerTopicNotPerDevice)
 {
-    const std::set<std::string> expected{"telemetry_scalar", "telemetry_gps", "device", "enrollment", "config",
-                                         "error"};
+    const std::set<std::string> expected{"telemetry_scalar", "telemetry_gps", "telemetry_xy", "device", "enrollment",
+                                         "config", "error"};
     EXPECT_EQ(EventHub::all_channels(), expected);
 }
 
