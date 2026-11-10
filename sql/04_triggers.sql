@@ -3,13 +3,14 @@
 04_triggers.sql - reactive layer: NOTIFY channels
 =============================================================================
 
-Channels are per topic, never per device: the device travels in the payload,
-so the LISTEN set stays the same however many devices are registered.
+Channels are per topic, never per device, so the LISTEN set stays the same
+however many devices are registered. Telemetry carries only the table name;
+every other payload carries the device.
 
   Channel            Source                          Listener     Meaning
   -----------------  ------------------------------  -----------  ------------------------------
-  telemetry_scalar      device_state INSERT/UPDATE       server       new sample of a scalar device
-  telemetry_gps         device_state INSERT/UPDATE       server       new fix of a GPS device
+  telemetry_scalar      telemetry_scalar INSERT          server       a batch was appended; read on
+  telemetry_gps         telemetry_gps INSERT            server       a batch was appended; read on
   device_events         device INSERT/DELETE             controller,  INSERT, DELETE
                         device UPDATE OF cert_id         server       ROTATED
                         crl INSERT/UPDATE/DELETE                      REVOKED, UNREVOKED
@@ -30,52 +31,39 @@ NOTIFY is a wake-up signal, not the message store. Payloads stay well under
 the 8000-byte limit, and a listener that was down catches up by reading the
 tables (the controller drains PENDING rows and starts every device at startup).
 
-One notification per sample is fine for a demo. Committing a NOTIFY takes a
-cluster-wide lock on the notification queue, so a fleet writing thousands of
-samples per second needs batched wake-ups, logical decoding or a broker
-(see sql/README.md, Scaling notes).
+Telemetry notifies once per INSERT statement, not once per row. The payload
+names the table. The server reads the new rows from telemetry_read_cursor
+and advances that cursor in the same transaction. Committing a NOTIFY takes
+a cluster-wide lock on the notification queue (see sql/README.md, Scaling
+notes).
 */
 
 SET ROLE demo_owner;
 
 -- ---------------------------------------------------------------------------
--- Data plane: one trigger, one channel per payload
+-- Data plane: one statement trigger per history table. The payload is a
+-- wake-up. The sample is read from the table, not from the notification.
 -- ---------------------------------------------------------------------------
-CREATE OR REPLACE FUNCTION notify_device_sample()
+DROP TRIGGER IF EXISTS trg_device_state_notify ON device_state;
+DROP FUNCTION IF EXISTS notify_device_sample();
+
+CREATE OR REPLACE FUNCTION notify_telemetry_batch()
 RETURNS trigger
 LANGUAGE plpgsql
 AS $$
-DECLARE
-    dev_name text;
 BEGIN
-    SELECT d.name INTO dev_name FROM public.device d WHERE d.device_id = NEW.device_id;
-    IF NEW.position IS NULL THEN
-        PERFORM pg_notify('telemetry_scalar', json_build_object(
-            'device_id', NEW.device_id,
-            'device',    dev_name,
-            'action',    TG_OP,
-            'value',     NEW.value,
-            'seq',       NEW.seq,
-            'ts',        NEW.updated_at
-        )::text);
-    ELSE
-        PERFORM pg_notify('telemetry_gps', json_build_object(
-            'device_id', NEW.device_id,
-            'device',    dev_name,
-            'action',    TG_OP,
-            'lon',       extensions.ST_X(NEW.position::extensions.geometry),
-            'lat',       extensions.ST_Y(NEW.position::extensions.geometry),
-            'seq',       NEW.seq,
-            'ts',        NEW.updated_at
-        )::text);
-    END IF;
+    PERFORM pg_notify(TG_TABLE_NAME, json_build_object('table', TG_TABLE_NAME)::text);
     RETURN NULL;
 END
 $$;
 
-CREATE OR REPLACE TRIGGER trg_device_state_notify
-    AFTER INSERT OR UPDATE ON device_state
-    FOR EACH ROW EXECUTE FUNCTION notify_device_sample();
+CREATE OR REPLACE TRIGGER trg_telemetry_scalar_notify
+    AFTER INSERT ON telemetry_scalar
+    FOR EACH STATEMENT EXECUTE FUNCTION notify_telemetry_batch();
+
+CREATE OR REPLACE TRIGGER trg_telemetry_gps_notify
+    AFTER INSERT ON telemetry_gps
+    FOR EACH STATEMENT EXECUTE FUNCTION notify_telemetry_batch();
 
 -- ---------------------------------------------------------------------------
 -- Device registry

@@ -74,10 +74,11 @@ A device is a row of `device`, typed by `device_type`. The type fixes the *paylo
 | `device` | one per device, created with its first certificate; `dummy1`, `dummy2`, `dummy3` are enrolled at the first controller start | server, through `issue_device_certificate()` |
 | `device_state` | the last sample of each device (`value` or `position`, never both) | controller |
 | `telemetry_scalar`, `telemetry_gps` | every sample, monthly-partitioned, no foreign key to `device` | controller |
+| `telemetry_read_cursor` | one row per history table: the last `history_id` the server has read | server |
 
-One trigger on `device_state` publishes each sample on the channel of its payload, with the device in the payload:
+An `AFTER INSERT` statement trigger on each history table wakes the server once per insert. The notification names the table. The server reads the unread rows and then publishes one SSE event per row, with the device in that event:
 
-| Channel | Payload |
+| Channel | What the server publishes |
 |---|---|
 | `telemetry_scalar` | `{device_id, device, action, value, seq, ts}` |
 | `telemetry_gps` | `{device_id, device, action, lon, lat, seq, ts}` |
@@ -87,11 +88,11 @@ GPS positions are `geography(Point, 4326)`, installed with PostGIS in the `exten
 
 Each device is a `pgdemo-device` worker, started by the controller (the manager) with `fork` + `execv`, or started on another host in the same ROS domain. Workers publish `pgdemo/worker/` and subscribe to `pgdemo/manager/`. The structs are [msgs/README.md](../msgs/README.md). ROS 2 discovers the nodes as peers; that discovery is not authority. The manager admits, challenges, configures and stops. Workers do not talk to each other and have no database login. After a worker has proved its identity (challenge-response with its private key; see [DEVICE_PKI.md](DEVICE_PKI.md#5-authentication)), it streams samples from a generator chosen by `type_id`, with a phase derived from `device_id`, at the configured rate. The manager runs every session, the child reaper, the heartbeat, the telemetry flush and the maintenance loops on one `io_context` thread, so its process table needs no lock; the ROS executor only posts each worker message onto that thread. Database calls block (libpqxx), so `on_db()` checks a connection out of [`ConnectionPool`](../libs/db/include/db/ConnectionPool.hpp) on a thread pool and the coroutine resumes with the result. Samples are queued and written in batches, one lease per flush. A node the manager did not fork is admitted by the same `hello` and is not signaled when it goes silent: the session is released. The lifecycle is [controller/README.md](../controller/README.md).
 
-The controller appends a batch of samples in one `INSERT` per payload and UPSERTs `device_state` with the latest `seq` of each device. The trigger fires on `device_state`, and PostgreSQL delivers the notification **only when the transaction commits**, so a listener never sees a value that was rolled back.
+The controller appends a batch of samples in one `INSERT` per payload and UPSERTs `device_state` with the latest `seq` of each device. The statement trigger fires on the history insert, and PostgreSQL delivers the notification **only when the transaction commits**, so the server never reads a row that was rolled back.
 
 The fleet changes at run time. The controller listens to `enrollment_requested` (start a process with `--enroll` to generate a key and a CSR, or replace the running one with a `--rotate` process), `enrollment_events` (deliver the issued certificate to that same process, which then authenticates and streams) and `device_events` (stop the process on `DELETE` or a revocation of the current certificate, start it again when a hold is lifted). At start-up it does the same for every device and every open enrollment, after `LISTEN` is active, so nothing falls between the two; every 30 s it reconciles again, which catches a certificate that expired. The listener thread only posts each notification to the `io_context` thread. A process that exits is restarted with a backoff (1 s, doubling to 30 s), and `--max-devices` bounds how many run; the rest are `UNMANAGED`.
 
-On the server, one listener connection subscribes to every channel. libpqxx keeps a handler per channel and calls the right one for each notification. The server republishes them on the `EventHub` as the SSE events `telemetry_scalar`, `telemetry_gps`, `device`, `enrollment`, `config` and `error`, each tagged with its device name. Subscribers filter by `?channels=` and, optionally, by `?devices=`.
+On the server, one listener connection subscribes to every channel. libpqxx keeps a handler per channel and calls the right one for each notification. A telemetry notification is a wake-up: the server reads `telemetry_scalar` or `telemetry_gps` from `telemetry_read_cursor`, advances the cursor to the last `history_id` of that select in the same transaction, and publishes one event per row. It does the same once at start-up, after `LISTEN` is active. The other channels are republished as they arrive. The SSE events are `telemetry_scalar`, `telemetry_gps`, `device`, `enrollment`, `config` and `error`, each tagged with its device name. Subscribers filter by `?channels=` and, optionally, by `?devices=`.
 
 ```mermaid
 sequenceDiagram
@@ -106,8 +107,10 @@ sequenceDiagram
     C->>PG: INSERT telemetry_scalar + UPSERT device_state (COMMIT)
     P3->>C: sample {origin, radius_m, bearing_rad, seq}
     C->>PG: ST_Project, INSERT telemetry_gps + UPSERT device_state (COMMIT)
-    PG-->>L: NOTIFY telemetry_scalar {device: dummy1, value, seq}
-    PG-->>L: NOTIFY telemetry_gps {device: dummy3, lon, lat}
+    PG-->>L: NOTIFY telemetry_scalar {table}
+    L->>PG: SELECT unread scalar rows, UPDATE cursor, COMMIT
+    PG-->>L: NOTIFY telemetry_gps {table}
+    L->>PG: SELECT unread GPS rows, UPDATE cursor, COMMIT
     L->>H: publish("telemetry_scalar", "dummy1", ...)
     L->>H: publish("telemetry_gps", "dummy3", ...)
     H-->>B: event: telemetry_gps (dummy1 filtered out)
@@ -115,7 +118,7 @@ sequenceDiagram
 
 `EventHub::publish` never blocks the listener thread. Each subscriber has a bounded queue, and a slow client loses its oldest events rather than stalling notification delivery for everybody.
 
-Each `device_state` write notifies its channel. Commits that call `pg_notify` serialize on a cluster-wide lock, so a large fleet needs batched wake-ups, logical decoding or a broker; [sql/README.md](../sql/README.md#scaling-notes) lists the options.
+One notification per insert keeps the queue lock off the per-sample path. The commits that do call `pg_notify` still serialize on that lock; [sql/README.md](../sql/README.md#scaling-notes) describes what a larger fleet would change.
 
 ## 3. Control plane: desired vs applied configuration
 
@@ -242,7 +245,7 @@ Each row returned by `/api/devices/{name}/history` carries its partition name (`
 - **Login lookup without table access.** `demo_server` has no privilege on `app_users`. It calls `auth_fetch_user(username)`, a `SECURITY DEFINER` function that returns one hash and one role, and nothing else.
 - **Tokens.** JWT signed with ES384 (ECDSA P-384, SHA-384, raw `r‖s` signature, RFC 7518 §3.4). The signing key is a PKCS#8 file and verification uses the public key of an X.509 certificate, both generated by `scripts/gen-jwt-keys.sh` into `run/keys/`. Verification pins `alg` to ES384, so `none` and algorithm confusion are rejected. It also checks the issuer, the expiry, and that `sub` and `role` are present.
 - **Workers against the manager.** A worker holds an ECDSA P-384 key that never leaves its directory (`run/devices/<name>/key.pem`, mode 0600) and a certificate signed by the internal root CA, whose key only the server reads (`run/ca/`). It has no database login and does not inherit the manager's sockets: between `fork` and `execv` the child closes every descriptor above stderr. It publishes only `pgdemo/worker/` and ignores manager messages for another name. The manager admits a node whose `hello` names a slot it wants, then requires that node to sign a fresh challenge with the key of the device's current, unrevoked certificate. Membership of the ROS graph is not that proof. [DEVICE_PKI.md](DEVICE_PKI.md) has the details.
-- **Manager against the database.** The manager logs in as `demo_controller` and is the only process of the fleet that appears in `pg_stat_activity`. Query work goes through a fixed [`ConnectionPool`](../libs/db/include/db/ConnectionPool.hpp) (`--pool-size`, 8 by default). Each `on_db()` holds one `Lease` for one transaction and returns it afterwards; the pool mutex covers only the free list. The `LISTEN` connection is not in the pool. Telemetry does not take a lease per sample: one shared queue is flushed as a batch. CSR, proof and session state still write immediately.
+- **Manager against the database.** The manager logs in as `demo_controller` and is the only process of the fleet that appears in `pg_stat_activity`. Query work goes through a fixed [`ConnectionPool`](../libs/db/include/db/ConnectionPool.hpp) (`--pool-size`, 8 by default). Each `on_db()` holds one `Lease` for one transaction and returns it afterwards; the pool mutex covers only the free list. The `LISTEN` connection is not in the pool. Telemetry does not take a lease per sample: one shared queue is flushed as a batch, and the statement trigger on the history insert notifies once per flush. The server keeps its place in `telemetry_read_cursor`. CSR, proof and session state still write immediately.
 - **Default-deny routing.** The server answers two kinds of path, and `http::is_api_path()` ([`server/src/http/Paths.hpp`](../server/src/http/Paths.hpp)) decides which one a request is: it percent-decodes the path, folds case and collapses leading slashes, so `/api/x`, `/API/x`, `/%61pi/x` and `//api/x` are all `/api`.
   - **`/api` and everything under it.** `AuthInterceptor` requires a valid bearer token on every such path except `POST /api/auth/login` and `GET /api/health`, whether an endpoint matches it or not. A route added later is protected by default, and an unknown one answers a JSON `404` only after the token check.
   - **Everything else: the control panel.** With `--webroot`, `PanelController` registers `GET *` after every API controller. Oat++ takes the first route that matches, so it only receives paths no endpoint claimed. It serves the static export of `frontend/` from memory (`http::StaticSite`, loaded once at start): `index.html` per route, `404.html` with status `404` for anything else, a JSON `404` for an `/api` path that reached it. A path with `..`, a NUL or no leading `/` matches nothing, so nothing outside `webroot/` can be read. Hashed bundles under `/_next/static/` are cached `immutable`, everything else `no-cache`, and every file carries `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer` and a `Content-Security-Policy` that allows only the origin. The panel's files are public and hold no data; the role is enforced on each `/api` call it makes, so hiding the administration panel from a normal user is presentation, not a control.
@@ -276,18 +279,19 @@ SET LOCAL ROLE demo_admin;      -- or demo_normal
 COMMIT;                         -- the role reverts here
 ```
 
-`demo_server` is `NOINHERIT` and holds `demo_admin` and `demo_normal` with `INHERIT FALSE, SET TRUE`. On its own it can do nothing but call `auth_fetch_user()`. It gets privileges only by switching role explicitly, and only for one transaction. The HTTP layer rejects a normal user's admin request with `403`. If that check were missing, PostgreSQL would still refuse the statement with SQLSTATE `42501`, which the server also maps to `403`. The database tests check the second layer directly.
+`demo_server` is `NOINHERIT` and holds `demo_admin` and `demo_normal` with `INHERIT FALSE, SET TRUE`. On its own it calls `auth_fetch_user()`, issues certificates, reads the telemetry tables and advances `telemetry_read_cursor`. API requests get their privileges by switching role explicitly, and only for one transaction. The JWT groups cannot move the cursor. The HTTP layer rejects a normal user's admin request with `403`. If that check were missing, PostgreSQL would still refuse the statement with SQLSTATE `42501`, which the server also maps to `403`. The database tests check the second layer directly.
 
 | Object | `demo_normal` | `demo_admin` | `demo_controller` | `demo_server` |
 |---|---|---|---|---|
 | `device_type` | SELECT | SELECT | SELECT | – |
-| `device`, `device_certificate` | SELECT | SELECT, DELETE | SELECT | – |
+| `device`, `device_certificate` | SELECT | SELECT, DELETE | SELECT | `device`: SELECT `device_id`, `name` |
 | `crl` | SELECT | SELECT, INSERT, UPDATE, DELETE (limited by `protect_crl`) | SELECT | – |
 | `device_enrollment` | SELECT | SELECT, INSERT | SELECT, UPDATE of status and CSR | SELECT of the CSR columns |
 | `device_session` | SELECT | SELECT | SELECT, INSERT, UPDATE | – |
 | `root_ca` | SELECT | SELECT | SELECT | SELECT |
 | `device_state` | SELECT | SELECT | SELECT, INSERT, UPDATE | – |
-| `telemetry_scalar`, `telemetry_gps` | SELECT | SELECT | INSERT | – |
+| `telemetry_scalar`, `telemetry_gps` | SELECT | SELECT | INSERT | SELECT |
+| `telemetry_read_cursor` | – | – | – | SELECT, UPDATE |
 | `device_config` | SELECT | SELECT | SELECT, INSERT, UPDATE | – |
 | `device_config_pending` | SELECT | SELECT, INSERT | SELECT, UPDATE | – |
 | `device_config_errors`, `_history` | SELECT | SELECT | INSERT | – |

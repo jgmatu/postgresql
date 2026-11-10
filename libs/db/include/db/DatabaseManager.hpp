@@ -173,7 +173,7 @@ public:
     /**
      * @brief UPSERT `device_state` and append to `telemetry_scalar`, in one statement.
      *
-     * The `device_state` trigger fires `telemetry_scalar` on commit.
+     * The insert into `telemetry_scalar` fires that channel once, on commit.
      *
      * @param sample device, value and tick
      */
@@ -183,7 +183,7 @@ public:
      * @brief UPSERT a GPS fix into `device_state` and append it to `telemetry_gps`.
      *
      * The point is `ST_Project` of the origin by `radius_m` along `bearing_rad`.
-     * The `device_state` trigger fires `telemetry_gps` on commit.
+     * The insert into `telemetry_gps` fires that channel once, on commit.
      *
      * @param sample device, origin, radius, bearing and tick
      */
@@ -193,14 +193,31 @@ public:
      * @brief Append a batch of samples and refresh `device_state` once per device.
      *
      * One transaction, one pool lease. Every sample is inserted into its history
-     * table in one statement per payload. `device_state` is updated with the
-     * highest `seq` of that device in the batch. Scalar rows set `position`
-     * NULL and GPS rows set `value` NULL, matching the table check.
+     * table in one statement per payload, which notifies that channel once.
+     * `device_state` is updated with the highest `seq` of that device in the
+     * batch and does not notify. Scalar rows set `position` NULL and GPS rows
+     * set `value` NULL, matching the table check.
      *
      * @param scalar samples for `telemetry_scalar`
      * @param gps    samples for `telemetry_gps`
      */
     void write_telemetry_batch(const std::vector<DummySample>& scalar, const std::vector<TrackSample>& gps);
+
+    /**
+     * @brief Read one page of telemetry past the cursor and advance it.
+     *
+     * One transaction on the pool, as `demo_server`. Locks the cursor row,
+     * selects up to `kTelemetryReadPage` rows with a greater `history_id`,
+     * and, when that select returns rows, sets the cursor to the last one
+     * before committing. An empty page leaves the cursor where it is.
+     * The caller publishes the rows after the commit.
+     *
+     * @param channel `telemetry_scalar` or `telemetry_gps`
+     * @return samples in `history_id` order, each with `action` `INSERT`
+     * @throws std::invalid_argument when `channel` is not one of the two
+     * @throws std::runtime_error when the cursor row is missing
+     */
+    std::vector<boost::json::object> take_unread_telemetry(std::string_view channel);
 
     /**
      * @brief Every device with its type and current certificate (controller, no SET ROLE).

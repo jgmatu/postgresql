@@ -6,9 +6,10 @@
   Object                          demo_normal  demo_admin        demo_controller   demo_server (base)
   ------------------------------  -----------  ----------------  ----------------  ------------------
   device_type                     SELECT       SELECT            SELECT            -
-  device                          SELECT       SELECT/DELETE     SELECT            -
+  device                          SELECT       SELECT/DELETE     SELECT            SELECT device_id, name
   device_state                    SELECT       SELECT            SELECT/INS/UPD    -
-  telemetry_scalar, telemetry_gps SELECT       SELECT            INSERT            -
+  telemetry_scalar, telemetry_gps SELECT       SELECT            INSERT            SELECT
+  telemetry_read_cursor           -            -                 -                 SELECT/UPDATE
   device_config                   SELECT       SELECT            SELECT/INS/UPD    -
   device_config_pending           SELECT       SELECT/INSERT     SELECT/UPDATE     -
   device_config_errors            SELECT       SELECT            INSERT            -
@@ -182,7 +183,11 @@ GRANT UPDATE (password_hash, role) ON app_users TO demo_admin;
 GRANT DELETE ON app_users TO demo_admin;
 GRANT SELECT ON v_users_directory TO demo_admin;
 
--- demo_server base role: login lookup and the certificate authority
+-- demo_server base role: login lookup, the certificate authority, and the
+-- telemetry read cursor. The cursor is not granted to the JWT groups.
+GRANT SELECT ON telemetry_scalar, telemetry_gps TO demo_server;
+GRANT SELECT (device_id, name) ON device TO demo_server;
+GRANT SELECT, UPDATE ON telemetry_read_cursor TO demo_server;
 GRANT EXECUTE ON FUNCTION auth_fetch_user(text) TO demo_server;
 GRANT SELECT ON root_ca TO demo_server;
 GRANT SELECT (request_id, kind, name, type_id, status, csr_pem, requested_by) ON device_enrollment TO demo_server;

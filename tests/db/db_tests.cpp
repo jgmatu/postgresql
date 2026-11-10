@@ -224,8 +224,16 @@ protected:
 
 } // namespace
 
-// Two payload shapes, two channels, one listener socket, any number of
-// devices: the device travels in the payload, not in the channel name.
+int count_channel(const std::vector<boost::json::object>& msgs, std::string_view channel)
+{
+    int n = 0;
+    for (const auto& m : msgs)
+        if (m.at("channel").as_string() == channel) ++n;
+    return n;
+}
+
+// Two payload shapes, two channels, one listener socket. A telemetry
+// notification names the table, once per INSERT statement.
 TEST_F(DbTest, ListenerMultiplexesBothTelemetryChannels)
 {
     for (const auto p : db::kAllPayloads)
@@ -243,10 +251,69 @@ TEST_F(DbTest, ListenerMultiplexesBothTelemetryChannels)
     controller_->write_gps_sample(db::TrackSample{g.device_id, -3.7038, 40.4168, 250.0, 0.0, 1});
 
     EXPECT_TRUE(inbox_.wait([&](const auto& m) {
-        return has(m, "telemetry_scalar", a.name) && has(m, "telemetry_scalar", b.name) &&
-               has(m, "telemetry_gps", g.name);
+        return count_channel(m, "telemetry_scalar") == 2 && count_channel(m, "telemetry_gps") == 1;
     }));
-    EXPECT_FALSE(inbox_.wait([&](const auto& m) { return has(m, "telemetry_gps", a.name); }, 200ms));
+    EXPECT_TRUE(inbox_.wait(
+        [&](const auto& m) {
+            for (const auto& msg : m)
+            {
+                if (msg.at("payload").as_object().at("table").as_string() != msg.at("channel").as_string()) return false;
+            }
+            return true;
+        },
+        200ms));
+
+    controller_->write_telemetry_batch(
+        {db::DummySample{a.device_id, 3.0, 2}, db::DummySample{a.device_id, 4.0, 3}, db::DummySample{b.device_id, 5.0, 2}},
+        {});
+    EXPECT_TRUE(inbox_.wait([&](const auto& m) { return count_channel(m, "telemetry_scalar") == 3; }));
+    EXPECT_TRUE(inbox_.wait([&](const auto& m) { return count_channel(m, "telemetry_gps") == 1; }, 200ms));
+}
+
+// The cursor moves to the last row of the select. A second read is empty,
+// and a later insert returns only the new row.
+TEST_F(DbTest, TelemetryCursorAdvancesPastABatch)
+{
+    for (const auto p : db::kAllPayloads)
+    {
+        for (;;)
+        {
+            if (server_->take_unread_telemetry(db::telemetry_channel(p)).size() < db::kTelemetryReadPage) break;
+        }
+    }
+
+    const auto dev = make_device("sine");
+    controller_->write_telemetry_batch(
+        {db::DummySample{dev.device_id, 1.0, 10}, db::DummySample{dev.device_id, 2.0, 11},
+         db::DummySample{dev.device_id, 3.0, 12}},
+        {});
+
+    const auto page = server_->take_unread_telemetry("telemetry_scalar");
+    ASSERT_EQ(page.size(), 3u);
+    for (std::size_t i = 0; i < page.size(); ++i)
+    {
+        EXPECT_EQ(page[i].at("device").as_string(), dev.name);
+        EXPECT_EQ(page[i].at("action").as_string(), "INSERT");
+        EXPECT_EQ(page[i].at("seq").as_int64(), static_cast<std::int64_t>(10 + i));
+        EXPECT_EQ(page[i].at("value").to_number<double>(), static_cast<double>(i + 1));
+    }
+    EXPECT_TRUE(server_->take_unread_telemetry("telemetry_scalar").empty());
+
+    controller_->write_scalar_sample(db::DummySample{dev.device_id, 9.0, 13});
+    const auto next = server_->take_unread_telemetry("telemetry_scalar");
+    ASSERT_EQ(next.size(), 1u);
+    EXPECT_EQ(next[0].at("seq").as_int64(), 13);
+    EXPECT_EQ(next[0].at("value").to_number<double>(), 9.0);
+    EXPECT_TRUE(server_->take_unread_telemetry("telemetry_scalar").empty());
+
+    const auto gps = make_device("gps_orbit");
+    controller_->write_gps_sample(db::TrackSample{gps.device_id, -3.7038, 40.4168, 250.0, 0.0, 1});
+    const auto fixes = server_->take_unread_telemetry("telemetry_gps");
+    ASSERT_EQ(fixes.size(), 1u);
+    EXPECT_EQ(fixes[0].at("device").as_string(), gps.name);
+    EXPECT_EQ(fixes[0].at("seq").as_int64(), 1);
+    EXPECT_GT(fixes[0].at("lat").to_number<double>(), 40.4168);
+    EXPECT_TRUE(server_->take_unread_telemetry("telemetry_gps").empty());
 }
 
 TEST_F(DbTest, RegisteringAfterTheLoopStartedThrows)

@@ -12,12 +12,14 @@ schema and the code do not change. Tables are per data shape instead:
                      X.509 certificate (cert_id, NOT NULL); 03_identity.sql
                      adds that foreign key and is the only way to insert one
   device_state       the last sample of each device (one row per device, UPSERT)
-  telemetry_scalar   every scalar sample, range-partitioned by month
-  telemetry_gps      every GPS fix, range-partitioned by month
+  telemetry_scalar      every scalar sample, range-partitioned by month
+  telemetry_gps         every GPS fix, range-partitioned by month
+  telemetry_read_cursor where pgdemo-server stopped reading each history table
 
-Every sample UPSERTs device_state and appends to the telemetry table of its
-payload in the same transaction. The telemetry tables have no foreign key to
-device, so the history outlives a deregistered device.
+The controller appends samples to the telemetry table of their payload and
+UPSERTs device_state with the latest one. The telemetry tables have no
+foreign key to device, so the history outlives a deregistered device. The
+server's read position is a row of telemetry_read_cursor, one per table.
 
   telemetry_scalar
     telemetry_scalar_y2026m11   [2026-11-01, 2026-12-01)  UTC
@@ -107,6 +109,21 @@ CREATE TABLE IF NOT EXISTS telemetry_gps_default PARTITION OF telemetry_gps DEFA
 CREATE INDEX IF NOT EXISTS telemetry_scalar_device_time_idx ON telemetry_scalar (device_id, recorded_at DESC);
 CREATE INDEX IF NOT EXISTS telemetry_gps_device_time_idx ON telemetry_gps (device_id, recorded_at DESC);
 CREATE INDEX IF NOT EXISTS telemetry_gps_position_gix ON telemetry_gps USING GIST (position);
+
+-- Where the server stopped reading. history_id 0 means nothing has been read.
+-- Re-applying this script must not rewind a cursor that has already moved.
+CREATE TABLE IF NOT EXISTS telemetry_read_cursor (
+    channel     TEXT PRIMARY KEY CHECK (channel IN ('telemetry_scalar', 'telemetry_gps')),
+    history_id  BIGINT NOT NULL
+);
+
+INSERT INTO telemetry_read_cursor (channel, history_id) VALUES
+    ('telemetry_scalar', 0),
+    ('telemetry_gps', 0)
+ON CONFLICT (channel) DO NOTHING;
+
+COMMENT ON TABLE telemetry_read_cursor IS
+    'Last history_id pgdemo-server has consumed from each telemetry table. Rows with a greater history_id are still unread.';
 
 -- ---------------------------------------------------------------------------
 -- Partition maintenance

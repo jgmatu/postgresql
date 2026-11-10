@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <optional>
 #include <string_view>
 
@@ -7,7 +8,7 @@ namespace pgdemo::db {
 
 /**
  * @brief Shape of the data a device produces. Selects the telemetry table and
- * the NOTIFY channel; the device itself travels in the row and in the payload.
+ * the NOTIFY channel. The device travels in the row; the notification names the table.
  *
  * SQL identifiers are never built from caller strings: every table and channel
  * name comes from this fixed whitelist. Devices are rows of `device`, so adding
@@ -38,7 +39,7 @@ constexpr std::string_view telemetry_table(Payload p) noexcept
     return p == Payload::Gps ? "telemetry_gps" : "telemetry_scalar";
 }
 
-/// NOTIFY channel fired by `device_state` for samples of this payload.
+/// NOTIFY channel fired by an INSERT into the telemetry table of this payload.
 constexpr std::string_view telemetry_channel(Payload p) noexcept
 {
     return p == Payload::Gps ? "telemetry_gps" : "telemetry_scalar";
@@ -46,6 +47,9 @@ constexpr std::string_view telemetry_channel(Payload p) noexcept
 
 /// Every payload, for loops that must cover all telemetry tables.
 constexpr Payload kAllPayloads[] = {Payload::Scalar, Payload::Gps};
+
+/// Rows `take_unread_telemetry` reads and consumes in one transaction.
+constexpr std::size_t kTelemetryReadPage = 1024;
 
 /**
  * @brief Same rule as the `CHECK` on `device.name`: `^[a-z][a-z0-9_.-]{1,63}$`.

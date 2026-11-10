@@ -13,7 +13,7 @@ A database created with an earlier schema (one table per dummy, or devices witho
 | File | Contents |
 |---|---|
 | [`00_roles.sql`](00_roles.sql) | Cluster roles and role memberships |
-| [`01_data.sql`](01_data.sql) | PostGIS, `device_type`, `device`, `device_state`, the monthly-partitioned `telemetry_scalar` and `telemetry_gps`, and the partition maintenance functions |
+| [`01_data.sql`](01_data.sql) | PostGIS, `device_type`, `device`, `device_state`, the monthly-partitioned `telemetry_scalar` and `telemetry_gps`, the server's `telemetry_read_cursor`, and the partition maintenance functions |
 | [`02_config.sql`](02_config.sql) | Control plane: request id sequence, applied configuration, request queue, errors and audits, all keyed by `device_id` |
 | [`03_identity.sql`](03_identity.sql) | Device identity: `root_ca`, `device_certificate`, `crl`, `device_enrollment`, `device_session`, the binding foreign keys, `issue_device_certificate()`, `reject_enrollment()`, and the seed enrollments |
 | [`03_users.sql`](03_users.sql) | `app_users`, the `app_role` type, `auth_fetch_user()` and the last-admin guard |
@@ -211,7 +211,7 @@ erDiagram
 
 ### Writing a sample
 
-Each device is a `pgdemo-device` worker that publishes its samples on `pgdemo/worker/telemetry/scalar` or `pgdemo/worker/telemetry/gps`. The manager queues them and writes a batch in one transaction: every sample is inserted into the history table, and `device_state` is updated once per device with the latest `seq`. The `device_state` trigger notifies the channel of that payload.
+Each device is a `pgdemo-device` worker that publishes its samples on `pgdemo/worker/telemetry/scalar` or `pgdemo/worker/telemetry/gps`. The manager queues them and writes a batch in one transaction: every sample is inserted into the history table, and `device_state` is updated once per device with the latest `seq`. The `INSERT` into the history table fires `telemetry_scalar` or `telemetry_gps` once for the statement. The notification names the table. The server reads the rows with `history_id` above `telemetry_read_cursor` and sets that cursor to the last row of the select, in the same transaction.
 
 ```sql
 WITH up AS (
@@ -228,6 +228,8 @@ For a GPS device the value is `ST_Project(ST_SetSRID(ST_MakePoint(lon, lat), 432
 ### Partitioned telemetry
 
 `telemetry_scalar` and `telemetry_gps` are append-only and `PARTITION BY RANGE (recorded_at)`, one partition per UTC month plus a `DEFAULT` partition. Each carries `device_id` and the sample, and adds `history_id BIGINT GENERATED ALWAYS AS IDENTITY` and `recorded_at TIMESTAMPTZ`.
+
+`telemetry_read_cursor` has one row per history table. `channel` is `telemetry_scalar` or `telemetry_gps`, and `history_id` is the last one the server consumed (`0` before the first read). The server locks that row, selects rows with a greater `history_id`, and sets the cursor to the last selected `history_id` before it commits. The next read starts after that row. The predicate is `history_id` only: `recorded_at` is not an order across transactions.
 
 - **No foreign key to `device`.** Removing a device keeps its telemetry. A foreign key would also have to be checked on every one of the most frequent writes.
 - **Primary key `(history_id, recorded_at)`.** PostgreSQL requires the partition key inside every unique constraint of a partitioned table.
@@ -313,7 +315,8 @@ sequenceDiagram
     ctl->>ctl: challenge-response
     ctl->>pg: UPSERT device_session ONLINE
     ctl->>pg: INSERT telemetry_scalar + UPSERT device_state
-    pg-->>server: NOTIFY telemetry_scalar with device
+    pg-->>server: NOTIFY telemetry_scalar {table}
+    server->>pg: SELECT unread rows, UPDATE telemetry_read_cursor, COMMIT
     client->>server: DELETE /api/devices/name
     server->>pg: DELETE device (cascade: certificates, session, state, config, queue)
     pg-->>ctl: NOTIFY device_events DELETE
@@ -393,18 +396,18 @@ The controller runs a process only for an `ACTIVE` device, and refuses an authen
 | `issue_device_certificate(...)` | `SECURITY DEFINER` | Record a signed certificate for an enrollment: create the device or rotate it (see [Device identity](#device-identity)). `EXECUTE` for `demo_server`. |
 | `reject_enrollment(p_request_id bigint, p_code text, p_detail text)` | `SECURITY DEFINER`, returns whether the request was still open | Close an enrollment without a certificate. `EXECUTE` for `demo_server`. |
 | `check_certificate_subject()`, `protect_crl()`, `check_enrollment()`, `check_enrollment_transition()` | trigger | The identity invariants of `03_identity.sql` |
-| `notify_device_sample()`, `notify_device_change()`, `notify_crl_change()`, `notify_session_change()`, `notify_enrollment()`, `notify_config_request()`, `notify_config_change()`, `notify_config_error()` | trigger | Build the JSON payload and call `pg_notify` |
+| `notify_telemetry_batch()`, `notify_device_change()`, `notify_crl_change()`, `notify_session_change()`, `notify_enrollment()`, `notify_config_request()`, `notify_config_change()`, `notify_config_error()` | trigger | Build the JSON payload and call `pg_notify` |
 
 Both partition functions accept only `telemetry_scalar` and `telemetry_gps` as `parent`, pin `search_path` and `TimeZone = 'UTC'`, and take `pg_advisory_xact_lock(parent)` so that concurrent callers on the same table run one after another. Being `SECURITY DEFINER`, they run as `demo_owner`: creating or dropping a partition requires owning the parent, and the controller must not own tables.
 
 ## Triggers and NOTIFY channels
 
-All of them are `AFTER ... FOR EACH ROW` triggers. Channels are per topic, never per device: the device travels in the payload (`device_id` and the name, `device`), so the set of `LISTEN`s stays the same however many devices are registered.
+The telemetry triggers are `AFTER INSERT FOR EACH STATEMENT` on the history tables. The rest are `AFTER ... FOR EACH ROW`. Channels are per topic, never per device, so the set of `LISTEN`s stays the same however many devices are registered. A telemetry payload names the table. Every other payload carries the device (`device_id` and the name, `device`).
 
 | Channel | Source | Trigger | Listener | Payload (JSON) |
 |---|---|---|---|---|
-| `telemetry_scalar` | `device_state` INSERT, UPDATE with `value` | `trg_device_state_notify` | server | `device_id`, `device`, `action`, `value`, `seq`, `ts` |
-| `telemetry_gps` | `device_state` INSERT, UPDATE with `position` | `trg_device_state_notify` | server | `device_id`, `device`, `action`, `lon`, `lat`, `seq`, `ts` |
+| `telemetry_scalar` | `telemetry_scalar` INSERT | `trg_telemetry_scalar_notify` | server | `table` |
+| `telemetry_gps` | `telemetry_gps` INSERT | `trg_telemetry_gps_notify` | server | `table` |
 | `device_events` | `device` INSERT, DELETE (`action` `INSERT`, `DELETE`), UPDATE of `cert_id` (`ROTATED`) | `trg_device_notify`, `trg_device_rotate_notify` | controller, server | `action`, `device_id`, `device`, `type_id`, `cert_id` |
 | `device_events` | `crl` INSERT, UPDATE (`REVOKED`), DELETE (`UNREVOKED`) | `trg_crl_notify` | controller, server | `action`, `device_id`, `device`, `serial`, `reason`, `current` (whether it is the device's current certificate) |
 | `device_events` | `device_session` INSERT, change of `state` (`action` is the new state) | `trg_device_session_notify` | server | `action`, `device_id`, `device`, `pid`, `last_error` |
@@ -415,7 +418,7 @@ All of them are `AFTER ... FOR EACH ROW` triggers. Channels are per topic, never
 | `config_events` | `device_config` INSERT, UPDATE | `trg_config_notify` | server | `action`, `device_id`, `device`, `rate_ms`, `amplitude`, `is_active`, `request_id`, `applied_at` |
 | `error_events` | `device_config_errors` INSERT; `device_session` state becomes `AUTH_FAILED` (`error_code` `AUTH_FAILED`, no `request_id`) | `trg_config_error_notify`, `trg_device_session_notify` | server | `request_id`, `device_id`, `device`, `error_code`, `error_detail`, `occurred_at` |
 
-The device name in each payload is read from `device` by primary key inside the trigger, so a listener can filter or display without a second query. The server republishes these channels as the SSE events `telemetry_scalar`, `telemetry_gps`, `device`, `enrollment`, `config` and `error`, and `GET /api/stream?devices=` filters them by that name.
+Outside telemetry, the device name is read from `device` by primary key inside the trigger, so a listener can filter or display without a second query. On `telemetry_scalar` and `telemetry_gps` the server queries the unread rows, advances `telemetry_read_cursor` to the last `history_id` of that select, and then republishes one SSE event per row (`device_id`, `device`, `action` `INSERT`, `seq`, `ts`, and `value` or `lon`/`lat`). The other channels are republished as the SSE events `device`, `enrollment`, `config` and `error`. `GET /api/stream?devices=` filters them by name.
 
 ```mermaid
 flowchart LR
@@ -464,7 +467,7 @@ flowchart LR
 | `demo_owner` | no | Owns every object. `SECURITY DEFINER` functions run as it. |
 | `demo_normal` | no | Group behind the JWT role `normal`: read only. |
 | `demo_admin` | no | Group behind the JWT role `admin`. Member of `demo_normal`, plus enrollment, revocation and removal of devices, enqueue and user management. It cannot create a device or a certificate. |
-| `demo_server` | yes | Zone A. `NOINHERIT`, and holds `demo_admin` and `demo_normal` `WITH INHERIT FALSE, SET TRUE`: each API request runs under `SET LOCAL ROLE demo_admin` or `demo_normal`, chosen from the verified JWT. Its base role is also the certificate authority: it reads CSRs and calls `issue_device_certificate()`. |
+| `demo_server` | yes | Zone A. `NOINHERIT`, and holds `demo_admin` and `demo_normal` `WITH INHERIT FALSE, SET TRUE`: each API request runs under `SET LOCAL ROLE demo_admin` or `demo_normal`, chosen from the verified JWT. Its base role is the certificate authority and the telemetry reader: it reads CSRs, calls `issue_device_certificate()`, reads the history tables and updates `telemetry_read_cursor`. |
 | `demo_controller` | yes | Zone B. Least privilege on the device registry and identity (read only), the enrollment status, the sessions, the queue, the applied configuration and the data. No access to `app_users`. |
 
 Passwords for the two login roles are set by `scripts/db-init.sh`, never in these files.
@@ -472,14 +475,15 @@ Passwords for the two login roles are set by `scripts/db-init.sh`, never in thes
 | Object | `demo_normal` | `demo_admin` | `demo_controller` | `demo_server` (base) |
 |---|---|---|---|---|
 | `device_type` | SELECT | SELECT | SELECT | – |
-| `device` | SELECT | SELECT, DELETE | SELECT | – |
+| `device` | SELECT | SELECT, DELETE | SELECT | SELECT `device_id`, `name` |
 | `root_ca` | SELECT | SELECT | SELECT | SELECT |
 | `device_certificate` | SELECT | SELECT, DELETE | SELECT | – |
 | `crl` | SELECT | SELECT; INSERT; UPDATE `reason`, `revoked_at`, `revoked_by`; DELETE (all limited by `protect_crl`) | SELECT | – |
 | `device_enrollment` | SELECT | SELECT; INSERT `request_id`, `kind`, `name`, `type_id`, `device_id`, `requested_by` | SELECT; UPDATE `status`, `csr_pem`, `csr_at`, `error_code`, `error_detail`, `decided_at` | SELECT `request_id`, `kind`, `name`, `type_id`, `status`, `csr_pem`, `requested_by` |
 | `device_session` | SELECT | SELECT | SELECT, INSERT, UPDATE | – |
 | `device_state` | SELECT | SELECT | SELECT, INSERT, UPDATE | – |
-| `telemetry_scalar`, `telemetry_gps` | SELECT | SELECT | INSERT | – |
+| `telemetry_scalar`, `telemetry_gps` | SELECT | SELECT | INSERT | SELECT |
+| `telemetry_read_cursor` | – | – | – | SELECT, UPDATE |
 | `device_config` | SELECT | SELECT | SELECT, INSERT, UPDATE | – |
 | `device_config_pending` | SELECT | SELECT, INSERT | SELECT, UPDATE | – |
 | `device_config_errors` | SELECT | SELECT | INSERT | – |
@@ -500,10 +504,7 @@ Passwords for the two login roles are set by `scripts/db-init.sh`, never in thes
 
 The model scales in the number of devices without schema changes, but the demo keeps a few simplifications that a real fleet would not.
 
-- **One `NOTIFY` per sample.** Committing a transaction that called `pg_notify` takes a cluster-wide lock on the notification queue, so those commits serialize. At a few hundred samples per second this is invisible; at thousands it becomes the bottleneck, and a listener that falls behind fills the 8 GB queue. Alternatives, from least to most infrastructure:
-  - batched wake-ups: notify once per batch, or once per interval from the writer, and let listeners read the new rows by `history_id`;
-  - logical decoding (CDC) of `device_state` or the telemetry tables with `pgoutput`, which needs no trigger and no queue lock;
-  - a broker (MQTT, Kafka, NATS) for telemetry, with PostgreSQL as the store and the control plane.
+- **One `NOTIFY` per insert.** A history `INSERT` notifies once for the statement, and the server reads the new rows by `history_id`. Committing a transaction that called `pg_notify` still takes a cluster-wide lock on the notification queue, so the commits of those batches serialize. At a few hundred batches per second this is invisible; at thousands it becomes the bottleneck, and a listener that falls behind fills the 8 GB queue. Beyond that: logical decoding (CDC) of the telemetry tables with `pgoutput`, or a broker (MQTT, Kafka, NATS), with PostgreSQL as the store and the control plane.
 - **Partitioning only by time.** Every device of one payload shares each month's partition. With many devices and long retention, subpartition each month by `HASH (device_id)`, or move the telemetry to TimescaleDB hypertables, which do both.
 - **One `device_state` row per device.** It is UPDATE-heavy: keep `fillfactor` below 100 so the updates stay HOT, and let autovacuum run often on it.
 - **Row Level Security.** All authenticated users see every device. Tenants or owners would add an owner column to `device` and RLS policies on `device`, `device_state` and the telemetry tables keyed by `device_id`.

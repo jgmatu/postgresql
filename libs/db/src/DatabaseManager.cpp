@@ -462,6 +462,76 @@ void DatabaseManager::write_telemetry_batch(const std::vector<DummySample>& scal
     txn.commit();
 }
 
+std::vector<boost::json::object> DatabaseManager::take_unread_telemetry(std::string_view channel)
+{
+    const bool gps = channel == telemetry_channel(Payload::Gps);
+    if (!gps && channel != telemetry_channel(Payload::Scalar))
+    {
+        throw std::invalid_argument("take_unread_telemetry: unknown channel " + std::string(channel));
+    }
+
+    auto lease = pool_.acquire();
+    pqxx::work txn(lease.get());
+    const auto cur = txn.exec("SELECT history_id FROM telemetry_read_cursor WHERE channel = $1 FOR UPDATE",
+                              pqxx::params{std::string(channel)});
+    if (cur.empty())
+    {
+        throw std::runtime_error("telemetry_read_cursor has no row for " + std::string(channel));
+    }
+    const auto cursor = cur[0][0].as<std::int64_t>();
+
+    // '{{}}' is the format escape for the JSON operator '{}'.
+    const auto sql = gps ? std::format("SELECT t.history_id, t.device_id, d.name AS device, t.seq,"
+                                       " to_json(t.recorded_at)#>>'{{}}' AS ts,"
+                                       " extensions.ST_X(t.position::extensions.geometry) AS lon,"
+                                       " extensions.ST_Y(t.position::extensions.geometry) AS lat"
+                                       " FROM telemetry_gps t"
+                                       " JOIN device d ON d.device_id = t.device_id"
+                                       " WHERE t.history_id > $1"
+                                       " ORDER BY t.history_id"
+                                       " LIMIT {}",
+                                       kTelemetryReadPage)
+                         : std::format("SELECT t.history_id, t.device_id, d.name AS device, t.seq,"
+                                       " to_json(t.recorded_at)#>>'{{}}' AS ts, t.value"
+                                       " FROM telemetry_scalar t"
+                                       " JOIN device d ON d.device_id = t.device_id"
+                                       " WHERE t.history_id > $1"
+                                       " ORDER BY t.history_id"
+                                       " LIMIT {}",
+                                       kTelemetryReadPage);
+    const auto rows = txn.exec(sql, pqxx::params{cursor});
+
+    std::vector<boost::json::object> out;
+    out.reserve(rows.size());
+    if (!rows.empty())
+    {
+        txn.exec("UPDATE telemetry_read_cursor SET history_id = $2 WHERE channel = $1",
+                 pqxx::params{std::string(channel), rows.back()["history_id"].as<std::int64_t>()})
+            .no_rows();
+        for (const auto& row : rows)
+        {
+            boost::json::object sample;
+            sample["action"] = "INSERT";
+            sample["device_id"] = row["device_id"].as<std::int64_t>();
+            sample["device"] = row["device"].view();
+            sample["seq"] = row["seq"].as<std::int64_t>();
+            sample["ts"] = row["ts"].view();
+            if (gps)
+            {
+                sample["lon"] = row["lon"].as<double>();
+                sample["lat"] = row["lat"].as<double>();
+            }
+            else
+            {
+                sample["value"] = row["value"].as<double>();
+            }
+            out.push_back(std::move(sample));
+        }
+    }
+    txn.commit();
+    return out;
+}
+
 void DatabaseManager::write_gps_sample(const TrackSample& sample)
 {
     // PostGIS builds the point. Distance and azimuth are cast: unbound parameters

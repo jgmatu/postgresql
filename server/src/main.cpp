@@ -147,7 +147,8 @@ std::string payload_text(const boost::json::object& msg)
     return payload ? boost::json::serialize(*payload) : std::string("null");
 }
 
-/// Device name carried by every payload of sql/04_triggers.sql; empty if absent.
+/// Device name carried by a notification payload; empty when the payload has none.
+/// Telemetry notifications name the table. The device is on the row the server reads.
 std::string device_of(const boost::json::object& msg)
 {
     const auto* payload = msg.if_contains("payload");
@@ -156,18 +157,33 @@ std::string device_of(const boost::json::object& msg)
     return name && name->is_string() ? std::string(name->as_string()) : std::string{};
 }
 
+/// Publish every sample past the cursor. Each page is its own transaction;
+/// a short page means the channel is caught up.
+void publish_unread(EventHub& hub, db::DatabaseManager& database, std::string_view channel)
+{
+    for (;;)
+    {
+        const auto rows = database.take_unread_telemetry(channel);
+        for (const auto& row : rows)
+        {
+            hub.publish(std::string(channel), std::string(row.at("device").as_string()), boost::json::serialize(row));
+        }
+        if (rows.size() < db::kTelemetryReadPage) return;
+    }
+}
+
 void register_channels(Services& s)
 {
     auto& db = *s.db;
     auto hub = s.hub;
     auto dispatcher = s.dispatcher;
 
-    // Data plane: one channel per payload shape, whatever the number of devices.
+    // Data plane: the notification is a wake-up. The samples are read from the cursor.
     for (const auto p : db::kAllPayloads)
     {
         const std::string channel(db::telemetry_channel(p));
-        db.register_listen_async(channel, [hub, channel](const boost::json::object& msg) {
-            hub->publish(channel, device_of(msg), payload_text(msg));
+        db.register_listen_async(channel, [hub, database = s.db, channel](const boost::json::object&) {
+            publish_unread(*hub, *database, channel);
         });
     }
     db.register_listen_async(std::string(db::channel::kDeviceEvents), [hub](const boost::json::object& msg) {
@@ -286,6 +302,10 @@ int run(const ServerConfig& cfg)
     // Registration phase, then activation (see DatabaseManager).
     register_channels(*services);
     services->db->run_listener_loop();
+    // Samples inserted while this server was down. LISTEN is already active, and
+    // the cursor stops at the last row this read returned.
+    for (const auto p : db::kAllPayloads)
+        publish_unread(*services->hub, *services->db, db::telemetry_channel(p));
     // CSRs submitted while this server was down.
     for (const auto id : services->db->submitted_csr_ids()) services->signer->submit(id);
 

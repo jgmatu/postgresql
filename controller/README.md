@@ -148,7 +148,7 @@ Shutdown, from `SIGINT` or `SIGTERM`, publishes `bye` and sends `SIGTERM` to eve
 
 Samples from every worker share one queue on the io thread. A `heartbeat`, a CSR, a proof and a session write do not enter it: those still call `on_db()` at once, on the same pool.
 
-The queue holds 4096 samples. Past that, the sample that just arrived is dropped and counted, and the session coroutine does not wait. `telemetry_loop()` flushes when 64 samples are queued or 100 ms have passed. One flush checks out one `Lease`, inserts every row into `telemetry_scalar` or `telemetry_gps`, and upserts `device_state` once per device with the highest `seq` in the batch. Shutdown flushes whatever remains after the workers have been closed, before it resets `device_session`.
+The queue holds 4096 samples. Past that, the sample that just arrived is dropped and counted, and the session coroutine does not wait. `telemetry_loop()` flushes when 64 samples are queued or 100 ms have passed. One flush checks out one `Lease`, inserts every row into `telemetry_scalar` or `telemetry_gps`, and upserts `device_state` once per device with the highest `seq` in the batch. The statement trigger notifies the server once per insert. The server reads what it has not consumed yet and advances `telemetry_read_cursor` in that same read. Shutdown flushes whatever remains after the workers have been closed, before it resets `device_session`.
 
 ## What changes the fleet
 
