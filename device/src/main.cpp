@@ -1,42 +1,57 @@
-// pgdemo-device: one simulated device, started by the controller (fork + execv).
+// pgdemo-device: one simulated device, a ROS 2 worker node.
 //
-// It connects to the controller's Unix socket, proves its identity with its
-// private key (or first obtains a certificate, when enrolling or rotating),
-// then streams samples until the controller says bye or a signal arrives.
-// One thread, Boost.Asio C++20 coroutines.
+// The manager starts it (fork + execv) or it is started on another host in
+// the same ROS domain. It never opens a database. It publishes pgdemo/worker
+// and subscribes to pgdemo/manager, proves its identity with its private key
+// (or first obtains a certificate, when enrolling or rotating), then streams
+// samples until the manager says bye or a signal arrives.
 
 #include "Stream.hpp"
 
 #include <pki/CertVerifier.hpp>
 #include <pki/Certificate.hpp>
 #include <pki/DeviceKey.hpp>
-#include <wire/Frame.hpp>
 
 #include <log/Log.hpp>
+#include <pgdemo/Topics.hpp>
 
-#include <boost/asio.hpp>
+#include <pgdemo_msgs/msg/bye.hpp>
+#include <pgdemo_msgs/msg/certificate.hpp>
+#include <pgdemo_msgs/msg/challenge.hpp>
+#include <pgdemo_msgs/msg/config.hpp>
+#include <pgdemo_msgs/msg/csr.hpp>
+#include <pgdemo_msgs/msg/error.hpp>
+#include <pgdemo_msgs/msg/gps_sample.hpp>
+#include <pgdemo_msgs/msg/heartbeat.hpp>
+#include <pgdemo_msgs/msg/hello.hpp>
+#include <pgdemo_msgs/msg/proof.hpp>
+#include <pgdemo_msgs/msg/rejected.hpp>
+#include <pgdemo_msgs/msg/scalar_sample.hpp>
+
+#include <rclcpp/rclcpp.hpp>
 
 #include <sys/stat.h>
 
+#include <algorithm>
+#include <chrono>
 #include <csignal>
 #include <filesystem>
 #include <format>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <string>
 
 namespace pgdemo::device {
 namespace {
 
-namespace asio = boost::asio;
 namespace fs = std::filesystem;
-using asio::awaitable;
-using asio::use_awaitable;
-using Socket = asio::local::stream_protocol::socket;
+namespace msg = pgdemo_msgs::msg;
+using namespace std::chrono_literals;
 
-/// Exit codes the controller logs.
+/// Exit codes the manager logs.
 enum Exit : int {
-    kOk = 0,         ///< bye from the controller, or SIGTERM/SIGINT
+    kOk = 0,         ///< bye from the manager, or SIGTERM/SIGINT
     kFailed = 1,     ///< protocol or I/O error
     kUsage = 2,      ///< bad arguments
     kRejected = 3,   ///< enrollment refused by the CA
@@ -45,13 +60,12 @@ enum Exit : int {
 
 void usage(std::ostream& out)
 {
-    out << "Usage: pgdemo-device --name NAME --type TYPE --payload scalar|gps --socket PATH --dir DIR\n"
+    out << "Usage: pgdemo-device --name NAME --type TYPE --payload scalar|gps --dir DIR\n"
            "                     [--enroll REQUEST_ID | --rotate REQUEST_ID]\n"
            "\n"
            "  --name      device name; also the CN of its certificate\n"
            "  --type      device type (selects the generator)\n"
            "  --payload   scalar or gps\n"
-           "  --socket    controller socket\n"
            "  --dir       key directory: key.pem and cert.pem\n"
            "  --enroll    generate a key, send a CSR and store the issued certificate\n"
            "  --rotate    same, replacing the current key once the new certificate arrives\n";
@@ -62,7 +76,6 @@ struct Options
     std::string name;
     std::string type;
     std::string payload;
-    std::string socket;
     fs::path dir;
     std::string mode = "run";
     std::int64_t request_id = 0;
@@ -89,7 +102,6 @@ Options parse_args(int argc, char** argv)
         if (arg == "--name") o.name = value;
         else if (arg == "--type") o.type = value;
         else if (arg == "--payload") o.payload = value;
-        else if (arg == "--socket") o.socket = value;
         else if (arg == "--dir") o.dir = value;
         else if (arg == "--enroll" || arg == "--rotate")
         {
@@ -98,13 +110,13 @@ Options parse_args(int argc, char** argv)
         }
         else throw UsageError(std::format("unknown option {}", arg));
     }
-    if (o.name.empty() || o.type.empty() || o.socket.empty() || o.dir.empty())
-        throw UsageError("--name, --type, --socket and --dir are required");
+    if (o.name.empty() || o.type.empty() || o.dir.empty())
+        throw UsageError("--name, --type and --dir are required");
     if (o.payload != "scalar" && o.payload != "gps") throw UsageError("--payload must be scalar or gps");
     return o;
 }
 
-/// The controller refused us: enrollment rejected, or bye during the handshake.
+/// The manager refused us: enrollment rejected, or bye during the handshake.
 struct Refused : std::runtime_error
 {
     Refused(int c, const std::string& what) : std::runtime_error(what), code(c) {}
@@ -129,111 +141,284 @@ void write_file(const fs::path& p, const std::string& data)
     fs::rename(tmp, p);
 }
 
-class Device
+/// Node name from a device name. ROS names allow letters, digits and underscore.
+std::string node_name_for(std::string name)
+{
+    for (char& c : name)
+        if (c == '.' || c == '-') c = '_';
+    return "pgdemo_device_" + name;
+}
+
+unsigned char mode_code(std::string_view mode)
+{
+    if (mode == "enroll") return msg::Hello::ENROLL;
+    if (mode == "rotate") return msg::Hello::ROTATE;
+    return msg::Hello::RUN;
+}
+
+/// Where the handshake is. `Announce` repeats `hello` until `challenge`.
+enum class Phase { Announce, Cert, Challenge, Config, Run, Done };
+
+/**
+ * @brief One worker. It publishes `pgdemo/worker` and subscribes to `pgdemo/manager`.
+ *
+ * `hello` is transient-local and repeated once a second until the challenge
+ * arrives, so a manager that starts later still sees the node. Manager messages
+ * for another device are ignored.
+ */
+class DeviceNode : public rclcpp::Node
 {
 public:
-    Device(asio::io_context& io, Options opts)
-        : opts_(std::move(opts))
-        , socket_(io)
-        , stream_(socket_, generator_for(opts_.type, opts_.payload), "device " + opts_.name)
-    {
-    }
-
-    awaitable<int> run()
+    DeviceNode(Options opts, int& exit_code)
+        : rclcpp::Node(node_name_for(opts.name))
+        , opts_(std::move(opts))
+        , exit_code_(exit_code)
+        , stream_([this](SampleStream::Emission msg) { publish_emission(std::move(msg)); },
+                  generator_for(opts_.type, opts_.payload), "device " + opts_.name)
     {
         fs::create_directories(opts_.dir);
         ::chmod(opts_.dir.c_str(), 0700);
 
-        co_await socket_.async_connect(asio::local::stream_protocol::endpoint(opts_.socket), use_awaitable);
-        boost::json::object hello{{"type", "hello"}, {"device", opts_.name}, {"mode", opts_.mode}};
-        if (opts_.request_id != 0) hello["request_id"] = opts_.request_id;
-        co_await wire::write_frame(socket_, hello);
+        const auto qos = rclcpp::QoS(rclcpp::KeepLast(16)).reliable();
+        const auto hello_qos = rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local();
+        hello_ = create_publisher<msg::Hello>(topics::kHello, hello_qos);
+        heartbeat_ = create_publisher<msg::Heartbeat>(topics::kHeartbeat, qos);
+        error_ = create_publisher<msg::Error>(topics::kError, qos);
+        csr_ = create_publisher<msg::Csr>(topics::kCsr, qos);
+        proof_ = create_publisher<msg::Proof>(topics::kProof, qos);
+        scalar_ = create_publisher<msg::ScalarSample>(topics::kScalar, qos);
+        gps_ = create_publisher<msg::GpsSample>(topics::kGps, qos);
 
-        if (opts_.mode != "run") co_await obtain_certificate();
+        bye_ = create_subscription<msg::Bye>(topics::kBye, qos, [this](msg::Bye::ConstSharedPtr m) { on_bye(*m); });
+        rejected_ = create_subscription<msg::Rejected>(
+            topics::kRejected, qos, [this](msg::Rejected::ConstSharedPtr m) { on_rejected(*m); });
+        certificate_ = create_subscription<msg::Certificate>(
+            topics::kCertificate, qos, [this](msg::Certificate::ConstSharedPtr m) { on_certificate(*m); });
+        challenge_ = create_subscription<msg::Challenge>(
+            topics::kChallenge, qos, [this](msg::Challenge::ConstSharedPtr m) { on_challenge(*m); });
+        config_ = create_subscription<msg::Config>(
+            topics::kConfig, qos, [this](msg::Config::ConstSharedPtr m) { on_config(*m); });
 
-        if (!fs::exists(key_path()) || !fs::exists(cert_path()))
-        {
-            co_await wire::write_frame(socket_, {{"type", "error"},
-                                                 {"code", "NO_IDENTITY"},
-                                                 {"detail", "no key.pem or cert.pem in " + opts_.dir.string()}});
-            throw Refused(kNoIdentity, "no key or certificate; the device must be enrolled first");
-        }
-        const auto key = pki::DeviceKey::load(key_path().string());
-        const std::string cert = read_file(cert_path());
-
-        co_await prove(key, cert);
-        co_await wait_config();
-        log::info(tag(), std::format("online (device_id {}, rate_ms {}, amplitude {}, active {})",
-                                     stream_.device_id(), stream_.rate_ms(), stream_.amplitude(), stream_.active()));
-
-        co_await stream_.run();
-        co_return kOk;
+        if (opts_.mode != "run") phase_ = Phase::Cert;
+        hello_timer_ = create_wall_timer(1s, [this] { announce(); });
+        announce();
     }
 
 private:
     [[nodiscard]] fs::path key_path() const { return opts_.dir / "key.pem"; }
     [[nodiscard]] fs::path cert_path() const { return opts_.dir / "cert.pem"; }
     [[nodiscard]] std::string tag() const { return "device " + opts_.name; }
+    [[nodiscard]] bool mine(const std::string& device) const { return device == opts_.name; }
 
-    /// Enroll or rotate: new key, CSR, wait for the certificate signed by the CA.
-    awaitable<void> obtain_certificate()
+    void publish_emission(SampleStream::Emission msg)
     {
-        const auto key = pki::DeviceKey::generate();
-        const fs::path next = opts_.dir / "key.next.pem";
-        key.save(next.string());
-        co_await wire::write_frame(socket_, {{"type", "csr"}, {"csr", key.csr_pem(opts_.name)}});
-        log::info(tag(), std::format("{}: CSR sent for request {}", opts_.mode, opts_.request_id));
+        std::visit(
+            [this](auto& m) {
+                m.device = opts_.name;
+                using T = std::decay_t<decltype(m)>;
+                if constexpr (std::is_same_v<T, msg::ScalarSample>) scalar_->publish(m);
+                else if constexpr (std::is_same_v<T, msg::GpsSample>) gps_->publish(m);
+                else heartbeat_->publish(m);
+            },
+            msg);
+    }
 
-        const auto msg = co_await wire::read_frame(socket_);
-        const auto type = wire::type_of(msg);
-        if (type != "cert")
+    void publish_error(const std::string& code, const std::string& detail)
+    {
+        msg::Error err;
+        err.device = opts_.name;
+        err.code = code;
+        err.detail = detail;
+        error_->publish(err);
+    }
+
+    void fail(int code, const std::string& what)
+    {
+        if (phase_ == Phase::Done) return;
+        phase_ = Phase::Done;
+        exit_code_ = code;
+        (code == kOk ? log::info : log::error)(tag(), what);
+        hello_timer_.reset();
+        sample_timer_.reset();
+        rclcpp::shutdown();
+    }
+
+    void announce()
+    {
+        if (phase_ != Phase::Announce && phase_ != Phase::Cert) return;
+        msg::Hello hello;
+        hello.device = opts_.name;
+        hello.mode = mode_code(opts_.mode);
+        hello.request_id = opts_.request_id;
+        hello_->publish(hello);
+        if (phase_ == Phase::Cert && !csr_sent_) send_csr();
+    }
+
+    void send_csr()
+    {
+        try
         {
-            fs::remove(next);
-            const auto code = wire::get_string(msg, "code").value_or(type);
-            const auto detail = wire::get_string(msg, "detail").value_or("");
-            throw Refused(kRejected, std::format("certificate refused: {} {}", code, detail));
+            next_key_ = std::make_unique<pki::DeviceKey>(pki::DeviceKey::generate());
+            const fs::path next = opts_.dir / "key.next.pem";
+            next_key_->save(next.string());
+            msg::Csr csr;
+            csr.device = opts_.name;
+            csr.csr = next_key_->csr_pem(opts_.name);
+            csr_->publish(csr);
+            csr_sent_ = true;
+            log::info(tag(), std::format("{}: CSR sent for request {}", opts_.mode, opts_.request_id));
         }
-        const auto cert = wire::get_string(msg, "cert").value_or("");
-
-        // The certificate must carry our key before it replaces anything.
-        const auto probe = pki::random_bytes(32);
-        if (!pki::CertVerifier::verify_signature(cert, probe, key.sign(probe)))
+        catch (const std::exception& e)
         {
-            fs::remove(next);
+            fail(kFailed, e.what());
+        }
+    }
+
+    void store_certificate(const std::string& cert)
+    {
+        if (!next_key_) throw std::runtime_error("certificate arrived before the key was generated");
+        const auto probe = pki::random_bytes(32);
+        if (!pki::CertVerifier::verify_signature(cert, probe, next_key_->sign(probe)))
+        {
+            fs::remove(opts_.dir / "key.next.pem");
             throw std::runtime_error("issued certificate does not match the generated key");
         }
         write_file(opts_.dir / "cert.next.pem", cert);
-        fs::rename(next, key_path());
+        fs::rename(opts_.dir / "key.next.pem", key_path());
         fs::rename(opts_.dir / "cert.next.pem", cert_path());
+        next_key_.reset();
         log::info(tag(), std::format("certificate stored (serial {})", pki::inspect_certificate(cert).serial));
     }
 
-    /// Challenge-response: sign the controller's nonce bound to our name and certificate.
-    awaitable<void> prove(const pki::DeviceKey& key, const std::string& cert)
+    void prove(const msg::Challenge& challenge)
     {
-        const auto msg = co_await wire::read_frame(socket_);
-        if (wire::type_of(msg) == "bye")
-            throw Refused(kOk, "controller refused: " + wire::get_string(msg, "reason").value_or(""));
-        if (wire::type_of(msg) != "challenge") throw std::runtime_error("expected challenge, got " + wire::type_of(msg));
-        const auto nonce = pki::base64_decode(wire::get_string(msg, "nonce").value_or(""));
+        if (!fs::exists(key_path()) || !fs::exists(cert_path()))
+        {
+            publish_error("NO_IDENTITY", "no key.pem or cert.pem in " + opts_.dir.string());
+            throw Refused(kNoIdentity, "no key or certificate; the device must be enrolled first");
+        }
+        const auto key = pki::DeviceKey::load(key_path().string());
+        const std::string cert = read_file(cert_path());
         const auto fingerprint = pki::inspect_certificate(cert).fingerprint;
-        const auto signature = key.sign(pki::proof_message(nonce, opts_.name, fingerprint));
-        co_await wire::write_frame(socket_,
-                                   {{"type", "proof"}, {"cert", cert}, {"signature", pki::base64_encode(signature)}});
+        const auto signature = key.sign(pki::proof_message(challenge.nonce, opts_.name, fingerprint));
+        if (signature.size() != 96)
+            throw std::runtime_error(std::format("proof signature is {} bytes, expected 96", signature.size()));
+        msg::Proof proof;
+        proof.device = opts_.name;
+        proof.cert = cert;
+        std::copy(signature.begin(), signature.end(), proof.signature.begin());
+        proof_->publish(proof);
+        hello_timer_.reset();
+        phase_ = Phase::Config;
     }
 
-    awaitable<void> wait_config()
+    void arm_samples()
     {
-        const auto msg = co_await wire::read_frame(socket_);
-        if (wire::type_of(msg) == "bye")
-            throw Refused(kOk, "controller refused: " + wire::get_string(msg, "reason").value_or(""));
-        if (wire::type_of(msg) != "config") throw std::runtime_error("expected config, got " + wire::type_of(msg));
-        stream_.apply(msg);
+        sample_timer_.reset();
+        sample_timer_ = create_wall_timer(stream_.period(), [this] {
+            if (stream_.stopped())
+            {
+                fail(kOk, "stopped");
+                return;
+            }
+            // A config that arrived while this wait was pending is already applied;
+            // the timer was re-armed at the new period, so this tick is one sample.
+            stream_.tick(std::chrono::steady_clock::now());
+        });
+    }
+
+    void on_bye(const msg::Bye& msg)
+    {
+        if (phase_ == Phase::Done || !mine(msg.device)) return;
+        if (phase_ == Phase::Run) stream_.on_bye(msg);
+        fail(kOk, "controller refused: " + msg.reason);
+    }
+
+    void on_rejected(const msg::Rejected& msg)
+    {
+        if (phase_ != Phase::Cert || !mine(msg.device)) return;
+        try
+        {
+            fs::remove(opts_.dir / "key.next.pem");
+            throw Refused(kRejected, std::format("certificate refused: {} {}", msg.code, msg.detail));
+        }
+        catch (const Refused& e)
+        {
+            fail(e.code, e.what());
+        }
+    }
+
+    void on_certificate(const msg::Certificate& msg)
+    {
+        if (phase_ != Phase::Cert || !mine(msg.device)) return;
+        try
+        {
+            store_certificate(msg.cert);
+            phase_ = Phase::Challenge;
+        }
+        catch (const std::exception& e)
+        {
+            fail(kFailed, e.what());
+        }
+    }
+
+    void on_challenge(const msg::Challenge& msg)
+    {
+        if ((phase_ != Phase::Announce && phase_ != Phase::Challenge) || !mine(msg.device)) return;
+        try
+        {
+            prove(msg);
+        }
+        catch (const Refused& e)
+        {
+            fail(e.code, e.what());
+        }
+        catch (const std::exception& e)
+        {
+            fail(kFailed, e.what());
+        }
+    }
+
+    void on_config(const msg::Config& msg)
+    {
+        if ((phase_ != Phase::Config && phase_ != Phase::Run) || !mine(msg.device)) return;
+        const bool first = phase_ == Phase::Config;
+        stream_.on_config(msg);
+        if (first)
+        {
+            phase_ = Phase::Run;
+            log::info(tag(), std::format("online (device_id {}, rate_ms {}, amplitude {}, active {})",
+                                         stream_.device_id(), stream_.rate_ms(), stream_.amplitude(), stream_.active()));
+            // The first sample follows at once: the previous wait was the handshake.
+            stream_.tick(std::chrono::steady_clock::now());
+            arm_samples();
+            return;
+        }
+        // Cancel the pending wait so the new rate applies now, not after the old one.
+        stream_.tick(std::chrono::steady_clock::now());
+        arm_samples();
     }
 
     Options opts_;
-    Socket socket_;
+    int& exit_code_;
     SampleStream stream_;
+    Phase phase_{Phase::Announce};
+    bool csr_sent_{false};
+    std::unique_ptr<pki::DeviceKey> next_key_;
+    rclcpp::Publisher<msg::Hello>::SharedPtr hello_;
+    rclcpp::Publisher<msg::Heartbeat>::SharedPtr heartbeat_;
+    rclcpp::Publisher<msg::Error>::SharedPtr error_;
+    rclcpp::Publisher<msg::Csr>::SharedPtr csr_;
+    rclcpp::Publisher<msg::Proof>::SharedPtr proof_;
+    rclcpp::Publisher<msg::ScalarSample>::SharedPtr scalar_;
+    rclcpp::Publisher<msg::GpsSample>::SharedPtr gps_;
+    rclcpp::Subscription<msg::Bye>::SharedPtr bye_;
+    rclcpp::Subscription<msg::Rejected>::SharedPtr rejected_;
+    rclcpp::Subscription<msg::Certificate>::SharedPtr certificate_;
+    rclcpp::Subscription<msg::Challenge>::SharedPtr challenge_;
+    rclcpp::Subscription<msg::Config>::SharedPtr config_;
+    rclcpp::TimerBase::SharedPtr hello_timer_;
+    rclcpp::TimerBase::SharedPtr sample_timer_;
 };
 
 } // namespace
@@ -253,36 +438,23 @@ int run_main(int argc, char** argv)
     }
 
     std::signal(SIGPIPE, SIG_IGN);
-    const std::string tag = "device " + opts.name;
+    rclcpp::InitOptions init;
+    init.shutdown_on_signal = true;
+    rclcpp::init(argc, argv, init);
 
-    asio::io_context io(1);
-    Device device(io, opts);
-    int rc = kFailed;
-    asio::co_spawn(io, device.run(), [&](std::exception_ptr ep, int result) {
-        if (!ep)
-        {
-            rc = result;
-            return;
-        }
-        try
-        {
-            std::rethrow_exception(ep);
-        }
-        catch (const Refused& e)
-        {
-            (e.code == kOk ? log::info : log::error)(tag, e.what());
-            rc = e.code;
-        }
-        catch (const boost::system::system_error& e)
-        {
-            log::error(tag, std::string("connection: ") + e.what());
-        }
-        catch (const std::exception& e)
-        {
-            log::error(tag, e.what());
-        }
-    });
-    io.run();
+    // A signal ends the spin without fail(); that is a clean exit. fail() overwrites this.
+    int rc = kOk;
+    try
+    {
+        auto node = std::make_shared<DeviceNode>(std::move(opts), rc);
+        rclcpp::spin(node);
+    }
+    catch (const std::exception& e)
+    {
+        log::error("device", e.what());
+        rc = kFailed;
+    }
+    if (rclcpp::ok()) rclcpp::shutdown();
     return rc;
 }
 

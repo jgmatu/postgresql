@@ -35,12 +35,22 @@ jobs:
           apt-get install -y --no-install-recommends \
             build-essential cmake ninja-build git ca-certificates patch pkg-config \
             libpq-dev libbotan-3-dev libboost-json-dev libssl-dev libgtest-dev libgmock-dev \
-            postgresql-client openssl curl jq
+            postgresql-client openssl curl gnupg jq
+          curl -fsSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key \
+            | gpg --dearmor -o /usr/share/keyrings/ros-archive-keyring.gpg
+          . /etc/os-release
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu ${VERSION_CODENAME} main" \
+            > /etc/apt/sources.list.d/ros2.list
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ros-lyrical-rclcpp ros-lyrical-std-msgs ros-lyrical-rosidl-default-generators
 
       - uses: actions/checkout@v4
 
       - name: Configure
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DPGDEMO_BUILD_TESTS=ON
+        run: |
+          . /opt/ros/lyrical/setup.sh
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DPGDEMO_BUILD_TESTS=ON
 
       - name: Build
         run: cmake --build build
@@ -74,12 +84,22 @@ jobs:
           apt-get install -y --no-install-recommends \
             build-essential cmake ninja-build git ca-certificates patch pkg-config \
             libpq-dev libbotan-3-dev libboost-json-dev libssl-dev \
-            doxygen graphviz
+            doxygen graphviz curl gnupg
+          curl -fsSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key \
+            | gpg --dearmor -o /usr/share/keyrings/ros-archive-keyring.gpg
+          . /etc/os-release
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu ${VERSION_CODENAME} main" \
+            > /etc/apt/sources.list.d/ros2.list
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ros-lyrical-rclcpp ros-lyrical-std-msgs ros-lyrical-rosidl-default-generators
 
       - uses: actions/checkout@v4
 
       - name: Configure
-        run: cmake -S . -B build -G Ninja -DPGDEMO_BUILD_TESTS=OFF
+        run: |
+          . /opt/ros/lyrical/setup.sh
+          cmake -S . -B build -G Ninja -DPGDEMO_BUILD_TESTS=OFF
 
       - name: Build the docs target
         run: cmake --build build --target docs

@@ -1,7 +1,9 @@
 #pragma once
 
+#include <array>
 #include <chrono>
 #include <cstdint>
+#include <deque>
 #include <filesystem>
 #include <functional>
 #include <map>
@@ -9,6 +11,7 @@
 #include <optional>
 #include <string>
 #include <type_traits>
+#include <variant>
 #include <vector>
 
 #include <boost/asio.hpp>
@@ -17,6 +20,8 @@
 
 #include <db/DatabaseManager.hpp>
 
+#include "Protocol.hpp"
+
 namespace pgdemo::controller {
 
 /// Settings of the device supervisor (command-line options of the controller).
@@ -24,8 +29,7 @@ struct FleetOptions
 {
     std::string device_bin;                         ///< pgdemo-device executable
     std::filesystem::path devices_dir;              ///< one key directory per device, 0700
-    std::filesystem::path socket_path;              ///< Unix socket the devices connect to
-    std::size_t max_devices{16};                    ///< device processes run at once
+    std::size_t max_devices{16};                    ///< device processes and attached nodes at once
     std::chrono::seconds pending_max_age{600};      ///< config requests older than this become TIMEOUT
     std::chrono::seconds enrollment_timeout{120};   ///< enrollments open longer than this become EXPIRED
     std::chrono::seconds maintenance_interval{3600}; ///< partition maintenance period
@@ -38,27 +42,40 @@ enum class Launch {
     Rotate, ///< new key and certificate, then run
 };
 
-/// One connection from a device process.
+/// One worker that has said hello and is being supervised.
 struct Session
 {
-    /// Take over an accepted connection.
-    explicit Session(boost::asio::local::stream_protocol::socket s);
+    /// `downlink` publishes manager messages. `inbox` carries what the worker sends back.
+    Session(boost::asio::any_io_executor ex, std::string name, Downlink downlink);
 
-    /// Queue a frame for the writer. Dropped if the session is closing.
-    void send(boost::json::object msg);
-    /// Shut the socket and both channels down. Idempotent.
+    /// Publish `bye` for this worker. Dropped once `close()`d.
+    void send_bye(std::string reason);
+    /// Publish the issued certificate.
+    void send_certificate(std::string pem);
+    /// Publish a refusal from the CA.
+    void send_rejected(std::string code, std::string detail);
+    /// Publish a 32-byte challenge nonce.
+    void send_challenge(const std::array<unsigned char, 32>& nonce);
+    /// Publish applied configuration.
+    void send_config(const db::AppliedConfig& config);
+    /// Queue an uplink message for the session coroutine. Dropped if the inbox is full or closed.
+    void post(Uplink msg);
+    /// Close both channels. Idempotent.
     void close();
 
-    /// The connection to the device process.
-    boost::asio::local::stream_protocol::socket socket;
-    /// Frames to the device, written by one writer coroutine.
-    boost::asio::experimental::channel<void(boost::system::error_code, boost::json::object)> outbox;
+    /// Messages from the worker, read by the session coroutine.
+    boost::asio::experimental::channel<void(boost::system::error_code, Uplink)> inbox;
     /// The enrollment decision, delivered on `enrollment_events`.
     boost::asio::experimental::channel<void(boost::system::error_code, db::EnrollmentOutcome)> decision;
-    /// When the device last sent anything; a silent one is killed (`heartbeat_loop()`).
+    /// When the worker last sent anything; a silent one is dropped (`heartbeat_loop()`).
     std::chrono::steady_clock::time_point last_frame;
-    /// Authenticated and streaming: configuration changes go to `outbox`.
+    /// Authenticated and streaming: configuration changes go out through `send_config()`.
     bool online{false};
+
+private:
+    std::string name_;
+    Downlink downlink_;
+    bool closed_{false};
 };
 
 /**
@@ -70,8 +87,11 @@ struct Session
  * io thread with the result. Listener callbacks arrive on the listener
  * thread and only post to the io thread (`notify()`).
  *
+ * A ROS thread delivers worker topics through `on_hello()` and `on_uplink()`,
+ * which only post to this thread, the same way the listener thread posts notifications.
+ *
  * Coroutines:
- * - `accept_loop()`: one `device_session()` per connection
+ * - one `device_session()` per `hello`
  * - `reap_loop()`: SIGCHLD, `waitpid(WNOHANG)`, restart with backoff
  * - `heartbeat_loop()`: `last_seen`, stuck processes
  * - `maintenance_loop()`: partitions, expired enrollments, identity sweep, listener health
@@ -84,24 +104,30 @@ public:
      * @param io   the single thread that owns the fleet; signals are delivered here
      * @param pool threads for blocking database calls (`on_db()`)
      * @param db   connected, listener not yet running
-     * @param opts device binary, directories and limits
+     * @param opts     device binary, directories and limits
+     * @param downlink publishes on `pgdemo/manager`; called on the io thread
      */
     Fleet(boost::asio::io_context& io, boost::asio::thread_pool& pool, db::DatabaseManager& db,
-          FleetOptions opts);
+          FleetOptions opts, Downlink downlink);
     ~Fleet();
 
     Fleet(const Fleet&) = delete;
     Fleet& operator=(const Fleet&) = delete;
 
-    /// Create the devices directory and bind the socket. Before `start()`.
-    /// Throws if another controller answers on the socket; a stale one is replaced.
-    void open_socket();
+    /// Create the devices directory and take `devices_dir/.controller.lock`.
+    /// Throws if another controller on this machine already holds it. Before `start()`.
+    void acquire_lock();
 
     /// Spawn every coroutine. The io_context stops when shutdown has finished.
     void start();
 
     /// Listener callback, any thread: `{"channel", "payload"}`, posted to the io thread.
     void notify(boost::json::object msg);
+
+    /// A `hello` from a worker, any thread: posted to the io thread.
+    void on_hello(pgdemo_msgs::msg::Hello hello);
+    /// One other worker message, any thread: posted to the io thread.
+    void on_uplink(Uplink msg);
 
     /// 0 after a signal, 1 when the listener connection was lost.
     [[nodiscard]] int exit_code() const noexcept { return exit_code_; }
@@ -149,19 +175,22 @@ private:
 
     // Coroutines.
     boost::asio::awaitable<void> boot();
-    boost::asio::awaitable<void> accept_loop();
     boost::asio::awaitable<void> reap_loop();
     boost::asio::awaitable<void> heartbeat_loop();
     boost::asio::awaitable<void> maintenance_loop();
     boost::asio::awaitable<void> signal_loop();
     boost::asio::awaitable<void> shutdown();
 
-    boost::asio::awaitable<void> device_session(boost::asio::local::stream_protocol::socket socket);
+    boost::asio::awaitable<void> device_session(std::shared_ptr<Session> session, std::string name,
+                                               pgdemo_msgs::msg::Hello hello);
     boost::asio::awaitable<void> obtain_certificate(std::shared_ptr<Session> session, std::string name);
     boost::asio::awaitable<void> authenticate(std::shared_ptr<Session> session, std::string name);
     boost::asio::awaitable<void> serve(std::shared_ptr<Session> session, std::string name);
     boost::asio::awaitable<void> read_samples(std::shared_ptr<Session> session, db::Device device);
-    boost::asio::awaitable<void> write_frames(std::shared_ptr<Session> session);
+    boost::asio::awaitable<Uplink> receive(std::shared_ptr<Session> session,
+                                           std::chrono::steady_clock::duration timeout, std::string_view what);
+    boost::asio::awaitable<void> telemetry_loop();
+    boost::asio::awaitable<void> flush_telemetry();
 
     // Events.
     boost::asio::awaitable<void> on_enrollment_requested(std::int64_t request_id);
@@ -172,6 +201,9 @@ private:
 
     void apply_enrollment(const db::Enrollment& e);
     void apply_device(const db::Device& d);
+    void admit(pgdemo_msgs::msg::Hello hello);
+    void enqueue_telemetry(std::variant<db::DummySample, db::TrackSample> sample);
+    void send_bye(const std::string& device, const std::string& reason);
 
     // Process table.
     void reconcile(Slot& s);
@@ -194,13 +226,25 @@ private:
     boost::asio::strand<boost::asio::thread_pool::executor_type> writes_;
     db::DatabaseManager& db_;
     FleetOptions opts_;
+    /// Publishes on `pgdemo/manager`. Empty callbacks drop the message.
+    Downlink downlink_;
+    /// Samples from every worker, flushed by `telemetry_loop()` on this thread.
+    std::deque<std::variant<db::DummySample, db::TrackSample>> telemetry_;
+    /// Samples dropped because `telemetry_` was at `kTelemetryCapacity`.
+    std::size_t telemetry_dropped_{0};
+    /// Wakes `telemetry_loop()` early once a batch is full.
+    boost::asio::steady_timer telemetry_timer_;
 
-    boost::asio::local::stream_protocol::acceptor acceptor_;
     /// Registered at construction, before the first fork, so no exit is missed.
     boost::asio::signal_set sigchld_;
     boost::asio::signal_set stop_signals_;
     std::map<std::string, Slot> slots_;
     std::map<pid_t, std::string> pids_;
+    /// `hello` that arrived before the slot existed.
+    std::map<std::string, pgdemo_msgs::msg::Hello> pending_hellos_;
+    /// The one uplink message that arrived before the session existed.
+    std::map<std::string, Uplink> early_;
+    int lock_fd_{-1};
     bool shutting_down_{false};
     int exit_code_{0};
 };

@@ -3,6 +3,7 @@
 #include <sys/socket.h>
 
 #include <format>
+#include <map>
 
 #include <log/Log.hpp>
 
@@ -358,6 +359,106 @@ void DatabaseManager::write_scalar_sample(const DummySample& sample)
              " SELECT device_id, value, seq, updated_at FROM up",
              pqxx::params{sample.device_id, sample.value, sample.seq})
         .no_rows();
+    txn.commit();
+}
+
+void DatabaseManager::write_telemetry_batch(const std::vector<DummySample>& scalar, const std::vector<TrackSample>& gps)
+{
+    if (scalar.empty() && gps.empty()) return;
+    auto lease = pool_.acquire();
+    pqxx::work txn(lease.get());
+
+    if (!scalar.empty())
+    {
+        pqxx::params history;
+        std::string values;
+        for (std::size_t i = 0; i < scalar.size(); ++i)
+        {
+            if (i != 0) values += ',';
+            const int b = static_cast<int>(i * 3 + 1);
+            values += std::format("(${}, ${}, ${}, clock_timestamp())", b, b + 1, b + 2);
+            history.append(scalar[i].device_id);
+            history.append(scalar[i].value);
+            history.append(scalar[i].seq);
+        }
+        txn.exec("INSERT INTO telemetry_scalar (device_id, value, seq, recorded_at) VALUES " + values, history).no_rows();
+
+        std::map<int, const DummySample*> latest;
+        for (const auto& sample : scalar)
+        {
+            const auto it = latest.find(sample.device_id);
+            if (it == latest.end() || sample.seq >= it->second->seq) latest[sample.device_id] = &sample;
+        }
+        pqxx::params state;
+        std::string rows;
+        int n = 0;
+        for (const auto& [_, sample] : latest)
+        {
+            if (n != 0) rows += ',';
+            const int b = n * 3 + 1;
+            rows += std::format("(${}, ${}, NULL, ${}, clock_timestamp())", b, b + 1, b + 2);
+            state.append(sample->device_id);
+            state.append(sample->value);
+            state.append(sample->seq);
+            ++n;
+        }
+        txn.exec("INSERT INTO device_state (device_id, value, position, seq, updated_at) VALUES " + rows +
+                     " ON CONFLICT (device_id) DO UPDATE SET value = EXCLUDED.value, position = NULL,"
+                     " seq = EXCLUDED.seq, updated_at = EXCLUDED.updated_at",
+                 state)
+            .no_rows();
+    }
+
+    if (!gps.empty())
+    {
+        pqxx::params history;
+        std::string values;
+        for (std::size_t i = 0; i < gps.size(); ++i)
+        {
+            if (i != 0) values += ',';
+            const int b = static_cast<int>(i * 6 + 1);
+            values += std::format("(${}, ST_Project(ST_SetSRID(ST_MakePoint(${}, ${}), 4326)::geography,"
+                                  " ${}::double precision, ${}::double precision), ${}, clock_timestamp())",
+                                  b, b + 1, b + 2, b + 3, b + 4, b + 5);
+            history.append(gps[i].device_id);
+            history.append(gps[i].origin_lon);
+            history.append(gps[i].origin_lat);
+            history.append(gps[i].radius_m);
+            history.append(gps[i].bearing_rad);
+            history.append(gps[i].seq);
+        }
+        txn.exec("INSERT INTO telemetry_gps (device_id, position, seq, recorded_at) VALUES " + values, history).no_rows();
+
+        std::map<int, const TrackSample*> latest;
+        for (const auto& sample : gps)
+        {
+            const auto it = latest.find(sample.device_id);
+            if (it == latest.end() || sample.seq >= it->second->seq) latest[sample.device_id] = &sample;
+        }
+        pqxx::params state;
+        std::string rows;
+        int n = 0;
+        for (const auto& [_, sample] : latest)
+        {
+            if (n != 0) rows += ',';
+            const int b = n * 6 + 1;
+            rows += std::format("(${}, NULL, ST_Project(ST_SetSRID(ST_MakePoint(${}, ${}), 4326)::geography,"
+                                " ${}::double precision, ${}::double precision), ${}, clock_timestamp())",
+                                b, b + 1, b + 2, b + 3, b + 4, b + 5);
+            state.append(sample->device_id);
+            state.append(sample->origin_lon);
+            state.append(sample->origin_lat);
+            state.append(sample->radius_m);
+            state.append(sample->bearing_rad);
+            state.append(sample->seq);
+            ++n;
+        }
+        txn.exec("INSERT INTO device_state (device_id, value, position, seq, updated_at) VALUES " + rows +
+                     " ON CONFLICT (device_id) DO UPDATE SET value = NULL, position = EXCLUDED.position,"
+                     " seq = EXCLUDED.seq, updated_at = EXCLUDED.updated_at",
+                 state)
+            .no_rows();
+    }
     txn.commit();
 }
 

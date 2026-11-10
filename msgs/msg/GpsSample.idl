@@ -1,0 +1,12 @@
+module pgdemo_msgs {
+  module msg {
+    struct GpsSample {
+      string device;
+      int64 seq;
+      double origin_lon;
+      double origin_lat;
+      double radius_m;
+      double bearing_rad;
+    };
+  };
+};

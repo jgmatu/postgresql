@@ -40,7 +40,7 @@ flowchart LR
     end
     subgraph zoneB ["zone B"]
         controller["pgdemo-controller<br/>verifies, --max-devices N"]
-        sock(("run/devices/.controller.sock"))
+        topics(("pgdemo/worker, pgdemo/manager"))
         d1["pgdemo-device dummy1"]
         d2["pgdemo-device sensor-a"]
         devKeys[("device-keys: key.pem per device")]
@@ -50,9 +50,9 @@ flowchart LR
     server -->|"reads CSR"| enroll
     controller -->|"fork + execv"| d1
     controller -->|"fork + execv"| d2
-    d1 --> sock
-    d2 --> sock
-    sock --> controller
+    d1 --> topics
+    d2 --> topics
+    topics --> controller
     d1 --- devKeys
     controller -->|"stores CSR"| enroll
     controller -->|"reads"| rootCa
@@ -153,8 +153,7 @@ sequenceDiagram
     S->>P: INSERT device_enrollment PENDING
     P-->>C: NOTIFY enrollment_requested
     C->>D: fork + execv --enroll request_id
-    D->>C: hello {device, mode enroll}
-    C->>C: SO_PEERCRED: a pid this controller started, under this name
+    D->>C: pgdemo/worker/control/hello
     D->>D: new P-384 key, key.next.pem (0600)
     D->>C: csr {PEM}
     C->>P: UPDATE csr_pem, CSR_SUBMITTED
@@ -184,88 +183,65 @@ sequenceDiagram
 
 ## 4. Device processes
 
-`pgdemo-device` ([`device/src/main.cpp`](../device/src/main.cpp)) is one simulated device. It has one thread and one `io_context`, no database access, and talks only to the controller's Unix socket. The controller starts it with:
+`pgdemo-device` ([`device/src/main.cpp`](../device/src/main.cpp)) is one worker and one ROS 2 node. It has no database access. It publishes `pgdemo/worker/` and subscribes to `pgdemo/manager/`. The manager starts it with:
 
 ```text
-pgdemo-device --name NAME --type TYPE --payload scalar|gps --socket PATH --dir run/devices/NAME
+pgdemo-device --name NAME --type TYPE --payload scalar|gps --dir run/devices/NAME
               [--enroll REQUEST_ID | --rotate REQUEST_ID]
 ```
 
-Exit codes: `0` bye or signal, `1` protocol or I/O error, `2` usage, `3` enrollment refused, `4` no key or certificate on disk.
+The same binary, started on another host in the same ROS domain, is admitted when its `hello` names a slot the controller wants and no session is attached yet. Exit codes: `0` bye or signal, `1` protocol or I/O error, `2` usage, `3` enrollment refused, `4` no key or certificate on disk.
 
-Once authenticated, three coroutines share the socket ([`device/src/Stream.hpp`](../device/src/Stream.hpp)), joined with `||` so that the first one to end cancels the others:
+`hello` is published transient-local and repeated once a second until the challenge, so a controller that starts while the node is waiting still sees it. After authentication, [`device/src/Stream.hpp`](../device/src/Stream.hpp) emits a `sample` every `rate_ms` while active and a `heartbeat` every 5 s while paused. A `config` frame applies at once and the timer is re-armed at the new rate. `bye`, SIGINT or SIGTERM ends the process.
 
-| Coroutine | Does |
-|---|---|
-| `produce()` | The only writer. A `sample` every `rate_ms` while active, a `heartbeat` every 5 s while paused. Waits on a `steady_timer`. |
-| `listen()` | Applies `config` frames and cancels the producer's timer, so a new rate takes effect at once. Returns on `bye`. |
-| `on_signal()` | Returns on SIGINT or SIGTERM. |
+### Messages
 
-Asio's `a || b` only stops at the first branch that *succeeds*. Each branch is wrapped in `wire::settle()`, which turns an exception into a value, so an EOF from the controller ends the stream instead of leaving `on_signal()` waiting.
-
-### Frames
-
-[`libs/wire`](../libs/wire/include/wire/Frame.hpp): a 4-byte big-endian length followed by a JSON object with a `type`, at most 64 KiB. A larger or empty frame, or one that is not an object, ends the connection.
-
-| Direction | `type` | Members |
-|---|---|---|
-| device to controller | `hello` | `device`, `mode` (`run`, `enroll`, `rotate`), `request_id` |
-| device to controller | `csr` | `csr` (PEM) |
-| controller to device | `cert` or `rejected` | `cert` (PEM), or `code`, `detail` |
-| controller to device | `challenge` | `nonce` (base64, 32 bytes) |
-| device to controller | `proof` | `cert` (PEM), `signature` (base64, raw r‖s) |
-| device to controller | `error` | `code`, `detail` |
-| controller to device | `config` | `device_id`, `rate_ms`, `amplitude`, `is_active` |
-| device to controller | `sample` | `seq`, `value`, or `seq`, `origin_lon`, `origin_lat`, `radius_m`, `bearing_rad` |
-| device to controller | `heartbeat` | none |
-| controller to device | `bye` | `reason` |
+The envelope is [msgs/README.md](../msgs/README.md): one struct per topic. Workers publish `pgdemo/worker/` (`hello`, `heartbeat`, `error`, `csr`, `proof`, telemetry). The manager publishes `pgdemo/manager/` (`bye`, `challenge`, `certificate`, `rejected`, `config`). The nonce is 32 raw bytes and the proof signature is 96 raw bytes (ECDSA P-384, `r‖s`). A worker ignores a manager message whose `device` is not its name. The process lifecycle is [controller/README.md](../controller/README.md).
 
 ### Supervision in the controller
 
-`pgdemo-controller` ([`controller/src/Fleet.hpp`](../controller/src/Fleet.hpp)) runs the fleet on one `io_context` thread, which alone owns the process table, the slots and the sessions, so none of them needs a lock. libpqxx blocks, so every database call runs on a thread pool through `co_await on_db(...)`, and the coroutine resumes on the io thread. Listener callbacks arrive on the libpqxx listener thread and only `post` to the io thread.
+`pgdemo-controller` ([`controller/src/Fleet.hpp`](../controller/src/Fleet.hpp)) runs the fleet on one `io_context` thread, which alone owns the process table, the slots and the sessions, so none of them needs a lock. libpqxx blocks, so every database call runs on a thread pool through `co_await on_db(...)`, and the coroutine resumes on the io thread. The listener thread and the ROS executor only `post` onto that thread.
 
 ```mermaid
 flowchart TB
     subgraph ctl ["pgdemo-controller"]
         subgraph ioThread ["io_context thread: fleet state"]
-            acceptor["accept_loop()"]
             reaper["reap_loop() SIGCHLD"]
             hb["heartbeat_loop()"]
             maint["maintenance_loop()"]
-            sess1["device_session dummy1<br/>read_samples || write_frames"]
+            sess1["device_session dummy1"]
             sess2["device_session sensor-a"]
         end
         dbPool["thread_pool: on_db()<br/>blocking libpqxx"]
         listener["libpqxx listener thread"]
+        ros["ROS executor"]
     end
-    subgraph devProc ["pgdemo-device, one thread"]
-        produce["produce()"]
-        listen["listen()"]
-        sig["on_signal()"]
+    subgraph devProc ["pgdemo-device node"]
+        produce["sample timer"]
+        listen["pgdemo/manager"]
     end
     listener -->|"asio::post"| ioThread
+    ros -->|"on_hello, on_uplink"| ioThread
     sess1 -->|"co_await on_db"| dbPool
-    acceptor -->|"co_spawn"| sess1
-    acceptor -->|"co_spawn"| sess2
     reaper -->|"fork + execv"| devProc
-    produce -->|"Unix socket"| sess1
-    sess1 -->|"config, bye"| listen
+    produce -->|"pgdemo/worker"| sess1
+    sess1 -->|"pgdemo/manager"| listen
 ```
 
 - **Starting a process.** `argv` is built before `fork()`. Between `fork()` and `execv()` the child only makes async-signal-safe calls: default signal dispositions, an empty signal mask, `prctl(PR_SET_PDEATHSIG, SIGTERM)` (plus a `getppid()` check for a parent that died first), and `close_range(3, ...)` so that no descriptor of the controller (sockets, libpq connections) leaks into the device.
 - **Signals.** SIGINT, SIGTERM and SIGCHLD are blocked before any thread exists, so the pool and the listener inherit the mask, and only the io thread receives them through `signal_set`.
 - **Reaping and restarts.** `reap_loop()` calls `waitpid(-1, WNOHANG)` on each SIGCHLD. A process that ends while its device is still `ACTIVE` is restarted after an exponential backoff of 1 s to 30 s, reset once a process has stayed online for 60 s. `AUTH_FAILED` and `DISABLED` are not retried until the identity changes (rotation, lifted hold).
-- **Stuck processes.** A device that sends nothing for 30 s (it heartbeats every 5 s) is killed and restarted.
+- **Stuck processes.** A device that sends nothing for 30 s (it heartbeats every 5 s) is killed and restarted when this controller forked it. A node started elsewhere is released; there is no pid to signal.
 - **Capacity.** `--max-devices N` (16) bounds the number of processes. Devices over the limit are `UNMANAGED` and take the next free slot; an enrollment that finds no slot is refused with `CAPACITY`.
 - **Shutdown.** `bye` and SIGTERM to every process, up to 5 s for them to be reaped, SIGKILL for the rest, then every session goes `OFFLINE`.
 
 ## 5. Authentication
 
-A connection is accepted only if the kernel vouches for it. `getsockopt(SO_PEERCRED)` returns the peer's pid and uid. The pid must be one this controller forked and is still supervising, and the uid must be the controller's own. Any other connection is closed before a byte is read. The socket is `run/devices/.controller.sock` (0600) in a 0700 directory.
+There is no Unix socket and no `SO_PEERCRED`. Any participant in the ROS domain can publish. Admission is the `hello`, and possession of the key is the challenge that follows.
 
-The process then proves possession of the key of its certificate:
+The process proves possession of the key of its certificate:
 
-1. `hello` must name the device the pid was started for, in the mode it was started with.
+1. `hello` names the device and the mode it was started with (`run`, `enroll` or `rotate`). A repeated `hello` during the handshake is the retransmission; a `hello` after the device is online is refused with `bye`.
 2. The controller sends 32 random bytes, `challenge.nonce`, valid for this connection only, with a 5 s deadline.
 3. The device signs, with ECDSA P-384 and SHA-384:
 
@@ -332,7 +308,7 @@ client/pgdemo.sh pki crl | openssl crl -noout -text   # the superseded serial is
 | Path | Contents |
 |---|---|
 | `run/ca/ca.key`, `run/ca/ca.crt` | the root CA (directory 0700, key 0600) |
-| `run/devices/.controller.sock` | the controller's socket (0600). A second controller that finds it answering exits instead of taking it over |
+| `run/devices/.controller.lock` | an exclusive `fcntl` lock. A second controller on this machine exits instead of taking the fleet over |
 | `run/devices/NAME/key.pem`, `cert.pem` | one device's identity (directory 0700, key 0600) |
 | `run/devices/NAME/key.next.pem`, `cert.next.pem` | only while a rotation is in progress |
 
@@ -356,7 +332,7 @@ psql -h /var/run/postgresql -d pgdemo -c 'SELECT device, identity, session, seri
 | CSR with another `CN`, an RSA or P-256 key, a bad signature or a CA request | `REJECTED` with `CSR_SUBJECT`, `CSR_KEY`, `CSR_SIGNATURE` or `CSR_CA`; the device exits with code 3 and nothing is created. |
 | Device process dies during enrollment | `REJECTED` with `DEVICE_EXITED`; the new key is discarded. |
 | Device key replaced or corrupted on disk | `AUTH_FAILED` (`BAD_PROOF`), not retried. `rotate` recovers it. |
-| A process the controller did not start connects | Closed after `SO_PEERCRED`; nothing is read. |
+| A node the controller did not start publishes `hello` | Admitted when that name is a wanted slot with no session yet, then challenged like a child. A second `hello` once the device is online gets `bye`. |
 | Certificate revoked while the device is online | `device_events REVOKED`: `bye`, SIGTERM, `DISABLED`. The next handshake would fail anyway (`CERT_REVOKED`). |
 | Certificate expires | The maintenance sweep marks it `EXPIRED` and stops the process; `rotate` issues a new one. |
 | Controller stopped or crashed | Devices get `bye` and SIGTERM, or `PR_SET_PDEATHSIG` if the controller died. At start-up every `STARTING` or `ONLINE` session is reset to `OFFLINE` and the processes start again. |

@@ -4,8 +4,10 @@
 #include <cstdint>
 #include <numbers>
 #include <string_view>
+#include <variant>
 
-#include <boost/json.hpp>
+#include <pgdemo_msgs/msg/gps_sample.hpp>
+#include <pgdemo_msgs/msg/scalar_sample.hpp>
 
 /// Signal generators of the device process. Pure functions of the tick.
 namespace pgdemo::device {
@@ -16,6 +18,9 @@ enum class Generator {
     Sawtooth, ///< `a·(seq mod 50)/50` plus 5 % gaussian noise
     GpsOrbit, ///< circle of radius `a` metres around Madrid, one turn per 40 ticks
 };
+
+/// One sample, scalar or GPS. The node stamps `device` before publishing.
+using Sample = std::variant<pgdemo_msgs::msg::ScalarSample, pgdemo_msgs::msg::GpsSample>;
 
 /// GPS payloads orbit, `sawtooth` ramps, every other scalar type is a sine.
 constexpr Generator generator_for(std::string_view type_id, std::string_view payload) noexcept
@@ -54,26 +59,34 @@ inline constexpr double kOriginLon = -3.7038;
 /// Latitude of that origin.
 inline constexpr double kOriginLat = 40.4168;
 
-/// `sample` frame for tick `seq`. PostGIS projects GPS fixes from the origin.
-inline boost::json::object make_sample(Generator g, std::int64_t seq, double amplitude, double phase,
-                                       double noise)
+/// Sample for tick `seq`. PostGIS projects GPS fixes from the origin.
+inline Sample make_sample(Generator g, std::int64_t seq, double amplitude, double phase, double noise)
 {
-    boost::json::object m{{"type", "sample"}, {"seq", seq}};
     switch (g)
     {
     case Generator::GpsOrbit:
-        m["origin_lon"] = kOriginLon;
-        m["origin_lat"] = kOriginLat;
-        m["radius_m"] = amplitude;
-        m["bearing_rad"] = angle_at(seq, phase);
-        break;
+    {
+        pgdemo_msgs::msg::GpsSample m;
+        m.seq = seq;
+        m.origin_lon = kOriginLon;
+        m.origin_lat = kOriginLat;
+        m.radius_m = amplitude;
+        m.bearing_rad = angle_at(seq, phase);
+        return m;
+    }
     case Generator::Sawtooth:
-        m["value"] = sawtooth(seq, amplitude, noise);
-        break;
+    {
+        pgdemo_msgs::msg::ScalarSample m;
+        m.seq = seq;
+        m.value = sawtooth(seq, amplitude, noise);
+        return m;
+    }
     case Generator::Sine:
-        m["value"] = sine(seq, amplitude, phase);
         break;
     }
+    pgdemo_msgs::msg::ScalarSample m;
+    m.seq = seq;
+    m.value = sine(seq, amplitude, phase);
     return m;
 }
 

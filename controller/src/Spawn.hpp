@@ -2,21 +2,10 @@
 
 #include <sys/types.h>
 
-#include <optional>
 #include <string>
 #include <vector>
 
 namespace pgdemo::controller {
-
-/// Credentials of the process at the other end of a Unix socket.
-struct PeerCredentials
-{
-    pid_t pid{0}; ///< process id, as the kernel recorded it at connect()
-    uid_t uid{0}; ///< effective user id
-};
-
-/// `SO_PEERCRED` of a connected Unix socket, or `std::nullopt` on error.
-std::optional<PeerCredentials> peer_credentials(int fd) noexcept;
 
 /**
  * @brief `fork()` + `execv(argv[0], argv)`.

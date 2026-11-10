@@ -1,0 +1,8 @@
+module pgdemo_msgs {
+  module msg {
+    struct Bye {
+      string device;
+      string reason;
+    };
+  };
+};

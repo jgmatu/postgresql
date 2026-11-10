@@ -190,6 +190,19 @@ public:
     void write_gps_sample(const TrackSample& sample);
 
     /**
+     * @brief Append a batch of samples and refresh `device_state` once per device.
+     *
+     * One transaction, one pool lease. Every sample is inserted into its history
+     * table in one statement per payload. `device_state` is updated with the
+     * highest `seq` of that device in the batch. Scalar rows set `position`
+     * NULL and GPS rows set `value` NULL, matching the table check.
+     *
+     * @param scalar samples for `telemetry_scalar`
+     * @param gps    samples for `telemetry_gps`
+     */
+    void write_telemetry_batch(const std::vector<DummySample>& scalar, const std::vector<TrackSample>& gps);
+
+    /**
      * @brief Every device with its type and current certificate (controller, no SET ROLE).
      * @return devices ordered by `device_id`, whatever their identity
      */

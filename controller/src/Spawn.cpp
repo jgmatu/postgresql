@@ -1,7 +1,6 @@
 #include "Spawn.hpp"
 
 #include <sys/prctl.h>
-#include <sys/socket.h>
 #include <unistd.h>
 
 #include <cerrno>
@@ -9,14 +8,6 @@
 #include <system_error>
 
 namespace pgdemo::controller {
-
-std::optional<PeerCredentials> peer_credentials(int fd) noexcept
-{
-    ucred cred{};
-    socklen_t len = sizeof cred;
-    if (::getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cred, &len) != 0 || len != sizeof cred) return std::nullopt;
-    return PeerCredentials{cred.pid, cred.uid};
-}
 
 pid_t spawn_process(const std::vector<std::string>& args)
 {

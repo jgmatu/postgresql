@@ -1,0 +1,11 @@
+module pgdemo_msgs {
+  module msg {
+    struct Config {
+      string device;
+      int32 device_id;
+      int32 rate_ms;
+      double amplitude;
+      boolean is_active;
+    };
+  };
+};

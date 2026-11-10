@@ -6,7 +6,8 @@
 #
 # Secrets stay in their zone: the device CA key (ca-keys) is mounted only by
 # init, which creates it, and server, which signs CSRs with it; the device
-# keys and the controller socket (device-keys) only by controller.
+# keys (device-keys) only by controller. Device traffic stays inside that
+# container: the children publish on the controller's ROS domain.
 #
 # Usage (from the repository root):
 #   cp docker/.env.example docker/.env      # then set real passwords

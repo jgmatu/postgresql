@@ -1,0 +1,7 @@
+module pgdemo_msgs {
+  module msg {
+    struct Heartbeat {
+      string device;
+    };
+  };
+};

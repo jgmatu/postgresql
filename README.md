@@ -6,7 +6,7 @@ The demo models a small IoT fleet of simulated devices. A device is a row of `de
 
 - **Reactive IPC across network zones.** The server (zone A) and the controller (zone B) share no socket, no broker and no addresses. Each one only knows the database.
 - **Device identity by certificate.** Every device is bound to an X.509 certificate (ECDSA P-384) signed by an internal root CA. The device process generates its key and a CSR, the server signs it, and the database records it through one `SECURITY DEFINER` function. A device is never without a certificate and may have had several; deleting its current certificate deletes it; revoking it (CRL) takes it out of service without deleting it. See [docs/DEVICE_PKI.md](docs/DEVICE_PKI.md).
-- **Supervised device processes.** The controller starts each device with `fork` + `execv`, authenticates it over a Unix socket (`SO_PEERCRED` and a signed challenge), restarts it with a backoff when it dies, and stops it when its certificate is revoked. Both sides use Boost.Asio C++20 coroutines; `--max-devices` bounds the fleet.
+- **Supervised device processes.** The controller is the manager. It starts each device, a worker, with `fork` + `execv`. The worker publishes `pgdemo/worker/` and subscribes to `pgdemo/manager/`, proves its key with a signed challenge, and is restarted with a backoff when it dies. A node started on another host in the same ROS domain is admitted the same way. Workers do not talk to each other or to the database. `--max-devices` bounds the fleet.
 - **Channel multiplexing on one connection.** One channel per payload shape, `telemetry_scalar` and `telemetry_gps`, plus `device_events`, three enrollment channels and three control-plane channels, arrive on a single `LISTEN` socket, whatever the number of devices. The device travels in the payload, and SSE clients can filter by it.
 - **PostGIS.** GPS devices send an origin, a radius and a bearing; `ST_Project` builds the point, and the same point is appended to the monthly telemetry.
 - **Desired vs applied configuration.** An admin posts a desired configuration. The controller validates it and applies or rejects it. The HTTP request waits for the outcome through a request-id **Dispatcher**, so a concurrent, synchronous API sits on top of an asynchronous queue.
@@ -39,7 +39,7 @@ flowchart LR
     enrollment -. "NOTIFY enrollment_csr" .-> server
     server -- "sign, issue / revoke / DELETE" --> registry
     registry -. "NOTIFY device_events" .-> controller
-    devices <-- "Unix socket: challenge, samples, config" --> controller
+    devices <-- "ROS 2: pgdemo/worker, pgdemo/manager" --> controller
     server -- "INSERT desired" --> queue
     queue -. "NOTIFY config_requested" .-> controller
     controller -- "UPSERT applied / errors" --> applied
@@ -56,12 +56,12 @@ Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design: sequence diagr
 | Path | What it is |
 |---|---|
 | [`sql/`](sql) | Roles, schema, device identity, partition maintenance, triggers, views and grants (`00`–`05`, loaded in order). [sql/README.md](sql/README.md) describes the schema: entity diagram, identity constraints, partitions, channels and privileges. |
-| [`libs/db`](libs/db) | `DatabaseManager`: query connection pool, listener connection and thread, callback registry, role-scoped transactions. |
+| [`libs/db`](libs/db) | `DatabaseManager` and [`ConnectionPool`](libs/db/include/db/ConnectionPool.hpp): a fixed set of query connections the manager checks out for every worker's writes. Workers never hold a connection. One listener connection and thread sit beside the pool. |
 | [`libs/auth`](libs/auth) | `PasswordHasher` (Argon2id) and `JwtManager` (ES384), both on Botan 3. |
 | [`libs/pki`](libs/pki) | Device PKI on Botan 3: `CertificateAuthority` (sign CSRs, build the CRL), `DeviceKey` (P-384 key and CSR), `CertVerifier` (chain, subject, CRL), and the challenge-response proof. |
-| [`libs/wire`](libs/wire) | Frames between the controller and its devices (4-byte length + JSON) as Boost.Asio coroutines, and `settle()` for racing coroutines that may throw. |
+| [`msgs/`](msgs) | ROS 2 interface contract between the manager and its workers: one struct per topic, under `pgdemo/manager/` and `pgdemo/worker/`. [msgs/README.md](msgs/README.md) lists every topic, its publisher and its fields. |
 | [`server/`](server) | `pgdemo-server`: Oat++ API, `AuthInterceptor`, `Dispatcher`, `EventHub` for Server-Sent Events, and `CertificateSigner`, the CA. |
-| [`controller/`](controller) | `pgdemo-controller`: supervises one `pgdemo-device` process per device (`fork` + `execv`, Unix socket, challenge-response, restart with backoff), writes their samples and works the configuration queue. |
+| [`controller/`](controller) | `pgdemo-controller`, the manager: one worker per device (`fork` + `execv`, ROS 2 topics, challenge-response, restart with backoff), a shared telemetry queue, and the configuration queue. [controller/README.md](controller/README.md) is the lifecycle. |
 | [`device/`](device) | `pgdemo-device`: generates its key and CSR, proves its identity to the controller and streams samples from its generator. |
 | [`client/pgdemo.sh`](client/pgdemo.sh) | Command-line client: login, users, devices and certificates, PKI, telemetry, configuration, live monitor. |
 | [`frontend/`](frontend) | The control panel: Next.js 16 static export with Tailwind CSS v4 and Catalyst, a visualization panel for every role and an administration panel for admins. [frontend/README.md](frontend/README.md) covers its design, architecture and screens. |
@@ -79,6 +79,9 @@ sudo apt install build-essential cmake ninja-build git pkg-config patch \
     libpq-dev libbotan-3-dev libboost-json-dev libssl-dev libgtest-dev libgmock-dev \
     postgresql-18 postgresql-18-postgis-3 postgresql-client curl jq openssl
 
+# ROS 2 Lyrical, from http://packages.ros.org/ros2/ubuntu (resolute). The
+# controller and every device are nodes; cmake looks up rclcpp in this underlay.
+source /opt/ros/lyrical/setup.bash
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ```
@@ -102,7 +105,7 @@ scripts/run-all.sh --http          # plain HTTP on 127.0.0.1:8080
 scripts/run-all.sh server          # only the server (also: controller); combines with --http
 ```
 
-Logs go to `run/logs/` and are echoed to the console; Ctrl-C stops both processes and every device process. The first HTTPS start generates the self-signed certificate `run/keys/tls.crt`. On the first start with both processes the seed devices enroll: the controller starts their processes, they submit CSRs, the server signs them, and the devices appear a second later. Each device's key and certificate are in `run/devices/NAME/`, and the controller listens on `run/devices/.controller.sock`. `PGDEMO_MAX_DEVICES` (default 16) bounds how many device processes run.
+Logs go to `run/logs/` and are echoed to the console; Ctrl-C stops both processes and every device process. The first HTTPS start generates the self-signed certificate `run/keys/tls.crt`. On the first start with both processes the seed devices enroll: the controller starts their processes, they publish a CSR on `pgdemo/worker/security/csr`, the server signs it, and the devices appear a second later. Each device's key and certificate are in `run/devices/NAME/`. A second controller on the same machine exits because the first holds `run/devices/.controller.lock`. `PGDEMO_MAX_DEVICES` (default 16) bounds how many device processes run. `run-all.sh` sources `/opt/ros/lyrical/setup.bash` when it is installed.
 
 In another terminal, the client talks to the same scheme. Without options it calls `https://127.0.0.1:8443` and trusts `run/keys/tls.crt`; `--http`, always the first argument, switches it to `http://127.0.0.1:8080`:
 
@@ -266,7 +269,7 @@ Every path under `/api`, matched by an endpoint or not, needs a bearer token exc
 
 ```bash
 cmake -S . -B build -G Ninja -DPGDEMO_BUILD_TESTS=ON && cmake --build build
-ctest --test-dir build -LE db                  # unit: Argon2id, JWT, Dispatcher, EventHub, PKI, frames, device streams
+ctest --test-dir build -LE db                  # unit: Argon2id, JWT, Dispatcher, EventHub, PKI, device streams
 
 . run/demo.env                                 # database tests (controller stopped)
 export PGDEMO_TEST_SERVER_CONNINFO="host=127.0.0.1 dbname=pgdemo user=demo_server password=$DEMO_SERVER_DB_PASSWORD"
@@ -287,7 +290,7 @@ Run the end-to-end suite from a shell without `run/demo.env` sourced: the suite 
 
 The UI suites (`11` to `13`) drive the panel in Chromium with Robot Framework Browser: login and roles, every visualization tab as a normal user, and every administration action on a device of their own. They also produce the screenshots in [frontend/README.md](frontend/README.md) (`--variable UI_SCREENSHOTS:frontend/docs/screens`).
 
-The unit tests cover the PKI library (CSR signing and its refusals, the issued profile, chain and CRL verification, the challenge-response proof) and the device side of the wire protocol (frames, a configuration that cancels the producer's wait, pause and resume, end of stream) without a database.
+The unit tests cover the PKI library (CSR signing and its refusals, the issued profile, chain and CRL verification, the challenge-response proof) and the device side of the ROS 2 contract (a configuration that cancels the producer's wait, pause and resume, end of stream) without a database.
 
 The database tests cover channel multiplexing, the registration and shutdown rules of the listener, concurrent checkouts from the query pool, partition routing, role enforcement inside PostgreSQL, the full NOTIFY-driven configuration loop through the Dispatcher, request expiry, and device identity: enrollment, the privileges around it, rotation, revocation and holds, the CRL that outlives a deleted certificate, and the cascade from the current certificate to the device. They sign real certificates, so they need the CA key in `run/ca/` (`PGDEMO_TEST_CA_DIR` moves it). With `PGDEMO_TEST_OWNER_CONNINFO` they also check, as the owner, that no device can be left without a certificate of its own.
 

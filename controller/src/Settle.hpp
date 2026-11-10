@@ -7,7 +7,7 @@
 
 #include <boost/asio/awaitable.hpp>
 
-namespace pgdemo::wire {
+namespace pgdemo::controller {
 
 /**
  * @brief Run `op` and return instead of throwing: its value, or the exception it ended with.
@@ -52,4 +52,4 @@ void rethrow_winner(const std::variant<E...>& winner)
     if (e) std::rethrow_exception(e);
 }
 
-} // namespace pgdemo::wire
+} // namespace pgdemo::controller

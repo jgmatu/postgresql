@@ -1,0 +1,14 @@
+module pgdemo_msgs {
+  module msg {
+    module Hello_Constants {
+      const octet RUN = 0;
+      const octet ENROLL = 1;
+      const octet ROTATE = 2;
+    };
+    struct Hello {
+      string device;
+      octet mode;
+      int64 request_id;
+    };
+  };
+};

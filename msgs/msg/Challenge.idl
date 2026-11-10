@@ -1,0 +1,9 @@
+module pgdemo_msgs {
+  module msg {
+    typedef octet octet__32[32];
+    struct Challenge {
+      string device;
+      octet__32 nonce;
+    };
+  };
+};

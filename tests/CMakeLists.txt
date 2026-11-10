@@ -13,7 +13,7 @@ gtest_discover_tests(pki_tests)
 
 add_executable(wire_tests unit/wire_tests.cpp)
 target_include_directories(wire_tests PRIVATE ${PROJECT_SOURCE_DIR}/device/src)
-target_link_libraries(wire_tests PRIVATE pgdemo::wire pgdemo::log GTest::gtest_main)
+target_link_libraries(wire_tests PRIVATE pgdemo::msgs pgdemo::log GTest::gtest_main)
 target_compile_options(wire_tests PRIVATE ${PGDEMO_WARNINGS})
 gtest_discover_tests(wire_tests)
 

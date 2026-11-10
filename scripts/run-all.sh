@@ -11,20 +11,35 @@
 #
 # Each process logs in with its own PostgreSQL role (demo_server, demo_controller)
 # and knows nothing about the other one. The server signs device CSRs with the
-# CA in run/ca/; the controller forks one pgdemo-device per device, with its
-# keys in run/devices/<name>/. Logs go to run/logs/. Ctrl-C stops both.
+# CA in run/ca/; the controller forks one pgdemo-device node per device, with its
+# keys in run/devices/<name>/. Workers publish pgdemo/worker; the manager publishes pgdemo/manager.
+# Logs go to run/logs/. Ctrl-C stops both.
 #
 # Variables (defaults from run/demo.env):
 #   PGDEMO_PGHOST, PGDEMO_PGPORT, PGDEMO_DB   database location
 #   PGDEMO_LISTEN_ADDR (127.0.0.1)            bind address (Docker uses 0.0.0.0)
 #   PGDEMO_CA_DIR (run/ca)                    device CA key and certificate
-#   PGDEMO_DEVICES_DIR (run/devices)          device keys and the controller socket
+#   PGDEMO_DEVICES_DIR (run/devices)          device keys and the controller lock
 #   PGDEMO_MAX_DEVICES (16)                   device processes run at once
 #   PGDEMO_WEBROOT (webroot)                  control panel; served when it has index.html
 #   PGDEMO_SERVER_ARGS, PGDEMO_CONTROLLER_ARGS  extra command-line options
 set -euo pipefail
 
+if [[ -f /opt/ros/lyrical/setup.bash ]]; then
+    set +u
+    # shellcheck disable=SC1091
+    source /opt/ros/lyrical/setup.bash
+    set -u
+fi
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Generated interface libraries. The image copies them to /app/lib; a local
+# build keeps them under build/msgs, which the binaries also record in RUNPATH.
+if [[ -d /app/lib ]]; then
+    export LD_LIBRARY_PATH="/app/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+elif [[ -d ${ROOT}/build/msgs ]]; then
+    export LD_LIBRARY_PATH="${ROOT}/build/msgs${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+fi
 ENV_FILE="${PGDEMO_ENV_FILE:-${ROOT}/run/demo.env}"
 BUILD="${PGDEMO_BUILD_DIR:-${ROOT}/build}"
 SCHEME=https

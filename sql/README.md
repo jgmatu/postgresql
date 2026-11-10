@@ -211,7 +211,7 @@ erDiagram
 
 ### Writing a sample
 
-Each device is a `pgdemo-device` process that sends its samples to the controller over a Unix socket; the controller writes them. Each sample is one statement: a CTE UPSERTs `device_state` and the outer `INSERT` appends the same values to the telemetry table of the device's payload. Both rows commit, and notify, together.
+Each device is a `pgdemo-device` worker that publishes its samples on `pgdemo/worker/telemetry/scalar` or `pgdemo/worker/telemetry/gps`. The manager queues them and writes a batch in one transaction: every sample is inserted into the history table, and `device_state` is updated once per device with the latest `seq`. The `device_state` trigger notifies the channel of that payload.
 
 ```sql
 WITH up AS (
@@ -312,7 +312,7 @@ sequenceDiagram
     ctl->>ctl: deliver the certificate to the same process
     ctl->>ctl: challenge-response
     ctl->>pg: UPSERT device_session ONLINE
-    ctl->>pg: UPSERT device_state + INSERT telemetry_scalar
+    ctl->>pg: INSERT telemetry_scalar + UPSERT device_state
     pg-->>server: NOTIFY telemetry_scalar with device
     client->>server: DELETE /api/devices/name
     server->>pg: DELETE device (cascade: certificates, session, state, config, queue)

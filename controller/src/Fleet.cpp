@@ -1,26 +1,29 @@
 #include "Fleet.hpp"
 
+#include "Settle.hpp"
 #include "Spawn.hpp"
 
 #include <pki/CertVerifier.hpp>
 #include <pki/Certificate.hpp>
-#include <wire/Frame.hpp>
-#include <wire/Settle.hpp>
 
 #include <log/Log.hpp>
 
 #include <boost/asio/experimental/awaitable_operators.hpp>
+#include <boost/asio/experimental/channel_error.hpp>
 
-#include <sys/stat.h>
+#include <fcntl.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 #include <algorithm>
 #include <climits>
+#include <span>
 #include <csignal>
 #include <format>
+#include <map>
 #include <set>
 #include <tuple>
+#include <type_traits>
 
 namespace pgdemo::controller {
 
@@ -44,6 +47,42 @@ constexpr auto kProofTimeout = 5s;
 constexpr auto kStuckAfter = 30s;
 /// A process online for this long resets the restart backoff.
 constexpr auto kStableAfter = 60s;
+/// Shared telemetry queue. One lease writes at most this many samples.
+constexpr std::size_t kTelemetryCapacity = 4096;
+constexpr std::size_t kTelemetryBatch = 64;
+constexpr auto kTelemetryFlush = 100ms;
+
+std::uint8_t launch_mode(Launch l) noexcept
+{
+    switch (l)
+    {
+    case Launch::Enroll: return pgdemo_msgs::msg::Hello::ENROLL;
+    case Launch::Rotate: return pgdemo_msgs::msg::Hello::ROTATE;
+    case Launch::Run: break;
+    }
+    return pgdemo_msgs::msg::Hello::RUN;
+}
+
+std::string_view mode_name(std::uint8_t mode) noexcept
+{
+    if (mode == pgdemo_msgs::msg::Hello::ENROLL) return "enroll";
+    if (mode == pgdemo_msgs::msg::Hello::ROTATE) return "rotate";
+    return "run";
+}
+
+std::optional<std::string> field_string(const boost::json::object& o, std::string_view key)
+{
+    const auto* v = o.if_contains(key);
+    if (v == nullptr || !v->is_string()) return std::nullopt;
+    return std::string(v->as_string());
+}
+
+std::optional<double> field_number(const boost::json::object& o, std::string_view key)
+{
+    const auto* v = o.if_contains(key);
+    if (v == nullptr || !v->is_number()) return std::nullopt;
+    return v->to_number<double>();
+}
 
 std::string_view launch_name(Launch l) noexcept
 {
@@ -77,7 +116,7 @@ awaitable<T> with_deadline(awaitable<T> op, Clock::duration timeout, std::string
 {
     asio::steady_timer timer(co_await asio::this_coro::executor);
     timer.expires_after(timeout);
-    auto result = co_await (wire::settle(std::move(op)) || timer.async_wait(use_awaitable));
+    auto result = co_await (settle(std::move(op)) || timer.async_wait(use_awaitable));
     if (result.index() == 1) throw std::runtime_error(std::format("timed out waiting for {}", what));
     auto [value, error] = std::get<0>(std::move(result));
     if (error) std::rethrow_exception(error);
@@ -95,15 +134,6 @@ db::ConfigOutcome decide(const db::ConfigRequest& r)
     return db::ConfigOutcome::success();
 }
 
-boost::json::object config_frame(const db::AppliedConfig& c)
-{
-    return {{"type", "config"},
-            {"device_id", c.device_id},
-            {"rate_ms", c.rate_ms},
-            {"amplitude", c.amplitude},
-            {"is_active", c.is_active}};
-}
-
 std::string describe_status(int status)
 {
     if (WIFEXITED(status)) return std::format("exit {}", WEXITSTATUS(status));
@@ -117,26 +147,76 @@ std::string describe_status(int status)
 // Session
 // ---------------------------------------------------------------------------
 
-Session::Session(asio::local::stream_protocol::socket s)
-    : socket(std::move(s))
-    , outbox(socket.get_executor(), 64)
-    , decision(socket.get_executor(), 1)
+Session::Session(asio::any_io_executor ex, std::string name, Downlink downlink)
+    : inbox(ex, 64)
+    , decision(ex, 1)
     , last_frame(Clock::now())
+    , name_(std::move(name))
+    , downlink_(std::move(downlink))
 {
 }
 
-void Session::send(boost::json::object msg)
+void Session::send_bye(std::string reason)
 {
-    if (!outbox.try_send(boost::system::error_code{}, std::move(msg)))
-        log::warn(kLog, "outbox full or closed; frame dropped");
+    if (closed_ || !downlink_.bye) return;
+    pgdemo_msgs::msg::Bye msg;
+    msg.device = name_;
+    msg.reason = std::move(reason);
+    downlink_.bye(std::move(msg));
+}
+
+void Session::send_certificate(std::string pem)
+{
+    if (closed_ || !downlink_.certificate) return;
+    pgdemo_msgs::msg::Certificate msg;
+    msg.device = name_;
+    msg.cert = std::move(pem);
+    downlink_.certificate(std::move(msg));
+}
+
+void Session::send_rejected(std::string code, std::string detail)
+{
+    if (closed_ || !downlink_.rejected) return;
+    pgdemo_msgs::msg::Rejected msg;
+    msg.device = name_;
+    msg.code = std::move(code);
+    msg.detail = std::move(detail);
+    downlink_.rejected(std::move(msg));
+}
+
+void Session::send_challenge(const std::array<unsigned char, 32>& nonce)
+{
+    if (closed_ || !downlink_.challenge) return;
+    pgdemo_msgs::msg::Challenge msg;
+    msg.device = name_;
+    msg.nonce = nonce;
+    downlink_.challenge(std::move(msg));
+}
+
+void Session::send_config(const db::AppliedConfig& config)
+{
+    if (closed_ || !downlink_.config) return;
+    pgdemo_msgs::msg::Config msg;
+    msg.device = name_;
+    msg.device_id = config.device_id;
+    msg.rate_ms = config.rate_ms;
+    msg.amplitude = config.amplitude;
+    msg.is_active = config.is_active;
+    downlink_.config(std::move(msg));
+}
+
+void Session::post(Uplink msg)
+{
+    if (closed_) return;
+    if (!inbox.try_send(boost::system::error_code{}, std::move(msg)))
+        log::warn(kLog, "inbox full or closed; message dropped");
 }
 
 void Session::close()
 {
-    boost::system::error_code ec;
-    socket.shutdown(asio::socket_base::shutdown_both, ec);
-    socket.close(ec);
-    outbox.close();
+    if (closed_) return;
+    closed_ = true;
+    inbox.close();
     decision.close();
 }
 
@@ -144,41 +224,40 @@ void Session::close()
 // Fleet: set-up
 // ---------------------------------------------------------------------------
 
-Fleet::Fleet(asio::io_context& io, asio::thread_pool& pool, db::DatabaseManager& db, FleetOptions opts)
+Fleet::Fleet(asio::io_context& io, asio::thread_pool& pool, db::DatabaseManager& db, FleetOptions opts,
+             Downlink downlink)
     : io_(io)
     , pool_(pool)
     , writes_(asio::make_strand(pool.get_executor()))
     , db_(db)
     , opts_(std::move(opts))
-    , acceptor_(io)
+    , downlink_(std::move(downlink))
+    , telemetry_timer_(io)
     , sigchld_(io, SIGCHLD)
     , stop_signals_(io, SIGINT, SIGTERM)
 {
 }
 
-Fleet::~Fleet() = default;
+Fleet::~Fleet()
+{
+    if (lock_fd_ >= 0) ::close(lock_fd_);
+}
 
-void Fleet::open_socket()
+void Fleet::acquire_lock()
 {
     fs::create_directories(opts_.devices_dir);
     fs::permissions(opts_.devices_dir, fs::perms::owner_all, fs::perm_options::replace);
-    const asio::local::stream_protocol::endpoint endpoint(opts_.socket_path.string());
-    if (fs::is_socket(opts_.socket_path))
-    {
-        // Rebinding would orphan the running controller's devices and double every process.
-        asio::local::stream_protocol::socket probe(io_);
-        boost::system::error_code connect_error;
-        probe.connect(endpoint, connect_error);
-        if (!connect_error)
-            throw std::runtime_error(std::format("another controller is listening on {}", opts_.socket_path.string()));
-    }
-    std::error_code ec;
-    fs::remove(opts_.socket_path, ec);
-    acceptor_.open();
-    acceptor_.bind(endpoint);
-    acceptor_.listen();
-    ::chmod(opts_.socket_path.c_str(), 0600);
-    log::info(kLog, std::format("device socket {} (max {} device process(es), binary {})", opts_.socket_path.string(),
+    const fs::path path = opts_.devices_dir / ".controller.lock";
+    lock_fd_ = ::open(path.c_str(), O_CREAT | O_RDWR, 0600);
+    if (lock_fd_ < 0) throw std::system_error(errno, std::generic_category(), "open " + path.string());
+    // fcntl locks are per process and are not inherited across fork, so the
+    // child's close_range does not release this one.
+    struct flock lock{};
+    lock.l_type = F_WRLCK;
+    lock.l_whence = SEEK_SET;
+    if (::fcntl(lock_fd_, F_SETLK, &lock) != 0)
+        throw std::runtime_error("another controller holds " + path.string());
+    log::info(kLog, std::format("manager topics pgdemo/manager, worker topics pgdemo/worker (max {} device process(es), binary {})",
                                 opts_.max_devices, opts_.device_bin));
 }
 
@@ -186,10 +265,10 @@ void Fleet::start()
 {
     spawn(reap_loop(), "reaper");
     spawn(signal_loop(), "signals");
-    spawn(accept_loop(), "acceptor");
     spawn(boot(), "boot");
     spawn(heartbeat_loop(), "heartbeat");
     spawn(maintenance_loop(), "maintenance");
+    spawn(telemetry_loop(), "telemetry");
 }
 
 void Fleet::spawn(awaitable<void> task, std::string what)
@@ -225,23 +304,62 @@ void Fleet::notify(boost::json::object msg)
 {
     asio::post(io_, [this, msg = std::move(msg)] {
         if (shutting_down_) return;
-        const auto channel = wire::get_string(msg, "channel").value_or("");
+        const auto channel = field_string(msg, "channel").value_or("");
         const auto* p = msg.if_contains("payload");
         if (p == nullptr || !p->is_object()) return;
         const auto& o = p->as_object();
-        const auto id = wire::get_number(o, "request_id");
+        const auto id = field_number(o, "request_id");
 
         if (channel == db::channel::kEnrollmentRequested && id)
             spawn(on_enrollment_requested(static_cast<std::int64_t>(*id)), "enrollment_requested");
         else if (channel == db::channel::kEnrollmentEvents && id)
             spawn(on_enrollment_decided(static_cast<std::int64_t>(*id)), "enrollment_events");
         else if (channel == db::channel::kDeviceEvents)
-            spawn(on_device_event(wire::get_string(o, "action").value_or(""), wire::get_string(o, "device").value_or(""),
-                                  static_cast<int>(wire::get_number(o, "device_id").value_or(0))),
+            spawn(on_device_event(field_string(o, "action").value_or(""), field_string(o, "device").value_or(""),
+                                  static_cast<int>(field_number(o, "device_id").value_or(0))),
                   "device_events");
         else if (channel == db::channel::kConfigRequested)
             spawn(drain(), "config_requested");
     });
+}
+
+void Fleet::on_hello(pgdemo_msgs::msg::Hello hello)
+{
+    asio::post(io_, [this, hello = std::move(hello)]() mutable {
+        if (shutting_down_) return;
+        admit(std::move(hello));
+    });
+}
+
+void Fleet::on_uplink(Uplink msg)
+{
+    asio::post(io_, [this, msg = std::move(msg)]() mutable {
+        if (shutting_down_) return;
+        const auto name = device_of(msg);
+        if (name.empty()) return;
+        if (Slot* s = find(name); s != nullptr && s->session) s->session->post(std::move(msg));
+        else early_[name] = std::move(msg);
+    });
+}
+
+void Fleet::enqueue_telemetry(std::variant<db::DummySample, db::TrackSample> sample)
+{
+    if (telemetry_.size() >= kTelemetryCapacity)
+    {
+        ++telemetry_dropped_;
+        return;
+    }
+    telemetry_.push_back(std::move(sample));
+    if (telemetry_.size() >= kTelemetryBatch) telemetry_timer_.cancel();
+}
+
+void Fleet::send_bye(const std::string& device, const std::string& reason)
+{
+    if (!downlink_.bye) return;
+    pgdemo_msgs::msg::Bye msg;
+    msg.device = device;
+    msg.reason = reason;
+    downlink_.bye(std::move(msg));
 }
 
 // ---------------------------------------------------------------------------
@@ -255,22 +373,6 @@ awaitable<void> Fleet::boot()
     co_await drain();
     log::info(kLog, std::format("supervising {} device(s), {} process(es) started (max {}); Ctrl-C to stop",
                                 slots_.size(), running(), opts_.max_devices));
-}
-
-awaitable<void> Fleet::accept_loop()
-{
-    for (;;)
-    {
-        auto accepted = co_await acceptor_.async_accept(asio::as_tuple(use_awaitable));
-        auto& [ec, socket] = accepted;
-        if (ec)
-        {
-            if (shutting_down_ || ec == asio::error::operation_aborted) co_return;
-            log::warn(kLog, "accept: " + ec.message());
-            continue;
-        }
-        spawn(device_session(std::move(socket)), "session");
-    }
 }
 
 awaitable<void> Fleet::reap_loop()
@@ -313,10 +415,11 @@ awaitable<void> Fleet::heartbeat_loop()
             if (!s.session || !s.session->online || !s.device) continue;
             if (now - s.session->last_frame > kStuckAfter)
             {
-                log::warn(kLog, std::format("{}: no frames for {} s; killing process {}", name,
-                                            std::chrono::duration_cast<std::chrono::seconds>(kStuckAfter).count(),
-                                            s.pid));
+                log::warn(kLog, std::format("{}: no frames for {} s", name,
+                                            std::chrono::duration_cast<std::chrono::seconds>(kStuckAfter).count()));
+                // A child we forked is killed and reaped. A node started elsewhere is only released.
                 if (s.pid != 0) ::kill(s.pid, SIGKILL);
+                else stop_process(s, "no frames");
                 continue;
             }
             seen.push_back(s.device->device_id);
@@ -370,10 +473,8 @@ awaitable<void> Fleet::shutdown()
     if (shutting_down_) co_return;
     shutting_down_ = true;
 
-    boost::system::error_code ec;
-    acceptor_.close(ec);
     for (auto& [name, s] : slots_)
-        if (s.pid != 0) stop_process(s, "controller stopping");
+        if (s.pid != 0 || s.session) stop_process(s, "controller stopping");
 
     asio::steady_timer timer(io_);
     const auto deadline = Clock::now() + 5s;
@@ -394,8 +495,13 @@ awaitable<void> Fleet::shutdown()
         s.pid = 0;
         if (s.session) s.session->close();
     }
-    std::error_code fec;
-    fs::remove(opts_.socket_path, fec);
+    telemetry_timer_.cancel();
+    co_await flush_telemetry();
+    if (lock_fd_ >= 0)
+    {
+        ::close(lock_fd_);
+        lock_fd_ = -1;
+    }
 
     // On the write strand, so it lands after every queued state change.
     try
@@ -417,36 +523,76 @@ awaitable<void> Fleet::shutdown()
 // Device sessions
 // ---------------------------------------------------------------------------
 
-awaitable<void> Fleet::device_session(asio::local::stream_protocol::socket socket)
+awaitable<Uplink> Fleet::receive(std::shared_ptr<Session> session, Clock::duration timeout, std::string_view what)
 {
-    auto session = std::make_shared<Session>(std::move(socket));
-    std::string name;
-    pid_t peer = 0;
+    co_return co_await with_deadline(session->inbox.async_receive(use_awaitable), timeout, what);
+}
+
+awaitable<void> Fleet::telemetry_loop()
+{
+    for (;;)
+    {
+        if (telemetry_.size() < kTelemetryBatch)
+        {
+            telemetry_timer_.expires_after(kTelemetryFlush);
+            co_await telemetry_timer_.async_wait(asio::as_tuple(use_awaitable));
+        }
+        if (shutting_down_) co_return;
+        co_await flush_telemetry();
+    }
+}
+
+awaitable<void> Fleet::flush_telemetry()
+{
+    if (telemetry_.empty() && telemetry_dropped_ == 0) co_return;
+    std::vector<db::DummySample> scalar;
+    std::vector<db::TrackSample> gps;
+    while (!telemetry_.empty())
+    {
+        auto item = std::move(telemetry_.front());
+        telemetry_.pop_front();
+        std::visit(
+            [&](auto&& sample) {
+                using T = std::decay_t<decltype(sample)>;
+                if constexpr (std::is_same_v<T, db::DummySample>) scalar.push_back(sample);
+                else gps.push_back(sample);
+            },
+            std::move(item));
+    }
+    const auto dropped = telemetry_dropped_;
+    telemetry_dropped_ = 0;
+    if (dropped != 0)
+        log::warn(kLog, std::format("telemetry queue full; dropped {} sample(s)", dropped));
+    if (scalar.empty() && gps.empty()) co_return;
+    try
+    {
+        co_await on_db([this, scalar = std::move(scalar), gps = std::move(gps)] {
+            db_.write_telemetry_batch(scalar, gps);
+        });
+    }
+    catch (const std::exception& e)
+    {
+        log::warn(kLog, std::string("telemetry batch not stored: ") + e.what());
+    }
+}
+
+awaitable<void> Fleet::device_session(std::shared_ptr<Session> session, std::string name,
+                                       pgdemo_msgs::msg::Hello hello)
+{
     std::optional<AuthFailure> auth_failure;
     std::optional<Refusal> refusal;
     std::string error;
+    const pid_t peer = find(name) != nullptr ? find(name)->pid : 0;
 
     try
     {
-        // The kernel vouches for the pid: only processes this controller
-        // forked are accepted, and each under the name it was started with.
-        const auto cred = peer_credentials(session->socket.native_handle());
-        if (!cred || cred->uid != ::getuid()) throw std::runtime_error("connection from another user");
-        const auto it = pids_.find(cred->pid);
-        if (it == pids_.end())
-            throw std::runtime_error(std::format("pid {} was not started by this controller", cred->pid));
-        peer = cred->pid;
-        name = it->second;
-
-        const auto hello = co_await with_deadline(wire::read_frame(session->socket), kHelloTimeout, "hello");
         Slot* s = find(name);
-        if (s == nullptr || s->pid != peer) throw std::runtime_error("process is no longer supervised");
-        if (wire::type_of(hello) != "hello" || wire::get_string(hello, "device") != name)
-            throw AuthFailure("BAD_HELLO", std::format("process {} did not introduce itself as {}", peer, name));
-        if (wire::get_string(hello, "mode") != launch_name(s->running))
-            throw AuthFailure("BAD_HELLO", std::format("process {} was started to {}", peer, launch_name(s->running)));
-        if (s->session) throw std::runtime_error("process is already connected");
-        s->session = session;
+        if (s == nullptr || s->session != session) throw std::runtime_error("process is no longer supervised");
+        if (hello.device != name)
+            throw AuthFailure("BAD_HELLO", "the node did not introduce itself as " + name);
+        if (hello.mode != launch_mode(s->running))
+            throw AuthFailure("BAD_HELLO", std::format("the node was admitted to {}", launch_name(s->running)));
+        (void)hello;
 
         if (s->running != Launch::Run) co_await obtain_certificate(session, name);
         co_await authenticate(session, name);
@@ -463,7 +609,7 @@ awaitable<void> Fleet::device_session(asio::local::stream_protocol::socket socke
     catch (const boost::system::system_error& e)
     {
         if (e.code() != asio::error::eof && e.code() != asio::error::operation_aborted &&
-            e.code() != asio::error::connection_reset)
+            e.code() != asio::error::connection_reset && e.code() != asio::experimental::error::channel_closed)
             error = e.what();
     }
     catch (const std::exception& e)
@@ -471,45 +617,35 @@ awaitable<void> Fleet::device_session(asio::local::stream_protocol::socket socke
         error = e.what();
     }
 
-    const std::string tag = name.empty() ? "unknown peer" : name;
-    std::optional<boost::json::object> bye;
+    std::optional<std::string> bye;
     if (Slot* s = find(name); auth_failure)
     {
-        log::warn(kLog, std::format("{}: authentication failed: {} ({})", tag, auth_failure->code, auth_failure->what()));
+        log::warn(kLog, std::format("{}: authentication failed: {} ({})", name, auth_failure->code, auth_failure->what()));
         if (s != nullptr && s->session == session)
         {
             s->wanted = false;
             set_state(*s, "AUTH_FAILED", auth_failure->code + ": " + auth_failure->what());
         }
-        bye = boost::json::object{{"type", "bye"}, {"reason", "authentication failed: " + auth_failure->code}};
+        bye = "authentication failed: " + auth_failure->code;
     }
     else if (refusal)
     {
-        log::info(kLog, std::format("{}: {}", tag, refusal->what()));
+        log::info(kLog, std::format("{}: {}", name, refusal->what()));
         if (s != nullptr && s->session == session && !refusal->state.empty())
             set_state(*s, refusal->state, refusal->what());
-        bye = boost::json::object{{"type", "bye"}, {"reason", refusal->what()}};
+        bye = refusal->what();
     }
     else if (!error.empty())
     {
-        log::warn(kLog, std::format("{}: session ended: {}", tag, error));
+        log::warn(kLog, std::format("{}: session ended: {}", name, error));
     }
-    if (bye)
-    {
-        try
-        {
-            co_await wire::write_frame(session->socket, *bye);
-        }
-        catch (const std::exception&)
-        {
-        }
-    }
+    if (bye) session->send_bye(*bye);
 
     if (Slot* s = find(name); s != nullptr && s->session == session)
     {
         s->session.reset();
         if (s->state == "ONLINE" || s->state == "STARTING") set_state(*s, "OFFLINE");
-        // Without its session the process can do nothing: make it exit.
+        // A child without its session has nothing to do. A remote node got bye above.
         if (s->pid != 0 && s->pid == peer) ::kill(peer, SIGTERM);
     }
     session->close();
@@ -517,14 +653,15 @@ awaitable<void> Fleet::device_session(asio::local::stream_protocol::socket socke
 
 awaitable<void> Fleet::obtain_certificate(std::shared_ptr<Session> session, std::string name)
 {
-    const auto msg = co_await with_deadline(wire::read_frame(session->socket), kCsrTimeout, "the CSR");
+    const auto msg = co_await receive(session, kCsrTimeout, "the CSR");
     Slot* s = find(name);
     if (s == nullptr) throw Refusal("", "device removed during enrollment");
     const std::int64_t request = s->running_request;
-    if (wire::type_of(msg) != "csr")
-        throw std::runtime_error(std::format("expected csr, got {} {}", wire::type_of(msg),
-                                             wire::get_string(msg, "detail").value_or("")));
-    const auto csr = wire::get_string(msg, "csr").value_or("");
+    if (const auto* err = std::get_if<pgdemo_msgs::msg::Error>(&msg))
+        throw std::runtime_error(std::format("expected csr, got error {} {}", err->code, err->detail));
+    const auto* csr_msg = std::get_if<pgdemo_msgs::msg::Csr>(&msg);
+    if (csr_msg == nullptr) throw std::runtime_error("expected csr");
+    const auto csr = csr_msg->csr;
 
     const bool submitted = co_await on_db([this, request, csr] { return db_.submit_csr(request, csr); });
     if (!submitted) throw Refusal("", std::format("request {} is no longer pending", request));
@@ -543,9 +680,7 @@ awaitable<void> Fleet::obtain_certificate(std::shared_ptr<Session> session, std:
 
     if (outcome.status != "ISSUED" || !outcome.cert_pem)
     {
-        co_await wire::write_frame(session->socket, {{"type", "rejected"},
-                                                     {"code", outcome.error_code},
-                                                     {"detail", outcome.error_detail}});
+        session->send_rejected(outcome.error_code, outcome.error_detail);
         throw Refusal("", std::format("request {} {}: {} {}", request, outcome.status, outcome.error_code,
                                       outcome.error_detail));
     }
@@ -555,7 +690,7 @@ awaitable<void> Fleet::obtain_certificate(std::shared_ptr<Session> session, std:
         const auto device = co_await on_db([this, id] { return db_.load_device(id); });
         if (device) apply_device(*device);
     }
-    co_await wire::write_frame(session->socket, {{"type", "cert"}, {"cert", *outcome.cert_pem}});
+    session->send_certificate(*outcome.cert_pem);
     // From here on it is an ordinary device process: a revocation stops it.
     if (s = find(name); s != nullptr) s->running = Launch::Run;
     log::info(kLog, std::format("{}: certificate of request {} delivered", name, request));
@@ -563,25 +698,20 @@ awaitable<void> Fleet::obtain_certificate(std::shared_ptr<Session> session, std:
 
 awaitable<void> Fleet::authenticate(std::shared_ptr<Session> session, std::string name)
 {
-    const auto nonce = pki::random_bytes(32);
-    co_await wire::write_frame(session->socket, {{"type", "challenge"}, {"nonce", pki::base64_encode(nonce)}});
-    const auto msg = co_await with_deadline(wire::read_frame(session->socket), kProofTimeout, "the proof");
+    const auto raw_nonce = pki::random_bytes(32);
+    if (raw_nonce.size() != 32) throw AuthFailure("BAD_PROOF", "nonce is not 32 bytes");
+    std::array<unsigned char, 32> nonce{};
+    std::copy(raw_nonce.begin(), raw_nonce.end(), nonce.begin());
+    session->send_challenge(nonce);
+    const auto msg = co_await receive(session, kProofTimeout, "the proof");
 
-    const auto type = wire::type_of(msg);
-    if (type == "error")
-        throw AuthFailure(wire::get_string(msg, "code").value_or("DEVICE_ERROR"),
-                          wire::get_string(msg, "detail").value_or("device reported an error"));
-    if (type != "proof") throw AuthFailure("BAD_PROOF", "expected proof, got " + type);
-    const auto cert = wire::get_string(msg, "cert").value_or("");
-    std::vector<std::uint8_t> signature;
-    try
-    {
-        signature = pki::base64_decode(wire::get_string(msg, "signature").value_or(""));
-    }
-    catch (const std::exception&)
-    {
-        throw AuthFailure("BAD_PROOF", "signature is not base64");
-    }
+    if (const auto* err = std::get_if<pgdemo_msgs::msg::Error>(&msg))
+        throw AuthFailure(err->code.empty() ? "DEVICE_ERROR" : err->code,
+                          err->detail.empty() ? "device reported an error" : err->detail);
+    const auto* proof = std::get_if<pgdemo_msgs::msg::Proof>(&msg);
+    if (proof == nullptr) throw AuthFailure("BAD_PROOF", "expected proof");
+    const auto& cert = proof->cert;
+    const std::span<const std::uint8_t> signature(proof->signature.data(), proof->signature.size());
 
     Slot* s = find(name);
     if (s == nullptr || !s->device) throw Refusal("", "device is not registered");
@@ -618,95 +748,64 @@ awaitable<void> Fleet::serve(std::shared_ptr<Session> session, std::string name)
     Slot* s = find(name);
     if (s == nullptr || !s->device) throw Refusal("", "device deleted");
     const db::Device device = *s->device;
-    // Online first: a configuration committed from here on is queued in the
-    // outbox and follows the initial one.
+    // Online first: a configuration committed from here on is published after this one.
     session->online = true;
     const int id = device.device_id;
     const auto config = co_await on_db([this, id] { return db_.init_device_config(id); });
     if (!config) throw Refusal("", "device deleted");
-    co_await wire::write_frame(session->socket, config_frame(*config));
+    session->send_config(*config);
 
     s = find(name);
     if (s == nullptr) throw Refusal("", "device deleted");
     session->last_frame = Clock::now();
     s->online_since = Clock::now();
     set_state(*s, "ONLINE");
-    // settle(): when the reader hits EOF the writer must stop too, and vice versa.
-    wire::rethrow_winner(co_await (wire::settle(read_samples(session, device)) || wire::settle(write_frames(session))));
+    co_await read_samples(session, device);
 }
 
 awaitable<void> Fleet::read_samples(std::shared_ptr<Session> session, db::Device device)
 {
     for (;;)
     {
-        const auto msg = co_await wire::read_frame(session->socket);
+        Uplink msg;
+        try
+        {
+            msg = co_await session->inbox.async_receive(use_awaitable);
+        }
+        catch (const boost::system::system_error& e)
+        {
+            if (e.code() == asio::experimental::error::channel_closed) co_return;
+            throw;
+        }
         session->last_frame = Clock::now();
-        const auto type = wire::type_of(msg);
-        if (type == "heartbeat") continue;
-        if (type != "sample")
-        {
-            log::warn(kLog, std::format("{}: ignoring {}", device.name, type));
-            continue;
-        }
-        const auto seq = static_cast<std::int64_t>(wire::get_number(msg, "seq").value_or(0));
-        if (device.payload == db::Payload::Gps)
-        {
-            const auto lon = wire::get_number(msg, "origin_lon");
-            const auto lat = wire::get_number(msg, "origin_lat");
-            const auto radius = wire::get_number(msg, "radius_m");
-            const auto bearing = wire::get_number(msg, "bearing_rad");
-            if (!lon || !lat || !radius || !bearing)
-            {
-                log::warn(kLog, std::format("{}: incomplete GPS sample {}", device.name, seq));
-                continue;
-            }
-            const db::TrackSample t{device.device_id, *lon, *lat, *radius, *bearing, seq};
-            const bool ok = co_await on_db([this, t] {
-                try
+        std::visit(
+            [&](const auto& m) {
+                using T = std::decay_t<decltype(m)>;
+                if constexpr (std::is_same_v<T, pgdemo_msgs::msg::Heartbeat>)
+                    return;
+                else if constexpr (std::is_same_v<T, pgdemo_msgs::msg::ScalarSample>)
                 {
-                    db_.write_gps_sample(t);
-                    return true;
+                    if (device.payload != db::Payload::Scalar)
+                    {
+                        log::warn(kLog, std::format("{}: ignoring scalar sample", device.name));
+                        return;
+                    }
+                    enqueue_telemetry(db::DummySample{device.device_id, m.value, m.seq});
                 }
-                catch (const std::exception& e)
+                else if constexpr (std::is_same_v<T, pgdemo_msgs::msg::GpsSample>)
                 {
-                    log::warn(kLog, std::format("device {}: sample {} not stored: {}", t.device_id, t.seq, e.what()));
-                    return false;
+                    if (device.payload != db::Payload::Gps)
+                    {
+                        log::warn(kLog, std::format("{}: ignoring GPS sample", device.name));
+                        return;
+                    }
+                    enqueue_telemetry(db::TrackSample{device.device_id, m.origin_lon, m.origin_lat, m.radius_m,
+                                                      m.bearing_rad, m.seq});
                 }
-            });
-            (void)ok;
-        }
-        else
-        {
-            const auto value = wire::get_number(msg, "value");
-            if (!value)
-            {
-                log::warn(kLog, std::format("{}: sample {} without value", device.name, seq));
-                continue;
-            }
-            const db::DummySample d{device.device_id, *value, seq};
-            const bool ok = co_await on_db([this, d] {
-                try
-                {
-                    db_.write_scalar_sample(d);
-                    return true;
-                }
-                catch (const std::exception& e)
-                {
-                    log::warn(kLog, std::format("device {}: sample {} not stored: {}", d.device_id, d.seq, e.what()));
-                    return false;
-                }
-            });
-            (void)ok;
-        }
-    }
-}
-
-awaitable<void> Fleet::write_frames(std::shared_ptr<Session> session)
-{
-    for (;;)
-    {
-        const auto msg = co_await session->outbox.async_receive(use_awaitable);
-        co_await wire::write_frame(session->socket, msg);
+                else
+                    log::warn(kLog, std::format("{}: ignoring message while online", device.name));
+            },
+            msg);
     }
 }
 
@@ -766,7 +865,7 @@ awaitable<void> Fleet::on_device_event(std::string action, std::string name, int
         log::info(kLog, std::format("{}: device deleted", name));
         s->removed = true;
         s->wanted = false;
-        if (s->pid != 0) stop_process(*s, "device deleted");
+        if (s->pid != 0 || s->session) stop_process(*s, "device deleted");
         else
         {
             forget(*s);
@@ -793,7 +892,7 @@ awaitable<void> Fleet::drain()
     for (const auto& c : applied)
     {
         Slot* s = find_by_id(c.device_id);
-        if (s != nullptr && s->session && s->session->online) s->session->send(config_frame(c));
+        if (s != nullptr && s->session && s->session->online) s->session->send_config(c);
     }
     if (stats.applied + stats.rejected + stats.expired > 0)
         log::info(kLog, std::format("queue drained: {} applied, {} rejected, {} expired", stats.applied,
@@ -876,7 +975,7 @@ void Fleet::apply_device(const db::Device& d)
 
     if (!d.active())
     {
-        if (s.pid != 0 && s.running == Launch::Run) stop_process(s, "identity " + d.identity);
+        if ((s.pid != 0 || s.session) && s.running == Launch::Run) stop_process(s, "identity " + d.identity);
         set_state(s, "DISABLED", "identity " + d.identity);
         return;
     }
@@ -893,36 +992,112 @@ void Fleet::apply_device(const db::Device& d)
 // Process table
 // ---------------------------------------------------------------------------
 
-void Fleet::reconcile(Slot& s)
+void Fleet::admit(pgdemo_msgs::msg::Hello hello)
 {
-    if (shutting_down_ || s.removed || s.pid != 0 || s.restart_scheduled || !s.wanted) return;
-    if (s.next == Launch::Run)
+    const std::string name = hello.device;
+    const auto mode = hello.mode;
+    if (name.empty()) return;
+    Slot* s = find(name);
+    if (s == nullptr)
     {
-        if (!s.device) return;
-        if (!s.device->active())
+        pending_hellos_[name] = std::move(hello);
+        return;
+    }
+    if (s->session)
+    {
+        // The node repeats hello until the challenge. A new hello once it is online is another process.
+        if (!s->session->online && mode == launch_mode(s->running)) return;
+        s->session->send_bye("already connected");
+        return;
+    }
+    if (shutting_down_ || s->removed || !s->wanted)
+    {
+        send_bye(name, "not managed");
+        return;
+    }
+    const Launch expect = s->pid != 0 ? s->running : s->next;
+    if (mode != launch_mode(expect))
+    {
+        send_bye(name, "unexpected mode");
+        return;
+    }
+    if (s->pid == 0 && running() >= opts_.max_devices)
+    {
+        const std::string why = std::format("--max-devices {} reached", opts_.max_devices);
+        if (s->next != Launch::Run)
         {
-            set_state(s, "DISABLED", "identity " + s.device->identity);
+            fail_enrollment(s->next_request, "CAPACITY", why);
+            s->next = Launch::Run;
+            s->next_request = 0;
+            if (!s->device)
+            {
+                send_bye(name, why);
+                forget(*s);
+                return;
+            }
+        }
+        set_state(*s, "UNMANAGED", why);
+        send_bye(name, why);
+        return;
+    }
+
+    s->session = std::make_shared<Session>(io_.get_executor(), name, downlink_);
+    if (s->pid == 0)
+    {
+        s->running = s->next;
+        s->running_request = s->next_request;
+    }
+    if (auto it = early_.find(name); it != early_.end())
+    {
+        s->session->post(std::move(it->second));
+        early_.erase(it);
+    }
+    log::info(kLog, std::format("{}: hello ({})", name, mode_name(mode)));
+    spawn(device_session(s->session, name, std::move(hello)), "session " + name);
+}
+
+void Fleet::reconcile(Slot& slot)
+{
+    if (shutting_down_ || slot.removed || slot.restart_scheduled || !slot.wanted) return;
+    const std::string name = slot.name;
+    if (!slot.session)
+    {
+        if (auto it = pending_hellos_.find(name); it != pending_hellos_.end())
+        {
+            auto hello = std::move(it->second);
+            pending_hellos_.erase(it);
+            admit(std::move(hello)); // may erase the slot
+        }
+    }
+    Slot* s = find(name);
+    if (s == nullptr || s->pid != 0 || s->session) return;
+    if (s->next == Launch::Run)
+    {
+        if (!s->device) return;
+        if (!s->device->active())
+        {
+            set_state(*s, "DISABLED", "identity " + s->device->identity);
             return;
         }
     }
     if (running() >= opts_.max_devices)
     {
         const std::string why = std::format("--max-devices {} reached", opts_.max_devices);
-        if (s.next != Launch::Run)
+        if (s->next != Launch::Run)
         {
-            fail_enrollment(s.next_request, "CAPACITY", why);
-            s.next = Launch::Run;
-            s.next_request = 0;
-            if (!s.device)
+            fail_enrollment(s->next_request, "CAPACITY", why);
+            s->next = Launch::Run;
+            s->next_request = 0;
+            if (!s->device)
             {
-                forget(s);
+                forget(*s);
                 return;
             }
         }
-        set_state(s, "UNMANAGED", why);
+        set_state(*s, "UNMANAGED", why);
         return;
     }
-    start_process(s);
+    start_process(*s);
 }
 
 void Fleet::reconcile_all()
@@ -937,10 +1112,15 @@ void Fleet::reconcile_all()
 void Fleet::start_process(Slot& s)
 {
     const fs::path dir = opts_.devices_dir / s.name;
-    std::vector<std::string> argv{opts_.device_bin, "--name",   s.name,
-                                  "--type",         s.type_id,  "--payload",
-                                  std::string(db::payload_name(s.payload)), "--socket", opts_.socket_path.string(),
-                                  "--dir",          dir.string()};
+    std::vector<std::string> argv{opts_.device_bin,
+                                  "--name",
+                                  s.name,
+                                  "--type",
+                                  s.type_id,
+                                  "--payload",
+                                  std::string(db::payload_name(s.payload)),
+                                  "--dir",
+                                  dir.string()};
     if (s.next != Launch::Run)
     {
         argv.push_back(s.next == Launch::Enroll ? "--enroll" : "--rotate");
@@ -968,13 +1148,33 @@ void Fleet::start_process(Slot& s)
     log::info(kLog, std::format("{}: process {} started ({}{})", s.name, pid, launch_name(s.running),
                                 s.running_request != 0 ? std::format(", request {}", s.running_request) : ""));
     set_state(s, "STARTING");
+    const pid_t child = pid;
+    const std::string name = s.name;
+    spawn(
+        [](Fleet* self, std::string device, pid_t spawned) -> awaitable<void> {
+            asio::steady_timer timer(self->io_, kHelloTimeout);
+            co_await timer.async_wait(use_awaitable);
+            if (Slot* slot = self->find(device); slot != nullptr && slot->pid == spawned && !slot->session)
+            {
+                log::warn(kLog, device + ": no hello; killing process " + std::to_string(spawned));
+                ::kill(spawned, SIGKILL);
+            }
+        }(this, name, child),
+        "hello " + name);
 }
 
 void Fleet::stop_process(Slot& s, const std::string& reason)
 {
-    if (s.pid == 0) return;
+    if (s.pid == 0 && !s.session) return;
+    if (s.session) s.session->send_bye(reason);
+    if (s.pid == 0)
+    {
+        log::info(kLog, std::format("{}: releasing node ({})", s.name, reason));
+        s.session->close();
+        s.session.reset();
+        return;
+    }
     s.stopping = true;
-    if (s.session) s.session->send({{"type", "bye"}, {"reason", reason}});
     ::kill(s.pid, SIGTERM);
     log::info(kLog, std::format("{}: stopping process {} ({})", s.name, s.pid, reason));
 }
@@ -1108,7 +1308,8 @@ Fleet::Slot* Fleet::find_by_id(int device_id)
 
 std::size_t Fleet::running() const
 {
-    return static_cast<std::size_t>(std::ranges::count_if(slots_, [](const auto& kv) { return kv.second.pid != 0; }));
+    return static_cast<std::size_t>(std::ranges::count_if(
+        slots_, [](const auto& kv) { return kv.second.pid != 0 || kv.second.session != nullptr; }));
 }
 
 } // namespace pgdemo::controller

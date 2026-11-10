@@ -1,0 +1,9 @@
+module pgdemo_msgs {
+  module msg {
+    struct Error {
+      string device;
+      string code;
+      string detail;
+    };
+  };
+};

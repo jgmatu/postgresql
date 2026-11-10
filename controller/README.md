@@ -8,19 +8,19 @@ Sources:
 |---|---|
 | [`src/main.cpp`](src/main.cpp) | Options, signal mask, database, listener, then the fleet |
 | [`src/Fleet.hpp`](src/Fleet.hpp), [`src/Fleet.cpp`](src/Fleet.cpp) | Process table, sessions, restarts, queue |
-| [`src/Spawn.cpp`](src/Spawn.cpp) | `fork` + `execv`, and `SO_PEERCRED` |
+| [`src/Spawn.cpp`](src/Spawn.cpp) | `fork` + `execv` of `pgdemo-device` |
 
 ## Startup
 
 `main` blocks `SIGINT`, `SIGTERM` and `SIGCHLD` before any thread exists, so the pool and the listener inherit the mask. Children start with an empty mask (`spawn_process`). `SIGPIPE` is ignored.
 
-It then connects as `pgdemo-controller`, creates the current and upcoming history partitions, builds the fleet and binds the Unix socket. The four channels are registered and the listener loop starts **before** `Fleet::start()`. `boot()` therefore reads devices and open enrollments while `LISTEN` is already active: a commit in between is either in that read or arrives as a notification.
+It then connects as `pgdemo-controller`, creates the current and upcoming history partitions, builds the fleet and takes `devices-dir/.controller.lock`. The four channels are registered, the subscriptions to `pgdemo/worker/` are active, and the listener loop starts **before** `Fleet::start()`. `boot()` therefore reads devices and open enrollments while both `LISTEN` and the topics are already active: a commit or a `hello` in between is either in that read or arrives as an event.
 
 `Fleet::start()` spawns six coroutines on the `io_context` and `main` unblocks the signals so Asio's `signal_set` can receive them. `io.run()` returns when shutdown has finished. Queued database work is joined, the listener stops, and the process exits with `Fleet::exit_code()`: `0` after a signal, `1` when the listener connection was lost (a supervisor can restart it). A bad option exits `2`.
 
 ## Threads
 
-The `io_context` runs with one thread. That thread owns the process table, the slots and the sessions, so none of them takes a lock. The libpqxx listener thread only posts into `notify()`. Database calls block, so a coroutine `co_await`s `on_db()` on the thread pool and resumes on the io thread with the result. Writes of `device_session` go through the `writes_` strand, which keeps their order; shutdown resets sessions on that same strand, after every state already queued.
+The `io_context` runs with one thread. That thread owns the process table, the slots, the sessions and the shared telemetry queue, so none of them takes a lock. The libpqxx listener thread only posts into `notify()`, and the ROS executor only posts each worker message onto the same thread. Database calls block, so a coroutine `co_await`s `on_db()` on the thread pool and resumes on the io thread with the result. Each `on_db()` checks out one [`ConnectionPool::Lease`](../libs/db/include/db/ConnectionPool.hpp) and returns it when the transaction ends, including when it throws. Workers never see that lease: they have no connection string, and `close_range` between `fork` and `execv` drops every descriptor the pool holds. Writes of `device_session` go through the `writes_` strand, which keeps their order; shutdown resets sessions on that same strand, after every state already queued.
 
 ```mermaid
 flowchart TB
@@ -39,14 +39,14 @@ flowchart TB
     pool --> pg
     listener -.->|LISTEN NOTIFY| pg
     fleet -->|fork plus execv| devices
-    devices -->|Unix socket| fleet
+    devices -->|pgdemo/worker and pgdemo/manager| fleet
 ```
 
 ## Command line
 
 ```text
 pgdemo-controller [--conninfo STR] [--pool-size N] [--max-devices N]
-                  [--device-bin PATH] [--devices-dir DIR] [--socket PATH]
+                  [--device-bin PATH] [--devices-dir DIR]
                   [--enrollment-timeout-s N] [--pending-max-age-s N]
                   [--maintenance-interval-s N]
 ```
@@ -57,15 +57,14 @@ pgdemo-controller [--conninfo STR] [--pool-size N] [--max-devices N]
 | `--pool-size` | 8 | Query connections and database threads |
 | `--max-devices` | 16 | Device processes run at once; the rest are `UNMANAGED` |
 | `--device-bin` | Beside this binary, else `../device/pgdemo-device` | `pgdemo-device` executable. It must be executable |
-| `--devices-dir` | `run/devices` | One key directory per device, mode `0700` |
-| `--socket` | `DIR/.controller.sock` | Socket the devices connect to, mode `0600` |
+| `--devices-dir` | `run/devices` | One key directory per device, mode `0700`. The lock file is `DIR/.controller.lock` |
 | `--enrollment-timeout-s` | 120 | Open enrollments older than this become `EXPIRED` |
 | `--pending-max-age-s` | 600 | `PENDING` configuration older than this becomes `TIMEOUT` |
 | `--maintenance-interval-s` | 3600 | How often partition maintenance runs |
 
-Device names cannot start with a dot, so the socket file never clashes with a key directory.
+Device names cannot start with a dot, so `.controller.lock` never clashes with a key directory.
 
-`open_socket()` probes an existing socket path first. A controller that answers there is left alone and this process exits: rebinding would orphan its children and start a second copy of every device. A socket left by a killed controller refuses the probe and is replaced.
+`acquire_lock()` takes an exclusive `fcntl` lock on that file. A second controller on this machine exits. The lock is per process and is not inherited across `fork`, so a device child does not release it. One ROS domain runs one controller.
 
 ## Process table
 
@@ -90,34 +89,34 @@ One `Slot` per device name, or per enrollment that has no device row yet. The in
 `start_process()` creates `devices-dir/<name>` at mode `0700` and execs:
 
 ```text
-pgdemo-device --name NAME --type TYPE --payload scalar|gps --socket PATH --dir DIR
+pgdemo-device --name NAME --type TYPE --payload scalar|gps --dir DIR
               [--enroll REQUEST_ID | --rotate REQUEST_ID]
 ```
 
-`spawn_process()` builds `argv` before the fork. Between `fork` and `execv` the child only calls async-signal-safe functions: it restores default dispositions for `SIGINT`, `SIGTERM`, `SIGCHLD` and `SIGPIPE`, clears the signal mask, asks for `SIGTERM` when the forking thread dies (`PR_SET_PDEATHSIG`), exits `127` if that parent is already gone, closes every descriptor above stderr, then `execv`. The death signal is tied to the thread that forked, which is the io thread, the one that lives as long as the children.
+`spawn_process()` builds `argv` before the fork. Between `fork` and `execv` the child only calls async-signal-safe functions: it restores default dispositions for `SIGINT`, `SIGTERM`, `SIGCHLD` and `SIGPIPE`, clears the signal mask, asks for `SIGTERM` when the forking thread dies (`PR_SET_PDEATHSIG`), exits `127` if that parent is already gone, closes every descriptor above stderr, then `execv`. The child is a new ROS node (`pgdemo_device_<name>`); it inherits the parent's ROS environment and nothing of its DDS participant, because `execv` replaces the image. The death signal is tied to the thread that forked, which is the io thread.
 
-The pid is recorded before the child can connect. `set_state` writes `STARTING`.
+The pid is recorded before the child can publish. `set_state` writes `STARTING`. If no `hello` arrives within 5 s the child is killed.
 
 ## A connection
 
-`accept_loop()` spawns `device_session()` per accepted socket. Frames are a 4-byte big-endian length and a JSON object; the full list is in [docs/DEVICE_PKI.md](../docs/DEVICE_PKI.md#frames).
+`on_hello()` and `on_uplink()` receive the worker topics. The fields are the structs in [msgs/README.md](../msgs/README.md). A `hello` opens the session. Anything else for a name with no session is kept until that `hello`, then delivered. Appearing in the ROS graph is not admission: only the manager accepts a `hello`, and a worker cannot supervise another worker.
 
-1. `SO_PEERCRED` must report this process's uid and a pid in the table. The session is bound to the name that pid was started with.
-2. `hello` must arrive within 5 s, name that device, and name the mode the process was started with (`run`, `enroll` or `rotate`). A second connection from the same process is refused.
+1. The `hello` names a wanted slot and the mode that slot expects (`run`, `enroll` or `rotate`). A slot with no process yet takes this node and is not forked. A `hello` repeated while the handshake is in progress is ignored. A `hello` after the device is online gets `bye`.
+2. A child that was just forked has 5 s to publish that `hello`.
 3. `Enroll` and `Rotate` then wait up to 30 s for a `csr`, store it with `submit_csr`, and wait on the session's decision channel for up to `--enrollment-timeout-s`. `enrollment_events` delivers the outcome into that channel. `ISSUED` is forwarded as `cert` and the process continues as `Run`; anything else is forwarded as `rejected` and the session ends. A process that exits before the certificate is delivered fails the enrollment with `DEVICE_EXITED`.
 4. Challenge-response, 5 s for the proof. The controller re-reads the device, the active roots and the CRL, so a revocation committed a moment ago counts. The checks themselves are [docs/DEVICE_PKI.md](../docs/DEVICE_PKI.md#5-authentication). An identity that is not `ACTIVE` ends the session as `DISABLED`. A failed proof ends it as `AUTH_FAILED` and clears `wanted`: the process is left down until the identity changes.
-5. `serve()` marks the session online **before** reading the applied configuration, so a configuration committed from here on is queued behind the initial `config` frame. It writes `ONLINE` and runs `read_samples()` and `write_frames()` together. The first one to finish stops the other.
+5. `serve()` marks the session online **before** reading the applied configuration, so a configuration committed from here on is published after the initial `config` frame. It writes `ONLINE` and reads samples until the session closes.
 
-`read_samples()` stores each `sample` (scalar value, or a GPS origin, radius and bearing that the INSERT projects with `ST_Project`) and refreshes `last_frame` on every frame, including `heartbeat`. `write_frames()` is the only writer toward the device: configuration updates and `bye`. The outbox holds 64 frames; a frame that does not fit is dropped.
+`read_samples()` refreshes `last_frame` on every message, including `heartbeat`, and pushes samples onto the shared telemetry queue. It does not open a database session. The manager publishes `pgdemo/manager/` (`config`, `bye`, the handshake) with the device name stamped on it. The inbox holds 64 uplink messages; one that does not fit is dropped.
 
-When the session ends for any reason, the slot drops it, writes `OFFLINE` if it was `ONLINE` or `STARTING`, and sends `SIGTERM`. A process without its session has nothing to do.
+When the session ends, the slot drops it and writes `OFFLINE` if it was `ONLINE` or `STARTING`. A child is then sent `SIGTERM`. A node this controller did not fork only gets `bye`.
 
 ```mermaid
 sequenceDiagram
     participant F as Fleet
     participant D as pgdemo-device
     F->>D: fork and execv
-    D->>F: connect and hello
+    D->>F: hello on pgdemo/worker/control/hello
     opt enroll or rotate
         D->>F: csr
         F->>D: cert or rejected
@@ -137,13 +136,19 @@ sequenceDiagram
 
 An exit the controller did not request, while the next launch is `Run`, waits `1 << min(failures, 5)` seconds before the next start, and never more than 30 s. The first such exit waits 1 s. A process that stayed online for 60 s resets the count. A stop this controller requested (`stopping`, set by `stop_process`) is reconciled at once, which is how a rotation or a lifted hold replaces the process without waiting. `AUTH_FAILED` leaves `wanted` false, so the restart is not scheduled. `DISABLED` is reconciled back into the same state.
 
-`stop_process()` sets `stopping`, queues a `bye` with the reason, and sends `SIGTERM`.
+`stop_process()` publishes `bye` with the reason. A child is then sent `SIGTERM` (`stopping` is set, so the reaper starts the next one at once). A node this controller did not create is released.
 
-`heartbeat_loop()` runs every 10 s. An online device with no frame for 30 s (the device heartbeats every 5 s while paused) is `SIGKILL`ed and then reaped like any other exit. Devices that spoke are touched in `device_session.last_seen`.
+`heartbeat_loop()` runs every 10 s. An online device with no frame for 30 s (the device heartbeats every 5 s while paused) is `SIGKILL`ed when it is a child, and only released when it is not. Devices that spoke are touched in `device_session.last_seen`.
 
 `maintenance_loop()` runs every 30 s. It expires enrollments older than `--enrollment-timeout-s`, sweeps (re-reads every device and every pending enrollment, drops slots whose device row is gone, reconciles), and, every `--maintenance-interval-s`, creates the upcoming history partitions. The sweep is what notices a certificate that expired without a write. If `listener_alive()` is false it shuts down with exit code 1.
 
-Shutdown, from `SIGINT` or `SIGTERM`, closes the acceptor, sends `bye` and `SIGTERM` to every child, waits up to 5 s, and `SIGKILL`s whoever is left. It removes the socket, resets every session on the write strand, and stops the `io_context`.
+Shutdown, from `SIGINT` or `SIGTERM`, publishes `bye` and sends `SIGTERM` to every child, waits up to 5 s, and `SIGKILL`s whoever is left. It flushes the telemetry queue, releases the lock, resets every session on the write strand, and stops the `io_context`.
+
+## Telemetry queue
+
+Samples from every worker share one queue on the io thread. A `heartbeat`, a CSR, a proof and a session write do not enter it: those still call `on_db()` at once, on the same pool.
+
+The queue holds 4096 samples. Past that, the sample that just arrived is dropped and counted, and the session coroutine does not wait. `telemetry_loop()` flushes when 64 samples are queued or 100 ms have passed. One flush checks out one `Lease`, inserts every row into `telemetry_scalar` or `telemetry_gps`, and upserts `device_state` once per device with the highest `seq` in the batch. Shutdown flushes whatever remains after the workers have been closed, before it resets `device_session`.
 
 ## What changes the fleet
 

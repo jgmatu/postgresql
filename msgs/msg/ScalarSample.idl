@@ -1,0 +1,9 @@
+module pgdemo_msgs {
+  module msg {
+    struct ScalarSample {
+      string device;
+      int64 seq;
+      double value;
+    };
+  };
+};

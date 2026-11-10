@@ -1,0 +1,10 @@
+module pgdemo_msgs {
+  module msg {
+    typedef octet octet__96[96];
+    struct Proof {
+      string device;
+      string cert;
+      octet__96 signature;
+    };
+  };
+};

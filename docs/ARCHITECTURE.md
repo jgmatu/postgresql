@@ -17,7 +17,7 @@ This document explains how two processes that never talk to each other run a rea
 |---|---|---|---|---|
 | `pgdemo-server` | A | `demo_server` (NOINHERIT) | `device_enrollment` (enroll, rotate), `device` and `device_certificate` (issue through `issue_device_certificate()`, remove), `crl`, `device_config_pending`, `app_users` | `telemetry_scalar`, `telemetry_gps`, `device_events`, `enrollment_csr`, `enrollment_events`, `config_events`, `error_events` |
 | `pgdemo-controller` | B | `demo_controller` | `device_enrollment` (CSR, status), `device_session`, `device_state`, `telemetry_scalar`, `telemetry_gps`, `device_config`, `device_config_errors` | `enrollment_requested`, `enrollment_events`, `device_events`, `config_requested` |
-| `pgdemo-device` | B | none | samples, over a Unix socket to the controller | configuration frames from the controller |
+| `pgdemo-device` | B | none | samples on `pgdemo/worker/` (telemetry, hello, proof) | `pgdemo/manager/`: challenge, certificate, configuration, bye |
 | `client/pgdemo.sh` | host | none | over HTTPS (8443) or, with `--http`, plain HTTP (8080) | SSE `/api/stream` |
 | control panel ([`frontend/`](../frontend)) | browser | none | `/api` with a bearer token, on the server's own origin | SSE `/api/stream`, read with `fetch()` |
 
@@ -57,9 +57,9 @@ flowchart TB
     PG[("PostgreSQL")]
     HTTP <--> PG
     SL <-. "NOTIFY" .-> PG
-    P1 <-- "Unix socket" --> F
-    P2 <-- "Unix socket" --> F
-    PN <-- "Unix socket" --> F
+    P1 <-- "pgdemo/worker, pgdemo/manager" --> F
+    P2 <-- "pgdemo/worker, pgdemo/manager" --> F
+    PN <-- "pgdemo/worker, pgdemo/manager" --> F
     DB --> PG
     CL <-. "NOTIFY" .-> PG
 ```
@@ -85,9 +85,9 @@ One trigger on `device_state` publishes each sample on the channel of its payloa
 
 GPS positions are `geography(Point, 4326)`, installed with PostGIS in the `extensions` schema. The device does not compute latitude and longitude itself. It sends a fixed origin (Madrid), a radius (`amplitude`, metres) and a bearing, and the controller's INSERT calls `ST_Project`. GiST indexes cover `device_state` and every monthly partition of `telemetry_gps`.
 
-Each device is a `pgdemo-device` process, started by the controller with `fork` + `execv` and connected back to it over the Unix socket `run/devices/.controller.sock`. After it has proved its identity (challenge-response with its private key, plus `SO_PEERCRED`; see [DEVICE_PKI.md](DEVICE_PKI.md#5-authentication)), it streams samples from a generator chosen by `type_id`, with a phase derived from `device_id`, at the configured rate. Frames are a 4-byte big-endian length and a JSON object (`libs/wire`). Both sides are Boost.Asio C++20 coroutines: the device runs the producer, the frame reader and its signal handler as three coroutines on one thread; the controller runs every session, the child reaper, the heartbeat and the maintenance loops on one `io_context` thread, so its process table needs no lock. Database calls block (libpqxx), so `on_db()` runs them on a small thread pool and the coroutine resumes with the result.
+Each device is a `pgdemo-device` worker, started by the controller (the manager) with `fork` + `execv`, or started on another host in the same ROS domain. Workers publish `pgdemo/worker/` and subscribe to `pgdemo/manager/`. The structs are [msgs/README.md](../msgs/README.md). ROS 2 discovers the nodes as peers; that discovery is not authority. The manager admits, challenges, configures and stops. Workers do not talk to each other and have no database login. After a worker has proved its identity (challenge-response with its private key; see [DEVICE_PKI.md](DEVICE_PKI.md#5-authentication)), it streams samples from a generator chosen by `type_id`, with a phase derived from `device_id`, at the configured rate. The manager runs every session, the child reaper, the heartbeat, the telemetry flush and the maintenance loops on one `io_context` thread, so its process table needs no lock; the ROS executor only posts each worker message onto that thread. Database calls block (libpqxx), so `on_db()` checks a connection out of [`ConnectionPool`](../libs/db/include/db/ConnectionPool.hpp) on a thread pool and the coroutine resumes with the result. Samples are queued and written in batches, one lease per flush. A node the manager did not fork is admitted by the same `hello` and is not signaled when it goes silent: the session is released. The lifecycle is [controller/README.md](../controller/README.md).
 
-For every sample the controller writes one statement: a CTE that UPSERTs `device_state` and appends the same sample to the telemetry table of the device's payload. The trigger fires on `device_state`, and PostgreSQL delivers the notification **only when the transaction commits**, so a listener never sees a value that was rolled back.
+The controller appends a batch of samples in one `INSERT` per payload and UPSERTs `device_state` with the latest `seq` of each device. The trigger fires on `device_state`, and PostgreSQL delivers the notification **only when the transaction commits**, so a listener never sees a value that was rolled back.
 
 The fleet changes at run time. The controller listens to `enrollment_requested` (start a process with `--enroll` to generate a key and a CSR, or replace the running one with a `--rotate` process), `enrollment_events` (deliver the issued certificate to that same process, which then authenticates and streams) and `device_events` (stop the process on `DELETE` or a revocation of the current certificate, start it again when a hold is lifted). At start-up it does the same for every device and every open enrollment, after `LISTEN` is active, so nothing falls between the two; every 30 s it reconciles again, which catches a certificate that expired. The listener thread only posts each notification to the `io_context` thread. A process that exits is restarted with a backoff (1 s, doubling to 30 s), and `--max-devices` bounds how many run; the rest are `UNMANAGED`.
 
@@ -103,9 +103,9 @@ sequenceDiagram
     participant H as EventHub
     participant B as SSE client devices=dummy3
     P1->>C: sample {value, seq}
-    C->>PG: UPSERT device_state + INSERT telemetry_scalar (COMMIT)
+    C->>PG: INSERT telemetry_scalar + UPSERT device_state (COMMIT)
     P3->>C: sample {origin, radius_m, bearing_rad, seq}
-    C->>PG: ST_Project, UPSERT device_state + INSERT telemetry_gps (COMMIT)
+    C->>PG: ST_Project, INSERT telemetry_gps + UPSERT device_state (COMMIT)
     PG-->>L: NOTIFY telemetry_scalar {device: dummy1, value, seq}
     PG-->>L: NOTIFY telemetry_gps {device: dummy3, lon, lat}
     L->>H: publish("telemetry_scalar", "dummy1", ...)
@@ -115,7 +115,7 @@ sequenceDiagram
 
 `EventHub::publish` never blocks the listener thread. Each subscriber has a bounded queue, and a slow client loses its oldest events rather than stalling notification delivery for everybody.
 
-One notification per sample keeps the demo simple. Commits that call `pg_notify` serialize on a cluster-wide lock, so a large fleet needs batched wake-ups, logical decoding or a broker; [sql/README.md](../sql/README.md#scaling-notes) lists the options.
+Each `device_state` write notifies its channel. Commits that call `pg_notify` serialize on a cluster-wide lock, so a large fleet needs batched wake-ups, logical decoding or a broker; [sql/README.md](../sql/README.md#scaling-notes) lists the options.
 
 ## 3. Control plane: desired vs applied configuration
 
@@ -241,7 +241,8 @@ Each row returned by `/api/devices/{name}/history` carries its partition name (`
 - **No user enumeration.** When the username does not exist, the server verifies the password against a fixed dummy hash anyway, so response time does not reveal whether a user exists. Both failures return the same `401` body.
 - **Login lookup without table access.** `demo_server` has no privilege on `app_users`. It calls `auth_fetch_user(username)`, a `SECURITY DEFINER` function that returns one hash and one role, and nothing else.
 - **Tokens.** JWT signed with ES384 (ECDSA P-384, SHA-384, raw `r‖s` signature, RFC 7518 §3.4). The signing key is a PKCS#8 file and verification uses the public key of an X.509 certificate, both generated by `scripts/gen-jwt-keys.sh` into `run/keys/`. Verification pins `alg` to ES384, so `none` and algorithm confusion are rejected. It also checks the issuer, the expiry, and that `sub` and `role` are present.
-- **Devices.** Each device process holds an ECDSA P-384 key that never leaves its directory (`run/devices/<name>/key.pem`, mode 0600, controller side only) and a certificate signed by the internal root CA, whose key only the server reads (`run/ca/`). The controller accepts a connection only from its own child (`SO_PEERCRED` uid and pid) that signs a fresh challenge with the key of the device's current, unrevoked certificate. [DEVICE_PKI.md](DEVICE_PKI.md) has the details.
+- **Workers against the manager.** A worker holds an ECDSA P-384 key that never leaves its directory (`run/devices/<name>/key.pem`, mode 0600) and a certificate signed by the internal root CA, whose key only the server reads (`run/ca/`). It has no database login and does not inherit the manager's sockets: between `fork` and `execv` the child closes every descriptor above stderr. It publishes only `pgdemo/worker/` and ignores manager messages for another name. The manager admits a node whose `hello` names a slot it wants, then requires that node to sign a fresh challenge with the key of the device's current, unrevoked certificate. Membership of the ROS graph is not that proof. [DEVICE_PKI.md](DEVICE_PKI.md) has the details.
+- **Manager against the database.** The manager logs in as `demo_controller` and is the only process of the fleet that appears in `pg_stat_activity`. Query work goes through a fixed [`ConnectionPool`](../libs/db/include/db/ConnectionPool.hpp) (`--pool-size`, 8 by default). Each `on_db()` holds one `Lease` for one transaction and returns it afterwards; the pool mutex covers only the free list. The `LISTEN` connection is not in the pool. Telemetry does not take a lease per sample: one shared queue is flushed as a batch. CSR, proof and session state still write immediately.
 - **Default-deny routing.** The server answers two kinds of path, and `http::is_api_path()` ([`server/src/http/Paths.hpp`](../server/src/http/Paths.hpp)) decides which one a request is: it percent-decodes the path, folds case and collapses leading slashes, so `/api/x`, `/API/x`, `/%61pi/x` and `//api/x` are all `/api`.
   - **`/api` and everything under it.** `AuthInterceptor` requires a valid bearer token on every such path except `POST /api/auth/login` and `GET /api/health`, whether an endpoint matches it or not. A route added later is protected by default, and an unknown one answers a JSON `404` only after the token check.
   - **Everything else: the control panel.** With `--webroot`, `PanelController` registers `GET *` after every API controller. Oat++ takes the first route that matches, so it only receives paths no endpoint claimed. It serves the static export of `frontend/` from memory (`http::StaticSite`, loaded once at start): `index.html` per route, `404.html` with status `404` for anything else, a JSON `404` for an `/api` path that reached it. A path with `..`, a NUL or no leading `/` matches nothing, so nothing outside `webroot/` can be read. Hashed bundles under `/_next/static/` are cached `immutable`, everything else `no-cache`, and every file carries `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer` and a `Content-Security-Policy` that allows only the origin. The panel's files are public and hold no data; the role is enforced on each `/api` call it makes, so hiding the administration panel from a normal user is presentation, not a control.
@@ -322,7 +323,7 @@ The full matrix is in [sql/README.md](../sql/README.md#roles-and-privileges) and
 | Notification missed (listener restarted between commit and wait) | Dispatcher times out. The server reads the row and answers from it. |
 | Listener connection lost | `listener_alive()` turns false, the process exits with status 1, and the supervisor restarts it. On restart the controller reads every device and every open enrollment and drains the queue again; the server signs any CSR left `CSR_SUBMITTED`. |
 | Duplicate device name | Unique violation `23505`, mapped to `409`. Unknown device type: `400`. |
-| A second controller on the same host | It exits at start-up: another controller answers on `run/devices/.controller.sock`. A socket left by a killed controller refuses connections and is replaced. (Controllers on separate hosts would each run every device; the configuration queue itself is `SKIP LOCKED`, so each request is still applied once.) |
+| A second controller on the same host | It exits at start-up: another controller holds `run/devices/.controller.lock`. One ROS domain has one controller. (The configuration queue itself is `SKIP LOCKED`, so each request is still applied once.) |
 | Duplicate username | Unique violation `23505`, mapped to `409`. |
 | Invalid username format, last-admin removal | `CHECK` or trigger (`23514`), mapped to `422`. |
 | Too many concurrent configuration requests | 500 waiters: `503`, nothing enqueued. |
