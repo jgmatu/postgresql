@@ -66,7 +66,7 @@ flowchart TB
     subgraph app ["src/app (App Router, static export)"]
         login["page.tsx: login"]
         subgraph panel ["(panel)/layout.tsx: PanelShell"]
-            view["devices, device, config, map, pki, events, system"]
+            view["devices, device, config, map, pki, events, system, history"]
             subgraph admin ["admin/layout.tsx: AdminShell"]
                 adm["admin/devices, identity, config, users"]
             end
@@ -155,7 +155,7 @@ flowchart LR
 
 ### Two panels
 
-The **visualization panel** is the default and the whole app for a `normal` user: six tabs in a Catalyst `StackedLayout` navbar, nothing that writes. The **administration panel** appears only for `admin`, after a divider in the same navbar: an amber `Administración` entry with an `admin` badge, an amber banner on every admin page ("Estas acciones modifican la flota…"), its own sub-tabs, amber primary buttons and red ones for anything destructive, which always asks first (`ConfirmDialog`). On visualization pages the admin also gets amber **Gestionar** buttons that jump to the matching admin page. The user menu shows the user, a role badge (amber for admin, grey for normal) and the PostgreSQL group the server uses for that role.
+The **visualization panel** is the default and the whole app for a `normal` user: seven tabs in a Catalyst `StackedLayout` navbar, nothing that writes. The **administration panel** appears only for `admin`, after a divider in the same navbar: an amber `Administración` entry with an `admin` badge, an amber banner on every admin page ("Estas acciones modifican la flota…"), its own sub-tabs, amber primary buttons and red ones for anything destructive, which always asks first (`ConfirmDialog`). On visualization pages the admin also gets amber **Gestionar** buttons that jump to the matching admin page. The user menu shows the user, a role badge (amber for admin, grey for normal) and the PostgreSQL group the server uses for that role.
 
 ### Routes
 
@@ -169,6 +169,7 @@ The **visualization panel** is the default and the whole app for a `normal` user
 | PKI | `/pki/` | all | `GET /api/pki/ca`, `GET /api/pki/crl`, `GET /api/enrollments` | `enrollment`, `device` |
 | Eventos | `/events/` | all | — | the ones ticked, `devices=` as typed |
 | Sistema | `/system/` | all | `GET /api/health`, `GET /api/db/info` (every 5 s), `GET /api/device-types`, `GET /VERSION` | — |
+| Histórico | `/history/` | all | `GET /api/devices`, `GET /api/devices/{name}/history?from=&to=&limit=`, `GET /api/config/history?device=`, `GET /api/enrollments?device=`, `GET /api/pki/ca` | — |
 | Admin · Dispositivos | `/admin/devices/` | admin | `POST /api/devices` (then `GET /api/enrollments/{id}` until resolved), `DELETE /api/devices/{name}` | `device` |
 | Admin · Identidad | `/admin/identity/?name=<device>` | admin | `POST`/`DELETE /api/devices/{name}/revoke`, `POST …/rotate`, `DELETE …/certificates/{serial}` | `device`, `enrollment`, `devices=<name>` |
 | Admin · Configuración | `/admin/config/?device=<device>` | admin | `POST /api/config` (then `GET /api/config/requests/{id}` after a 202) | `config`, `error` |
@@ -231,6 +232,8 @@ Eventos: the raw stream; channels and devices are filtered by the server (`?chan
 ![Sistema](docs/screens/system.png)
 
 Sistema: `GET /api/health`, `GET /api/db/info` (PostgreSQL, connection pool, SSE subscribers, listener), the device types, the session and the panel version (`/VERSION`).
+
+Histórico: a read-only audit under the session role (`demo_normal` or `demo_admin`). Samples of one device (`GET /api/devices/{name}/history`, last hour when no dates are set, with the partition), applied configuration (`GET /api/config/history`), enrollments and rotations (`GET /api/enrollments`, including who asked), and revocations from `GET /api/pki/ca`.
 
 ![Normal user menu](docs/screens/user-menu-normal.png)
 

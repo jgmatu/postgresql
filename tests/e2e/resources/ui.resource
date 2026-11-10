@@ -48,7 +48,7 @@ Logout
 
 Go To Tab
     [Documentation]    A tab of the visualization panel (``devices``, ``config``, ``map``, ``pki``,
-    ...                ``events``, ``system``), from the navbar.
+    ...                ``events``, ``system``, ``history``), from the navbar.
     [Arguments]    ${tab}
     Click    data-testid=nav-${tab}
     Wait For Elements State    data-testid=page-${tab}    visible

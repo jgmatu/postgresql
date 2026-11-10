@@ -1,6 +1,7 @@
 import {
   AdjustmentsHorizontalIcon,
   BoltIcon,
+  ClockIcon,
   CpuChipIcon,
   FingerPrintIcon,
   MapIcon,
@@ -27,6 +28,7 @@ export const VIEW_TABS: Tab[] = [
   { href: "/pki/", label: "PKI", testId: "nav-pki", icon: ShieldCheckIcon },
   { href: "/events/", label: "Eventos", testId: "nav-events", icon: BoltIcon },
   { href: "/system/", label: "Sistema", testId: "nav-system", icon: ServerStackIcon },
+  { href: "/history/", label: "Histórico", testId: "nav-history", icon: ClockIcon },
 ];
 
 /** Administration panel: admin only. */

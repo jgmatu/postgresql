@@ -156,7 +156,7 @@ Inside its container the server listens on HTTPS port 8443, like `scripts/run-al
 
 ## Control panel
 
-The server also serves a web control panel on the same origin as the API: `https://127.0.0.1:8443/` with `scripts/run-all.sh`, `http://127.0.0.1:8080/` with `--http`, and `https://127.0.0.1:8080/` from Docker. It opens on a login page; every user gets the visualization tabs (devices live over SSE, detail with chart and history, configuration, GPS map, PKI and CRL, events, system), and the `admin` user also gets an amber administration panel to enroll and delete devices, revoke, suspend and rotate certificates, change configurations and manage users.
+The server also serves a web control panel on the same origin as the API: `https://127.0.0.1:8443/` with `scripts/run-all.sh`, `http://127.0.0.1:8080/` with `--http`, and `https://127.0.0.1:8080/` from Docker. It opens on a login page; every user gets the visualization tabs (devices live over SSE, detail with chart and history, configuration, GPS map, PKI and CRL, events, system, and a read-only Histórico of samples, applied configuration, enrollments and revocations), and the `admin` user also gets an amber administration panel to enroll and delete devices, revoke, suspend and rotate certificates, change configurations and manage users.
 
 ![Dispositivos](frontend/docs/screens/devices.png)
 

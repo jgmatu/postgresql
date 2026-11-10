@@ -30,7 +30,7 @@ Wrong password is refused
 
 A normal user sees the visualization tabs only
     Login As    ${NORMAL_USER}    ${NORMAL_PASSWORD}
-    FOR    ${tab}    IN    devices    config    map    pki    events    system
+    FOR    ${tab}    IN    devices    config    map    pki    events    system    history
         Wait For Elements State    data-testid=nav-${tab}    visible
     END
     Get Attribute    data-testid=nav-devices    data-current    ==    true

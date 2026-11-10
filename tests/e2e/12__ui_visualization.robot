@@ -1,7 +1,8 @@
 *** Settings ***
 Documentation     Every visualization tab as the normal user: the live device list, the detail with its
 ...               chart and history, configuration, the GPS map, PKI with the CRL, the event stream
-...               with server-side filters, and the system status. Read-only: no "Gestionar" links.
+...               with server-side filters, the system status, and the read-only audit history.
+...               Read-only: no "Gestionar" links.
 Resource          resources/ui.resource
 Suite Setup       Open Panel And Login
 Suite Teardown    Close Browser    ALL
@@ -140,6 +141,16 @@ Sistema reports health, PostgreSQL and the session
     Badge Should Be    data-testid=system-role    normal
     Get Text    data-testid=panel-version    matches    ^[0-9a-f]{12}(-dirty)? · \\d{4}-
     Capture Screen    system
+
+Histórico reads dummy1 samples for the session role
+    Go To Tab    history
+    Get Text    data-testid=page-history    contains    demo_normal
+    Wait For Elements State    data-testid=history-device >> option[value="dummy1"]    visible
+    Select Options By    data-testid=history-device    value    dummy1
+    Wait For Elements State    data-testid=sample-history-table    visible
+    Get Text    data-testid=sample-partition >> nth=0    matches    ^telemetry_scalar_y
+    Count Should Be    data-testid=applied-history-table >> tbody tr    >    0
+    Count Should Be    data-testid=enrollment-history-table >> tbody tr    >    0
 
 
 *** Keywords ***
