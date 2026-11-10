@@ -233,6 +233,8 @@ Eventos: the raw stream; channels and devices are filtered by the server (`?chan
 
 Sistema: `GET /api/health`, `GET /api/db/info` (PostgreSQL, connection pool, SSE subscribers, listener), the device types, the session and the panel version (`/VERSION`).
 
+![Histórico](docs/screens/history.png)
+
 Histórico: a read-only audit under the session role (`demo_normal` or `demo_admin`). Samples of one device (`GET /api/devices/{name}/history`, last hour when no dates are set, with the partition), applied configuration (`GET /api/config/history`), enrollments and rotations (`GET /api/enrollments`, including who asked), and revocations from `GET /api/pki/ca`.
 
 ![Normal user menu](docs/screens/user-menu-normal.png)

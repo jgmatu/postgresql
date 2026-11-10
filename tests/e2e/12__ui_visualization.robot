@@ -151,6 +151,7 @@ Histórico reads dummy1 samples for the session role
     Get Text    data-testid=sample-partition >> nth=0    matches    ^telemetry_scalar_y
     Count Should Be    data-testid=applied-history-table >> tbody tr    >    0
     Count Should Be    data-testid=enrollment-history-table >> tbody tr    >    0
+    Capture Screen    history
 
 
 *** Keywords ***
