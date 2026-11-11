@@ -60,7 +60,7 @@ Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design: sequence diagr
 | [`libs/auth`](libs/auth) | `PasswordHasher` (Argon2id) and `JwtManager` (ES384), both on Botan 3. |
 | [`libs/pki`](libs/pki) | Device PKI on Botan 3: `CertificateAuthority` (sign CSRs, build the CRL), `DeviceKey` (P-384 key and CSR), `CertVerifier` (chain, subject, CRL), and the challenge-response proof. |
 | [`msgs/`](msgs) | ROS 2 interface contract between the manager and its workers: one struct per topic, under `pgdemo/manager/` and `pgdemo/worker/`. [msgs/README.md](msgs/README.md) lists every topic, its publisher and its fields. |
-| [`server/`](server) | `pgdemo-server`: Oat++ API, `AuthInterceptor`, `Dispatcher`, `EventHub` for Server-Sent Events, and `CertificateSigner`, the CA. |
+| [`server/`](server) | `pgdemo-server`: the REST API, the control panel and TLS. [server/README.md](server/README.md) is the route table, the panel's MVC and HTTPS with `oqsprovider`. |
 | [`controller/`](controller) | `pgdemo-controller`, the manager: one worker per device (`fork` + `execv`, ROS 2 topics, challenge-response, restart with backoff), a sample queue per node, and the configuration queue. [controller/README.md](controller/README.md) is the lifecycle. |
 | [`device/`](device) | `pgdemo-device`: generates its key and CSR, proves its identity to the controller and streams samples from its generator. |
 | [`client/pgdemo.sh`](client/pgdemo.sh) | Command-line client: login, users, devices and certificates, PKI, telemetry, configuration, live monitor. |
@@ -175,27 +175,9 @@ scripts/fetch-webroot.sh                     # the panel CI built and tested on 
 
 `scripts/run-all.sh` passes `--webroot webroot` when `webroot/index.html` exists and logs `panel: N files from …`; otherwise it warns "panel no disponible" and the server runs the API alone. [frontend/README.md](frontend/README.md) covers development, the design, the role model and every screen.
 
-## TLS: oatpp-openssl, OpenSSL 3.5 and oqsprovider
+## TLS
 
-oatpp-openssl only wraps the TCP socket. `oatpp::openssl::Config::createDefaultServerConfigShared(cert, key)` loads the certificate and the private key and sets nothing else: no protocol version, no groups. Those come from OpenSSL itself. Before Oat++ creates the `SSL_CTX`, `pgdemo-server` sets `OPENSSL_CONF` and `OPENSSL_MODULES` to its own directory (`build/server/`). There the build has copied [`server/openssl-oqs.cnf`](server/openssl-oqs.cnf) and `oqsprovider.so`. When OpenSSL builds the context it reads that file, which:
-
-- activates the `default` provider and the liboqs `oqsprovider`;
-- sets `MinProtocol = TLSv1.3`, so a TLS 1.2 client gets a `protocol_version` alert;
-- sets `Groups = ?X25519MLKEM768 / ?x25519_mlkem512 / ?x25519_hqc1 / ?X25519`. `/` separates preference tiers: the server picks the hybrid `X25519MLKEM768`, native in OpenSSL 3.5, over the classic `X25519` that curl also offers. It accepts the liboqs groups when a client offers them.
-
-```mermaid
-flowchart LR
-    runAll["scripts/run-all.sh"] -->|"--tls-key --tls-cert"| server["pgdemo-server"]
-    server -->|"OPENSSL_CONF, OPENSSL_MODULES"| cnf["build/server/openssl-oqs.cnf"]
-    cnf --> providers["default + oqsprovider.so"]
-    server --> oatppSsl["oatpp-openssl ConnectionProvider"]
-    oatppSsl --> tcp["Oat++ TCP provider 127.0.0.1:8443"]
-    oatppSsl --> sslCtx["SSL_CTX: TLS 1.3, groups"]
-    cnf --> sslCtx
-    providers --> sslCtx
-```
-
-`scripts/run-all.sh --http` omits `--tls-key` and `--tls-cert`. The server then uses the plain TCP provider on port 8080 and never loads the OpenSSL config.
+`pgdemo-server` terminates TLS 1.3. A stock client negotiates `X25519MLKEM768`; a client that offers a liboqs group can negotiate that instead. How OpenSSL loads `oqsprovider`, and why `--http` does not, is [server/README.md](server/README.md#https-and-oqsprovider).
 
 ## Network captures
 
@@ -231,41 +213,7 @@ scripts/capture.sh http       # terminal 2
 
 ## HTTPS API
 
-Every route is TLS 1.3 on port 8443, or plain HTTP on port 8080 with `scripts/run-all.sh --http`. A stock client negotiates `X25519MLKEM768`. A client that offers a liboqs group (`x25519_mlkem512`, `x25519_hqc1`) can negotiate that instead. `client/pgdemo.sh` trusts `run/keys/tls.crt`.
-
-| Method and path | Role | Description |
-|---|---|---|
-| `POST /api/auth/login` | public | `{"username","password"}` → ES384 token |
-| `GET /api/health` | public | Listener liveness |
-| `GET /api/auth/me` | any | Identity and the PostgreSQL group used for the request |
-| `GET /api/db/info` | any | Server version, backend PIDs, libpqxx version, SSE and Dispatcher counters |
-| `GET /api/device-types` | any | Device types: payload and default configuration |
-| `GET /api/devices` | any | Every device with its type, last sample, `identity` and process state (GPS devices return `lon` and `lat`) |
-| `GET /api/devices/{name}` | any | One device, its last sample, its current certificate and identity, its process and its configuration sync state |
-| `GET /api/devices/{name}/history?from=&to=&limit=` | any | Telemetry, newest first, with the partition name |
-| `POST /api/devices` | admin | `{"name","type"}`: enroll. `201` with the device and its certificate once issued, `202` with the enrollment if still in progress, `422` if refused (`CAPACITY`, `CSR_*`), `409` if the name exists, `400` for an unknown type |
-| `DELETE /api/devices/{name}` | admin | Removes the device, its certificates, state, configuration and queue; the telemetry and the CRL stay |
-| `GET /api/devices/{name}/certificates` | any | Every certificate the device has had, newest first, with its revocation |
-| `DELETE /api/devices/{name}/certificates/{serial}` | admin | Deletes one certificate; the current one takes the device with it |
-| `POST /api/devices/{name}/revoke` | admin | `{"reason"}`: revoke the current certificate. `certificateHold` suspends; any other reason is permanent. `409` if already revoked |
-| `DELETE /api/devices/{name}/revoke` | admin | Lift a `certificateHold`; `409` for a permanent revocation |
-| `POST /api/devices/{name}/rotate` | admin | New key and certificate; the old one is revoked as `superseded`. `409` while revoked or suspended |
-| `GET /api/enrollments?device=&limit=`, `GET /api/enrollments/{id}` | any | Enrollment and rotation requests and their outcome |
-| `GET /api/pki/ca` | any | The root CAs, the signing CA's fingerprint and the revoked serials |
-| `GET /api/pki/crl` | any | The X.509 CRL in PEM, signed by the CA when requested |
-| `GET /api/stream?channels=&devices=` | any | Server-Sent Events. Channels: `telemetry_scalar`, `telemetry_gps`, `telemetry_xy`, `telemetry_xyz`, `device`, `enrollment`, `config`, `error` (default all); `devices` filters by name |
-| `GET /api/config` | any | `v_device_config_sync_status`: applied, desired, `SYNC`/`PENDING`/`ERROR`/`UNINITIALISED` |
-| `POST /api/config` | admin | `{"device", "rate_ms"?, "amplitude"?, "is_active"?}`, partial update |
-| `GET /api/config/requests/{id}` | any | One request and its error, if any |
-| `GET /api/config/history?device=&limit=` | any | Applied-configuration audit |
-| `GET /api/users` | admin | User directory (no hashes) |
-| `POST /api/users` | admin | `{"username","password","role"}` |
-| `DELETE /api/users/{username}` | admin | The last admin cannot be removed |
-| `GET /*` outside `/api` | public | The control panel's static files, with `--webroot`: `index.html` per route, `404.html` for anything else. The pages hold no data; every call they make is to `/api` with a token |
-
-Every path under `/api`, matched by an endpoint or not, needs a bearer token except the login and the health check; an unknown one answers a JSON `404`. The token check and the panel never overlap: `/API/x`, `/%61pi/x` and `//api/x` count as `/api` too.
-
-`POST /api/config` returns `200` when the request is applied, `422` when the controller rejects it (or it expired), `202` when it is still queued after `--config-timeout-ms`, `404` for an unknown device, `409` for a device the controller has not initialised yet, and `503` when the Dispatcher already holds 500 waiters.
+The route table, who may call each path, and the status codes of `POST /api/config` are [server/README.md](server/README.md#rest-api).
 
 ## Tests
 
@@ -319,7 +267,7 @@ This is a demonstration of database architecture, not a product:
 - **Self-signed TLS.** The API is TLS 1.3 and binds to loopback by default. `run/keys/tls.crt` is the trust anchor; replace it before exposing the port.
 - **No reconnect.** If the listener connection drops, each process exits with status 1 so that a supervisor (compose `restart: unless-stopped`, systemd) restarts it. Queued work is not lost, because it lives in tables.
 - **Small payloads.** NOTIFY payloads are limited to 8000 bytes, and these stay well below that.
-- **One notification per sample, one process per device.** Right for a handful of devices; [sql/README.md](sql/README.md#scaling-notes) explains what a real fleet would change.
+- **One notification per history insert, one process per device.** A batch commits one `INSERT` and the statement trigger notifies once. Right for a handful of devices; [sql/README.md](sql/README.md#scaling-notes) explains what a real fleet would change.
 - **A root CA online.** The server signs device certificates with the root key itself, and the CRL is checked from the database rather than by OCSP. A real PKI keeps the root offline and issues from an intermediate.
 
 ## Licence
