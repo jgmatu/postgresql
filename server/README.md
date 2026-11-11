@@ -10,7 +10,7 @@ Sources:
 | [`src/http/AuthInterceptor.hpp`](src/http/AuthInterceptor.hpp) | Bearer token on every `/api` path except login and health |
 | [`src/controllers/`](src/controllers) | One Oat++ controller per group of routes |
 | [`src/controllers/PanelController.hpp`](src/controllers/PanelController.hpp) | The static panel, `GET *` after the API |
-| [`src/dispatcher/Dispatcher.hpp`](src/dispatcher/Dispatcher.hpp) | Waits for a `request_id` to finish |
+| [`src/dispatcher/`](src/dispatcher) | Waits for a `request_id` to finish. [src/dispatcher/README.md](src/dispatcher/README.md) is the map, the connection threads and the query pool. |
 | [`src/events/EventHub.hpp`](src/events/EventHub.hpp) | Server-Sent Events |
 | [`openssl-oqs.cnf`](openssl-oqs.cnf) | TLS 1.3 and the key-exchange groups |
 
@@ -53,6 +53,20 @@ An error body is `{"error","message"}`. An unknown `/api` path is a JSON `404`, 
 | `GET /*` outside `/api` | public | The control panel, when `--webroot` is set |
 
 `POST /api/config` returns `200` when the worker has applied the request, `422` when the worker rejects it or the request expired, `202` when it is still queued after `--config-timeout-ms`, `404` for an unknown device, `409` for a device the controller has not initialised yet, and `503` when the Dispatcher already holds 500 waiters. The server only checks the types. The worker accepts `rate_ms` in `[50, 10000]` and `amplitude` in `(0, 1000]`, and the controller records that answer. The loop is [docs/ARCHITECTURE.md](../docs/ARCHITECTURE.md).
+
+### Request ids
+
+`POST /api/config`, `POST /api/devices` and a rotation each take their `request_id` when the call arrives: `generate_request_id` runs `SELECT nextval('request_id_seq')` in its own transaction under `demo_admin`, commits, and returns the session to the pool. The sequence is increment 1, cache 1, and it does not cycle. PostgreSQL advances it under the sequence lock, so two connection threads, or two server processes, each receive a distinct value. The number is the order in which a pooled session executed `nextval`. The process keeps no counter of its own and reads nothing from the sequence at start-up.
+
+`request_id` 0 is the type-default configuration sent when a device comes online. It is not a value from this sequence, and the dispatcher does not wait on it.
+
+The value is granted before the row exists. A gap is a granted value that was never inserted, and that value is not handed out again:
+
+- the dispatcher already holds 500 waiters, so the call answers `503` and does not insert;
+- the `INSERT` fails, or inserts no row (unknown type, unknown device), after `nextval` has committed;
+- rolling that insert back would not return the value either, because `nextval` is not undone with its transaction.
+
+Enrollment and configuration share the sequence. The insert names the id it was given, so the column default on `device_enrollment` does not take a second one. The wait that follows is [src/dispatcher/README.md](src/dispatcher/README.md).
 
 ## Control panel
 
