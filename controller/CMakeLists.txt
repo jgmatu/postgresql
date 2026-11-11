@@ -1,6 +1,10 @@
 add_executable(pgdemo-controller
     src/main.cpp
+    src/Manager.cpp
     src/Fleet.cpp
+    src/ProcessTable.cpp
+    src/Session.cpp
+    src/TelemetryWriter.cpp
     src/Spawn.cpp
 )
 find_package(rclcpp REQUIRED)

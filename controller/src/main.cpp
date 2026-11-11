@@ -20,36 +20,18 @@
 #include <cstddef>
 #include <cstdlib>
 #include <filesystem>
-#include <format>
 #include <iostream>
 #include <string>
 #include <string_view>
-#include <thread>
-
-#include <boost/asio.hpp>
+#include <unistd.h>
 
 #include <db/DatabaseManager.hpp>
 #include <log/Log.hpp>
-#include <pgdemo/Topics.hpp>
-
-#include <pgdemo_msgs/msg/bye.hpp>
-#include <pgdemo_msgs/msg/certificate.hpp>
-#include <pgdemo_msgs/msg/challenge.hpp>
-#include <pgdemo_msgs/msg/config.hpp>
-#include <pgdemo_msgs/msg/csr.hpp>
-#include <pgdemo_msgs/msg/error.hpp>
-#include <pgdemo_msgs/msg/gps_sample.hpp>
-#include <pgdemo_msgs/msg/heartbeat.hpp>
-#include <pgdemo_msgs/msg/hello.hpp>
-#include <pgdemo_msgs/msg/proof.hpp>
-#include <pgdemo_msgs/msg/rejected.hpp>
-#include <pgdemo_msgs/msg/scalar_sample.hpp>
-#include <pgdemo_msgs/msg/xy_sample.hpp>
-#include <pgdemo_msgs/msg/xyz_sample.hpp>
 
 #include <rclcpp/rclcpp.hpp>
 
 #include "Fleet.hpp"
+#include "Manager.hpp"
 
 namespace {
 
@@ -142,9 +124,9 @@ int main(int argc, char** argv)
         return 2;
     }
 
-    // Blocked before any thread exists, so the listener and the ROS spin inherit
-    // the mask; the io thread unblocks them for Asio's signal_set. Children start
-    // with an empty mask (see spawn_process).
+    // Blocked before any thread exists, so every thread inherits the mask and
+    // only the sigwait thread receives them. Children start with an empty mask
+    // (see spawn_process).
     sigset_t sigs;
     sigemptyset(&sigs);
     sigaddset(&sigs, SIGINT);
@@ -155,55 +137,22 @@ int main(int argc, char** argv)
 
     try
     {
-        db::DatabaseManager db(opt.conninfo, "pgdemo-controller", 1);
+        // One connection per device queue, plus one for session and enrollment writes.
+        db::DatabaseManager db(opt.conninfo, "pgdemo-controller", opt.fleet.max_devices + 1);
         db.connect();
         for (const auto p : db::kAllPayloads)
             for (const auto& name : db.ensure_history_partitions(p)) log::info(kLog, "created partition " + name);
 
-        // rclcpp must not take SIGINT: the fleet's signal_set owns shutdown.
-        rclcpp::InitOptions ros_init;
-        ros_init.shutdown_on_signal = false;
-        rclcpp::init(argc, argv, ros_init);
-        auto ros_node = std::make_shared<rclcpp::Node>("pgdemo_controller");
-        const auto qos = rclcpp::QoS(rclcpp::KeepLast(16)).reliable();
-        const auto hello_qos = rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local();
-        namespace msg = pgdemo_msgs::msg;
-        auto bye = ros_node->create_publisher<msg::Bye>(topics::kBye, qos);
-        auto certificate = ros_node->create_publisher<msg::Certificate>(topics::kCertificate, qos);
-        auto rejected = ros_node->create_publisher<msg::Rejected>(topics::kRejected, qos);
-        auto challenge = ros_node->create_publisher<msg::Challenge>(topics::kChallenge, qos);
-        auto config = ros_node->create_publisher<msg::Config>(topics::kConfig, qos);
-
-        boost::asio::io_context io(1);
-        controller::Downlink downlink;
-        downlink.bye = [bye](msg::Bye m) { bye->publish(m); };
-        downlink.certificate = [certificate](msg::Certificate m) { certificate->publish(m); };
-        downlink.rejected = [rejected](msg::Rejected m) { rejected->publish(m); };
-        downlink.challenge = [challenge](msg::Challenge m) { challenge->publish(m); };
-        downlink.config = [config](msg::Config m) { config->publish(m); };
-        controller::Fleet fleet(io, db, opt.fleet, std::move(downlink));
-
-        auto hello = ros_node->create_subscription<msg::Hello>(
-            topics::kHello, hello_qos, [&fleet](msg::Hello::ConstSharedPtr m) { fleet.on_hello(*m); });
-        auto heartbeat = ros_node->create_subscription<msg::Heartbeat>(
-            topics::kHeartbeat, qos, [&fleet](msg::Heartbeat::ConstSharedPtr m) { fleet.on_uplink(*m); });
-        auto error = ros_node->create_subscription<msg::Error>(
-            topics::kError, qos, [&fleet](msg::Error::ConstSharedPtr m) { fleet.on_uplink(*m); });
-        auto csr = ros_node->create_subscription<msg::Csr>(
-            topics::kCsr, qos, [&fleet](msg::Csr::ConstSharedPtr m) { fleet.on_uplink(*m); });
-        auto proof = ros_node->create_subscription<msg::Proof>(
-            topics::kProof, qos, [&fleet](msg::Proof::ConstSharedPtr m) { fleet.on_uplink(*m); });
-        auto scalar = ros_node->create_subscription<msg::ScalarSample>(
-            topics::kScalar, qos, [&fleet](msg::ScalarSample::ConstSharedPtr m) { fleet.on_uplink(*m); });
-        auto gps = ros_node->create_subscription<msg::GpsSample>(
-            topics::kGps, qos, [&fleet](msg::GpsSample::ConstSharedPtr m) { fleet.on_uplink(*m); });
-        auto xy = ros_node->create_subscription<msg::XySample>(
-            topics::kXy, qos, [&fleet](msg::XySample::ConstSharedPtr m) { fleet.on_uplink(*m); });
-        auto xyz = ros_node->create_subscription<msg::XyzSample>(
-            topics::kXyz, qos, [&fleet](msg::XyzSample::ConstSharedPtr m) { fleet.on_uplink(*m); });
+        // `signals` outlives `manager`: the destructor sets `done` and then joins sigwait.
+        controller::SignalState signals;
+        controller::Manager manager(argc, argv);
+        controller::TelemetryWriter writer(db);
+        // Fork runs on this thread, and PR_SET_PDEATHSIG follows the thread that forked.
+        controller::Fleet fleet(db, writer, opt.fleet, manager.downlink(), signals, [] { rclcpp::shutdown(); });
+        manager.subscribe(fleet);
         fleet.acquire_lock();
 
-        // Registration phase, then activation. Callbacks only post to the io thread.
+        // Registration phase, then activation. The listener only queues; tick() drains it.
         for (const auto channel : {db::channel::kEnrollmentRequested, db::channel::kEnrollmentEvents,
                                    db::channel::kDeviceEvents, db::channel::kConfigRequested})
             db.register_listen_async(std::string(channel),
@@ -212,19 +161,12 @@ int main(int argc, char** argv)
 
         // LISTEN is active before boot() reads devices and enrollments, so
         // anything committed in between is either read or announced.
-        fleet.start();
-        std::jthread ros([&ros_node] { rclcpp::spin(ros_node); });
-        // Destroyed before `ros`, so an exception still unblocks the spin.
-        struct StopRos
-        {
-            ~StopRos() { rclcpp::shutdown(); }
-        } stop_ros;
-        pthread_sigmask(SIG_UNBLOCK, &sigs, nullptr);
-        io.run();
-        (void)stop_ros;
+        fleet.boot();
+        manager.arm(signals);
+        rclcpp::spin(manager.node());
 
-        // Shutdown already wrote what was queued. Stop the listener before the
-        // fleet it posts to goes away.
+        // Shutdown already flushed every queue. Stop the listener before the
+        // fleet it notifies goes away.
         db.disconnect();
         return fleet.exit_code();
     }
