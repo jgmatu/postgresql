@@ -131,7 +131,7 @@ One notification per insert keeps the queue lock off the per-sample path. The co
 | `device_config_errors` | controller | Why a request was rejected (`INVALID_RATE`, `INVALID_AMPLITUDE`, `EXPIRED`, …) |
 | `device_config_history` | controller | Every applied configuration |
 | `device_config_pending_history` | server | Every desired configuration, as submitted |
-| `request_id_seq` | server | The single cross-process ID authority |
+| `request_id_seq` | server | Atomic `nextval`, increment 1, cache 1. One distinct value per call, shared by every server process. `0` is not from this sequence |
 
 All of them are keyed by `device_id`. Removing a device cascades to its applied state, its queue and its errors; both audits stay.
 
@@ -172,6 +172,7 @@ sequenceDiagram
 
 Properties of this loop:
 
+- **Ids come from `nextval`.** Each POST takes one value in its own transaction before it waits. Two workers cannot receive the same id. A `503`, or an insert that does not land, leaves that value unused; a rollback does not return it. `request_id` 0 on the configuration sent after authentication is the stored `device_config`, not a sequence value.
 - **The queue is durable and notifications are not.** `NOTIFY` is a wake-up call, never the data. The controller forwards every `PENDING` row each time it is woken, and once at start-up after `LISTEN` is active. A request made while the controller was down is forwarded when it comes back, and written only after the worker answers.
 - **One manager forwards the queue.** A second controller on this machine exits because the first holds `run/devices/.controller.lock`; one ROS domain runs one manager. Recording the answer locks that `PENDING` row, so a repeated acknowledgement does not write twice.
 - **Stale requests do not apply.** A request older than `--pending-max-age-s` (600 s by default) becomes `TIMEOUT` with error `EXPIRED`, without asking the worker, so an old intent does not overwrite a newer reality.

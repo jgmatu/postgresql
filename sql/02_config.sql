@@ -18,8 +18,11 @@ controller (zone B). Configuration changes travel as rows, not as messages:
                                  foreign key, so both survive queue cleanup and
                                  device deregistration.
 
-request_id comes from one SEQUENCE, so several server instances can enqueue
-concurrently without coordinating.
+request_id_seq is one BIGINT sequence (increment 1, cache 1, no cycle).
+nextval is atomic across sessions and is not undone by a rollback. Several
+server processes can enqueue concurrently without coordinating. A value
+granted and then not inserted — the dispatcher is full, or the INSERT
+fails — stays unused. Enrollment and the configuration queue share it.
 
 The NOTIFY triggers live in 04_triggers.sql:
 

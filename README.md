@@ -56,7 +56,7 @@ Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design: sequence diagr
 | Path | What it is |
 |---|---|
 | [`sql/`](sql) | Roles, schema, device identity, partition maintenance, triggers, views and grants (`00`–`05`, loaded in order). [sql/README.md](sql/README.md) describes the schema: entity diagram, identity constraints, partitions, channels and privileges. |
-| [`libs/db`](libs/db) | `DatabaseManager` and [`ConnectionPool`](libs/db/include/db/ConnectionPool.hpp): a fixed set of query connections the manager checks out for every worker's writes. Workers never hold a connection. One listener connection and thread sit beside the pool. |
+| [`libs/db`](libs/db) | `DatabaseManager` and [`ConnectionPool`](libs/db/include/db/ConnectionPool.hpp): a fixed set of query connections, checked out one thread at a time, and one `LISTEN` connection beside the pool. [libs/db/README.md](libs/db/README.md) is the pool and the channel thread. |
 | [`libs/auth`](libs/auth) | `PasswordHasher` (Argon2id) and `JwtManager` (ES384), both on Botan 3. |
 | [`libs/pki`](libs/pki) | Device PKI on Botan 3: `CertificateAuthority` (sign CSRs, build the CRL), `DeviceKey` (P-384 key and CSR), `CertVerifier` (chain, subject, CRL), and the challenge-response proof. |
 | [`msgs/`](msgs) | ROS 2 interface contract between the manager and its workers: one struct per topic, under `pgdemo/manager/` and `pgdemo/worker/`. [msgs/README.md](msgs/README.md) lists every topic, its publisher and its fields. |
