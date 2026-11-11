@@ -50,4 +50,4 @@ A worker publishes only the topic that matches `--payload`.
 | `pgdemo/worker/telemetry/xy` | `XySample` | `device`, `seq`, `x`, `y` |
 | `pgdemo/worker/telemetry/xyz` | `XyzSample` | `device`, `seq`, `x`, `y`, `z` |
 
-The manager does not insert each sample on its own. It queues every worker's samples on the `io_context` thread and flushes them in one database transaction. That queue, and the rest of the process lifecycle, is [controller/README.md](../controller/README.md).
+The manager does not insert each sample on its own. Each node has a queue and a thread that flushes that queue in one database transaction, concurrently with the other nodes. That queue, and the rest of the process lifecycle, is [controller/README.md](../controller/README.md).

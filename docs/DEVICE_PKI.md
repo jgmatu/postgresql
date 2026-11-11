@@ -200,36 +200,37 @@ The envelope is [msgs/README.md](../msgs/README.md): one struct per topic. Worke
 
 ### Supervision in the controller
 
-`pgdemo-controller` ([`controller/src/Fleet.hpp`](../controller/src/Fleet.hpp)) runs the fleet on one `io_context` thread, which alone owns the process table, the slots, the sessions and each node's sample queue, so none of them needs a lock. libpqxx blocks, so every database call runs on that same thread, one at a time, through `on_db()`. The listener thread and the ROS executor only `post` onto that thread. Each device process has its own ROS executor.
+`pgdemo-controller` runs the fleet on the ROS spin thread. [`Fleet`](../controller/src/Fleet.hpp) routes each notice to [`ProcessTable`](../controller/src/ProcessTable.hpp) or to that worker's [`Session`](../controller/src/Session.hpp), so the table and the sessions need no lock. Subscriptions call `Fleet` directly. The lifecycle is [controller/README.md](../controller/README.md). [`TelemetryWriter`](../controller/src/TelemetryWriter.hpp) owns each node's sample queue and inserts it from a POSIX thread, checking a connection out of the pool. The listener thread only queues notifications. Each device process has its own ROS executor.
 
 ```mermaid
 flowchart TB
-    subgraph ctl ["pgdemo-controller"]
-        subgraph ioThread ["io_context thread: fleet state"]
-            reaper["reap_loop() SIGCHLD"]
-            hb["heartbeat_loop()"]
-            maint["maintenance_loop()"]
-            sess1["device_session dummy1"]
-            sess2["device_session sensor-a"]
+    subgraph ctl [pgdemo-controller]
+        subgraph spinThread [ROS spin thread]
+            fleet[Fleet routes each notice]
+            table[ProcessTable]
+            session[Session]
+            fleet --> table
+            fleet --> session
         end
-        listener["libpqxx listener thread"]
-        ros["ROS spin"]
+        listener[libpqxx listener thread]
+        writer[TelemetryWriter one thread per queue]
     end
-    subgraph devProc ["pgdemo-device node"]
-        produce["sample timer and its own executor"]
-        listen["pgdemo/manager"]
+    subgraph devProc [pgdemo-device node]
+        produce[sample timer and its own executor]
+        listen[pgdemo/manager]
     end
-    listener -->|"asio::post"| ioThread
-    ros -->|"on_hello, on_uplink"| ioThread
-    ioThread -->|"on_db(), one query connection"| pg[("PostgreSQL")]
-    reaper -->|"fork + execv"| devProc
-    produce -->|"pgdemo/worker"| sess1
-    sess1 -->|"pgdemo/manager"| listen
+    listener -->|queued notify| fleet
+    session -->|push| writer
+    writer -->|one transaction per node| pg[(PostgreSQL)]
+    session -->|session writes| pg
+    table -->|fork plus execv| devProc
+    produce -->|pgdemo/worker| fleet
+    session -->|pgdemo/manager| listen
 ```
 
 - **Starting a process.** `argv` is built before `fork()`. Between `fork()` and `execv()` the child only makes async-signal-safe calls: default signal dispositions, an empty signal mask, `prctl(PR_SET_PDEATHSIG, SIGTERM)` (plus a `getppid()` check for a parent that died first), and `close_range(3, ...)` so that no descriptor of the controller (sockets, libpq connections) leaks into the device.
-- **Signals.** SIGINT, SIGTERM and SIGCHLD are blocked before any thread exists, so the listener and the ROS spin inherit the mask, and only the io thread receives them through `signal_set`.
-- **Reaping and restarts.** `reap_loop()` calls `waitpid(-1, WNOHANG)` on each SIGCHLD. A process that ends while its device is still `ACTIVE` is restarted after an exponential backoff of 1 s to 30 s, reset once a process has stayed online for 60 s. `AUTH_FAILED` and `DISABLED` are not retried until the identity changes (rotation, lifted hold).
+- **Signals.** SIGINT, SIGTERM and SIGCHLD are blocked before any thread exists, so every thread inherits the mask. A `sigwait` thread stores the notice, and the spin timer acts on it.
+- **Reaping and restarts.** `tick()` calls `waitpid(-1, WNOHANG)`. A process that ends while its device is still `ACTIVE` is restarted after an exponential backoff of 1 s to 30 s, reset once a process has stayed online for 60 s. `AUTH_FAILED` and `DISABLED` are not retried until the identity changes (rotation, lifted hold).
 - **Stuck processes.** A device that sends nothing for 30 s (it heartbeats every 5 s) is killed and restarted when this controller forked it. A node started elsewhere is released; there is no pid to signal.
 - **Capacity.** `--max-devices N` (16) bounds the number of processes. Devices over the limit are `UNMANAGED` and take the next free slot; an enrollment that finds no slot is refused with `CAPACITY`.
 - **Shutdown.** `bye` and SIGTERM to every process, up to 5 s for them to be reaped, SIGKILL for the rest, then every session goes `OFFLINE`.
