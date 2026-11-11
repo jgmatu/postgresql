@@ -20,6 +20,7 @@
 #include <span>
 #include <csignal>
 #include <format>
+#include <iterator>
 #include <map>
 #include <set>
 #include <tuple>
@@ -47,8 +48,9 @@ constexpr auto kProofTimeout = 5s;
 constexpr auto kStuckAfter = 30s;
 /// A process online for this long resets the restart backoff.
 constexpr auto kStableAfter = 60s;
-/// Shared telemetry queue. One lease writes at most this many samples.
-constexpr std::size_t kTelemetryCapacity = 4096;
+/// Samples kept for one device node. Sixteen nodes still fit in the old global cap of 4096.
+constexpr std::size_t kTelemetryNodeCapacity = 256;
+/// One transaction writes every queue once this many samples are waiting, or after `kTelemetryFlush`.
 constexpr std::size_t kTelemetryBatch = 64;
 constexpr auto kTelemetryFlush = 100ms;
 
@@ -224,11 +226,8 @@ void Session::close()
 // Fleet: set-up
 // ---------------------------------------------------------------------------
 
-Fleet::Fleet(asio::io_context& io, asio::thread_pool& pool, db::DatabaseManager& db, FleetOptions opts,
-             Downlink downlink)
+Fleet::Fleet(asio::io_context& io, db::DatabaseManager& db, FleetOptions opts, Downlink downlink)
     : io_(io)
-    , pool_(pool)
-    , writes_(asio::make_strand(pool.get_executor()))
     , db_(db)
     , opts_(std::move(opts))
     , downlink_(std::move(downlink))
@@ -288,16 +287,14 @@ void Fleet::spawn(awaitable<void> task, std::string what)
 
 void Fleet::db_write(std::string what, std::function<void()> fn)
 {
-    asio::post(writes_, [what = std::move(what), fn = std::move(fn)] {
-        try
-        {
-            fn();
-        }
-        catch (const std::exception& e)
-        {
-            log::warn(kLog, what + ": " + e.what());
-        }
-    });
+    try
+    {
+        fn();
+    }
+    catch (const std::exception& e)
+    {
+        log::warn(kLog, what + ": " + e.what());
+    }
 }
 
 void Fleet::notify(boost::json::object msg)
@@ -342,15 +339,22 @@ void Fleet::on_uplink(Uplink msg)
     });
 }
 
-void Fleet::enqueue_telemetry(TelemetryItem sample)
+void Fleet::enqueue_telemetry(Slot& slot, TelemetryItem sample)
 {
-    if (telemetry_.size() >= kTelemetryCapacity)
+    if (slot.samples.size() >= kTelemetryNodeCapacity)
     {
         ++telemetry_dropped_;
         return;
     }
-    telemetry_.push_back(std::move(sample));
-    if (telemetry_.size() >= kTelemetryBatch) telemetry_timer_.cancel();
+    slot.samples.push_back(std::move(sample));
+    if (queued_samples() >= kTelemetryBatch) telemetry_timer_.cancel();
+}
+
+std::size_t Fleet::queued_samples() const
+{
+    std::size_t n = orphaned_.size();
+    for (const auto& [_, slot] : slots_) n += slot.samples.size();
+    return n;
 }
 
 void Fleet::send_bye(const std::string& device, const std::string& reason)
@@ -368,7 +372,7 @@ void Fleet::send_bye(const std::string& device, const std::string& reason)
 
 awaitable<void> Fleet::boot()
 {
-    co_await on_db([this] { db_.reset_sessions(); });
+    on_db([this] { db_.reset_sessions(); });
     co_await sweep();
     co_await drain();
     log::info(kLog, std::format("supervising {} device(s), {} process(es) started (max {}); Ctrl-C to stop",
@@ -446,13 +450,13 @@ awaitable<void> Fleet::maintenance_loop()
         }
         try
         {
-            const auto expired = co_await on_db([this] { return db_.expire_enrollments(opts_.enrollment_timeout); });
+            const auto expired = on_db([this] { return db_.expire_enrollments(opts_.enrollment_timeout); });
             for (const auto id : expired) log::warn(kLog, std::format("enrollment {} expired", id));
             co_await sweep();
             if (Clock::now() >= next_partitions)
             {
                 next_partitions = Clock::now() + opts_.maintenance_interval;
-                const auto created = co_await on_db([this] {
+                const auto created = on_db([this] {
                     std::vector<std::string> all;
                     for (const auto p : db::kAllPayloads)
                         for (auto& n : db_.ensure_history_partitions(p)) all.push_back(std::move(n));
@@ -503,16 +507,8 @@ awaitable<void> Fleet::shutdown()
         lock_fd_ = -1;
     }
 
-    // On the write strand, so it lands after every queued state change.
-    try
-    {
-        co_await asio::co_spawn(
-            writes_, [this]() -> awaitable<void> { db_.reset_sessions(); co_return; }, use_awaitable);
-    }
-    catch (const std::exception& e)
-    {
-        log::warn(kLog, std::string("reset sessions: ") + e.what());
-    }
+    // Every earlier write already ran on this thread, so this lands after them.
+    db_write("reset sessions", [this] { db_.reset_sessions(); });
     sigchld_.cancel();
     stop_signals_.cancel();
     log::info(kLog, "every device process has stopped");
@@ -532,7 +528,7 @@ awaitable<void> Fleet::telemetry_loop()
 {
     for (;;)
     {
-        if (telemetry_.size() < kTelemetryBatch)
+        if (queued_samples() < kTelemetryBatch)
         {
             telemetry_timer_.expires_after(kTelemetryFlush);
             co_await telemetry_timer_.async_wait(asio::as_tuple(use_awaitable));
@@ -544,25 +540,29 @@ awaitable<void> Fleet::telemetry_loop()
 
 awaitable<void> Fleet::flush_telemetry()
 {
-    if (telemetry_.empty() && telemetry_dropped_ == 0) co_return;
+    if (queued_samples() == 0 && telemetry_dropped_ == 0) co_return;
     std::vector<db::DummySample> scalar;
     std::vector<db::TrackSample> gps;
     std::vector<db::XySample> xy;
     std::vector<db::XyzSample> xyz;
-    while (!telemetry_.empty())
-    {
-        auto item = std::move(telemetry_.front());
-        telemetry_.pop_front();
-        std::visit(
-            [&](auto&& sample) {
-                using T = std::decay_t<decltype(sample)>;
-                if constexpr (std::is_same_v<T, db::DummySample>) scalar.push_back(sample);
-                else if constexpr (std::is_same_v<T, db::TrackSample>) gps.push_back(sample);
-                else if constexpr (std::is_same_v<T, db::XySample>) xy.push_back(sample);
-                else xyz.push_back(sample);
-            },
-            std::move(item));
-    }
+    auto take = [&](std::deque<TelemetryItem>& queue) {
+        while (!queue.empty())
+        {
+            auto item = std::move(queue.front());
+            queue.pop_front();
+            std::visit(
+                [&](auto&& sample) {
+                    using T = std::decay_t<decltype(sample)>;
+                    if constexpr (std::is_same_v<T, db::DummySample>) scalar.push_back(sample);
+                    else if constexpr (std::is_same_v<T, db::TrackSample>) gps.push_back(sample);
+                    else if constexpr (std::is_same_v<T, db::XySample>) xy.push_back(sample);
+                    else xyz.push_back(sample);
+                },
+                std::move(item));
+        }
+    };
+    take(orphaned_);
+    for (auto& [_, slot] : slots_) take(slot.samples);
     const auto dropped = telemetry_dropped_;
     telemetry_dropped_ = 0;
     if (dropped != 0)
@@ -570,8 +570,7 @@ awaitable<void> Fleet::flush_telemetry()
     if (scalar.empty() && gps.empty() && xy.empty() && xyz.empty()) co_return;
     try
     {
-        co_await on_db([this, scalar = std::move(scalar), gps = std::move(gps), xy = std::move(xy),
-                        xyz = std::move(xyz)] {
+        on_db([this, scalar = std::move(scalar), gps = std::move(gps), xy = std::move(xy), xyz = std::move(xyz)] {
             db_.write_telemetry_batch(scalar, gps, xy, xyz);
         });
     }
@@ -668,7 +667,7 @@ awaitable<void> Fleet::obtain_certificate(std::shared_ptr<Session> session, std:
     if (csr_msg == nullptr) throw std::runtime_error("expected csr");
     const auto csr = csr_msg->csr;
 
-    const bool submitted = co_await on_db([this, request, csr] { return db_.submit_csr(request, csr); });
+    const bool submitted = on_db([this, request, csr] { return db_.submit_csr(request, csr); });
     if (!submitted) throw Refusal("", std::format("request {} is no longer pending", request));
     log::info(kLog, std::format("{}: CSR of request {} submitted to the CA", name, request));
 
@@ -692,7 +691,7 @@ awaitable<void> Fleet::obtain_certificate(std::shared_ptr<Session> session, std:
     if (outcome.device_id)
     {
         const int id = *outcome.device_id;
-        const auto device = co_await on_db([this, id] { return db_.load_device(id); });
+        const auto device = on_db([this, id] { return db_.load_device(id); });
         if (device) apply_device(*device);
     }
     session->send_certificate(*outcome.cert_pem);
@@ -722,7 +721,7 @@ awaitable<void> Fleet::authenticate(std::shared_ptr<Session> session, std::strin
     if (s == nullptr || !s->device) throw Refusal("", "device is not registered");
     const int id = s->device->device_id;
     // Fresh from the database: a revocation committed a moment ago counts.
-    const auto loaded = co_await on_db([this, id] {
+    const auto loaded = on_db([this, id] {
         return std::tuple(db_.load_device(id), db_.load_root_pems(), db_.load_revoked_serials());
     });
     const auto& [device, roots, revoked] = loaded;
@@ -756,7 +755,7 @@ awaitable<void> Fleet::serve(std::shared_ptr<Session> session, std::string name)
     // Online first: a configuration committed from here on is published after this one.
     session->online = true;
     const int id = device.device_id;
-    const auto config = co_await on_db([this, id] { return db_.init_device_config(id); });
+    const auto config = on_db([this, id] { return db_.init_device_config(id); });
     if (!config) throw Refusal("", "device deleted");
     session->send_config(*config);
 
@@ -795,7 +794,8 @@ awaitable<void> Fleet::read_samples(std::shared_ptr<Session> session, db::Device
                         log::warn(kLog, std::format("{}: ignoring scalar sample", device.name));
                         return;
                     }
-                    enqueue_telemetry(db::DummySample{device.device_id, m.value, m.seq});
+                    if (Slot* slot = find(device.name))
+                        enqueue_telemetry(*slot, db::DummySample{device.device_id, m.value, m.seq});
                 }
                 else if constexpr (std::is_same_v<T, pgdemo_msgs::msg::GpsSample>)
                 {
@@ -804,8 +804,9 @@ awaitable<void> Fleet::read_samples(std::shared_ptr<Session> session, db::Device
                         log::warn(kLog, std::format("{}: ignoring GPS sample", device.name));
                         return;
                     }
-                    enqueue_telemetry(db::TrackSample{device.device_id, m.origin_lon, m.origin_lat, m.radius_m,
-                                                      m.bearing_rad, m.seq});
+                    if (Slot* slot = find(device.name))
+                        enqueue_telemetry(*slot, db::TrackSample{device.device_id, m.origin_lon, m.origin_lat,
+                                                                 m.radius_m, m.bearing_rad, m.seq});
                 }
                 else if constexpr (std::is_same_v<T, pgdemo_msgs::msg::XySample>)
                 {
@@ -814,7 +815,8 @@ awaitable<void> Fleet::read_samples(std::shared_ptr<Session> session, db::Device
                         log::warn(kLog, std::format("{}: ignoring xy sample", device.name));
                         return;
                     }
-                    enqueue_telemetry(db::XySample{device.device_id, m.x, m.y, m.seq});
+                    if (Slot* slot = find(device.name))
+                        enqueue_telemetry(*slot, db::XySample{device.device_id, m.x, m.y, m.seq});
                 }
                 else if constexpr (std::is_same_v<T, pgdemo_msgs::msg::XyzSample>)
                 {
@@ -823,7 +825,8 @@ awaitable<void> Fleet::read_samples(std::shared_ptr<Session> session, db::Device
                         log::warn(kLog, std::format("{}: ignoring xyz sample", device.name));
                         return;
                     }
-                    enqueue_telemetry(db::XyzSample{device.device_id, m.x, m.y, m.z, m.seq});
+                    if (Slot* slot = find(device.name))
+                        enqueue_telemetry(*slot, db::XyzSample{device.device_id, m.x, m.y, m.z, m.seq});
                 }
                 else
                     log::warn(kLog, std::format("{}: ignoring message while online", device.name));
@@ -838,7 +841,7 @@ awaitable<void> Fleet::read_samples(std::shared_ptr<Session> session, db::Device
 
 awaitable<void> Fleet::on_enrollment_requested(std::int64_t request_id)
 {
-    const auto e = co_await on_db([this, request_id] { return db_.load_enrollment(request_id); });
+    const auto e = on_db([this, request_id] { return db_.load_enrollment(request_id); });
     if (!e || e->status != "PENDING") co_return;
     apply_enrollment(*e);
 }
@@ -851,7 +854,7 @@ awaitable<void> Fleet::on_enrollment_decided(std::int64_t request_id)
         return nullptr;
     };
     if (waiting() == nullptr) co_return;
-    const auto outcome = co_await on_db([this, request_id] { return db_.enrollment_outcome(request_id); });
+    const auto outcome = on_db([this, request_id] { return db_.enrollment_outcome(request_id); });
     Slot* s = waiting();
     if (s == nullptr || !outcome || outcome->status == "PENDING" || outcome->status == "CSR_SUBMITTED") co_return;
 
@@ -901,14 +904,14 @@ awaitable<void> Fleet::on_device_event(std::string action, std::string name, int
     if (device_id == 0)
         if (const Slot* s = find(name); s != nullptr && s->device) device_id = s->device->device_id;
     if (device_id == 0) co_return;
-    const auto device = co_await on_db([this, device_id] { return db_.load_device(device_id); });
+    const auto device = on_db([this, device_id] { return db_.load_device(device_id); });
     if (device) apply_device(*device);
 }
 
 awaitable<void> Fleet::drain()
 {
     std::vector<db::AppliedConfig> applied;
-    const auto stats = co_await on_db([this, &applied] {
+    const auto stats = on_db([this, &applied] {
         return db_.drain_pending(
             decide, [&applied](const db::AppliedConfig& c) { applied.push_back(c); }, opts_.pending_max_age);
     });
@@ -920,11 +923,12 @@ awaitable<void> Fleet::drain()
     if (stats.applied + stats.rejected + stats.expired > 0)
         log::info(kLog, std::format("queue drained: {} applied, {} rejected, {} expired", stats.applied,
                                     stats.rejected, stats.expired));
+    co_return;
 }
 
 awaitable<void> Fleet::sweep()
 {
-    const auto devices = co_await on_db([this] { return db_.load_devices(); });
+    const auto devices = on_db([this] { return db_.load_devices(); });
     std::set<std::string> present;
     for (const auto& d : devices)
     {
@@ -936,7 +940,7 @@ awaitable<void> Fleet::sweep()
         if (s.device && !present.contains(name)) gone.push_back(name);
     for (const auto& name : gone) co_await on_device_event("DELETE", name, 0);
 
-    const auto pending = co_await on_db([this] { return db_.pending_enrollments(); });
+    const auto pending = on_db([this] { return db_.pending_enrollments(); });
     for (const auto& e : pending) apply_enrollment(e);
     reconcile_all();
 }
@@ -1285,6 +1289,12 @@ void Fleet::schedule_restart(Slot& s, std::chrono::seconds delay)
 void Fleet::forget(Slot& s)
 {
     const std::string name = s.name;
+    if (!s.samples.empty())
+    {
+        orphaned_.insert(orphaned_.end(), std::make_move_iterator(s.samples.begin()),
+                         std::make_move_iterator(s.samples.end()));
+        s.samples.clear();
+    }
     if ((s.removed || !s.device) && db::valid_device_name(name))
     {
         std::error_code ec;

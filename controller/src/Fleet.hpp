@@ -81,14 +81,16 @@ private:
 /**
  * @brief Supervisor of the device processes.
  *
- * Every member runs on the `io_context` thread: process table, slots and
- * sessions need no locks. Database calls are blocking (libpqxx), so they run
- * on the thread pool through `on_db()` and the coroutine resumes on the
- * io thread with the result. Listener callbacks arrive on the listener
- * thread and only post to the io thread (`notify()`).
+ * Every member runs on the `io_context` thread: process table, slots,
+ * sessions and each node's sample queue need no locks. Database calls are
+ * blocking (libpqxx) and run on that same thread, one at a time, through
+ * `on_db()`. The controller opens a single query connection for them.
+ * Listener callbacks arrive on the listener thread and only post to the io
+ * thread (`notify()`).
  *
  * A ROS thread delivers worker topics through `on_hello()` and `on_uplink()`,
  * which only post to this thread, the same way the listener thread posts notifications.
+ * Each device process has its own ROS executor; this process does not share it.
  *
  * Coroutines:
  * - one `device_session()` per `hello`
@@ -102,13 +104,11 @@ class Fleet
 public:
     /**
      * @param io   the single thread that owns the fleet; signals are delivered here
-     * @param pool threads for blocking database calls (`on_db()`)
-     * @param db   connected, listener not yet running
+     * @param db   connected with one query connection, listener not yet running
      * @param opts     device binary, directories and limits
      * @param downlink publishes on `pgdemo/manager`; called on the io thread
      */
-    Fleet(boost::asio::io_context& io, boost::asio::thread_pool& pool, db::DatabaseManager& db,
-          FleetOptions opts, Downlink downlink);
+    Fleet(boost::asio::io_context& io, db::DatabaseManager& db, FleetOptions opts, Downlink downlink);
     ~Fleet();
 
     Fleet(const Fleet&) = delete;
@@ -134,6 +134,9 @@ public:
     [[nodiscard]] int exit_code() const noexcept { return exit_code_; }
 
 private:
+    /// One sample, of whichever payload that node publishes.
+    using TelemetryItem = std::variant<db::DummySample, db::TrackSample, db::XySample, db::XyzSample>;
+
     /// What the controller knows about one device, or one enrollment in progress.
     struct Slot
     {
@@ -160,15 +163,15 @@ private:
         std::string state;                     ///< last `device_session.state` written
         std::optional<std::string> last_error; ///< last error written with it
         int state_pid{0};                      ///< last pid written with it
+        /// Samples waiting for the next batch. One node publishes one payload.
+        std::deque<TelemetryItem> samples;
     };
 
+    /// A database call on this thread. The caller already is the io thread.
     template <typename F>
-    auto on_db(F fn) -> boost::asio::awaitable<std::invoke_result_t<F&>>
+    auto on_db(F fn) -> std::invoke_result_t<F&>
     {
-        using R = std::invoke_result_t<F&>;
-        co_return co_await boost::asio::co_spawn(
-            pool_, [fn = std::move(fn)]() mutable -> boost::asio::awaitable<R> { co_return fn(); },
-            boost::asio::use_awaitable);
+        return fn();
     }
 
     void spawn(boost::asio::awaitable<void> task, std::string what);
@@ -203,8 +206,8 @@ private:
     void apply_enrollment(const db::Enrollment& e);
     void apply_device(const db::Device& d);
     void admit(pgdemo_msgs::msg::Hello hello);
-    using TelemetryItem = std::variant<db::DummySample, db::TrackSample, db::XySample, db::XyzSample>;
-    void enqueue_telemetry(TelemetryItem sample);
+    void enqueue_telemetry(Slot& slot, TelemetryItem sample);
+    [[nodiscard]] std::size_t queued_samples() const;
     void send_bye(const std::string& device, const std::string& reason);
 
     // Process table.
@@ -223,16 +226,13 @@ private:
     [[nodiscard]] std::size_t running() const;
 
     boost::asio::io_context& io_;
-    boost::asio::thread_pool& pool_;
-    /// Session-state writes keep their order.
-    boost::asio::strand<boost::asio::thread_pool::executor_type> writes_;
     db::DatabaseManager& db_;
     FleetOptions opts_;
     /// Publishes on `pgdemo/manager`. Empty callbacks drop the message.
     Downlink downlink_;
-    /// Samples from every worker, flushed by `telemetry_loop()` on this thread.
-    std::deque<TelemetryItem> telemetry_;
-    /// Samples dropped because `telemetry_` was at `kTelemetryCapacity`.
+    /// Samples moved off a slot that was forgotten before the next flush.
+    std::deque<TelemetryItem> orphaned_;
+    /// Samples dropped because a node's queue was at `kTelemetryNodeCapacity`.
     std::size_t telemetry_dropped_{0};
     /// Wakes `telemetry_loop()` early once a batch is full.
     boost::asio::steady_timer telemetry_timer_;

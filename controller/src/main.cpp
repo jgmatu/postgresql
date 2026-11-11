@@ -61,7 +61,6 @@ constexpr std::string_view kLog = "controller";
 struct Options
 {
     std::string conninfo;
-    std::size_t pool_size = db::DatabaseManager::kDefaultPoolSize;
     controller::FleetOptions fleet;
 };
 
@@ -69,7 +68,6 @@ void usage()
 {
     std::cout << "Usage: pgdemo-controller [options]\n"
                  "  --conninfo STR               libpq connection string (default: PG* environment)\n"
-                 "  --pool-size N                query connections and database threads (default 8)\n"
                  "  --max-devices N              device processes run at once; the rest are UNMANAGED (default 16)\n"
                  "  --device-bin PATH            pgdemo-device executable (default: next to this binary)\n"
                  "  --devices-dir DIR            key directory of every device (default run/devices)\n"
@@ -107,7 +105,6 @@ Options parse(int argc, char** argv)
             return v;
         };
         if (a == "--conninfo") o.conninfo = next();
-        else if (a == "--pool-size") o.pool_size = static_cast<std::size_t>(positive(a));
         else if (a == "--max-devices") o.fleet.max_devices = static_cast<std::size_t>(positive(a));
         else if (a == "--device-bin") o.fleet.device_bin = next();
         else if (a == "--devices-dir") devices_dir = next();
@@ -145,9 +142,9 @@ int main(int argc, char** argv)
         return 2;
     }
 
-    // Blocked before any thread exists, so every thread inherits the mask; the
-    // io thread unblocks them for Asio's signal_set. Children start with an
-    // empty mask (see spawn_process).
+    // Blocked before any thread exists, so the listener and the ROS spin inherit
+    // the mask; the io thread unblocks them for Asio's signal_set. Children start
+    // with an empty mask (see spawn_process).
     sigset_t sigs;
     sigemptyset(&sigs);
     sigaddset(&sigs, SIGINT);
@@ -158,7 +155,7 @@ int main(int argc, char** argv)
 
     try
     {
-        db::DatabaseManager db(opt.conninfo, "pgdemo-controller", opt.pool_size);
+        db::DatabaseManager db(opt.conninfo, "pgdemo-controller", 1);
         db.connect();
         for (const auto p : db::kAllPayloads)
             for (const auto& name : db.ensure_history_partitions(p)) log::info(kLog, "created partition " + name);
@@ -178,14 +175,13 @@ int main(int argc, char** argv)
         auto config = ros_node->create_publisher<msg::Config>(topics::kConfig, qos);
 
         boost::asio::io_context io(1);
-        boost::asio::thread_pool pool(opt.pool_size);
         controller::Downlink downlink;
         downlink.bye = [bye](msg::Bye m) { bye->publish(m); };
         downlink.certificate = [certificate](msg::Certificate m) { certificate->publish(m); };
         downlink.rejected = [rejected](msg::Rejected m) { rejected->publish(m); };
         downlink.challenge = [challenge](msg::Challenge m) { challenge->publish(m); };
         downlink.config = [config](msg::Config m) { config->publish(m); };
-        controller::Fleet fleet(io, pool, db, opt.fleet, std::move(downlink));
+        controller::Fleet fleet(io, db, opt.fleet, std::move(downlink));
 
         auto hello = ros_node->create_subscription<msg::Hello>(
             topics::kHello, hello_qos, [&fleet](msg::Hello::ConstSharedPtr m) { fleet.on_hello(*m); });
@@ -227,9 +223,8 @@ int main(int argc, char** argv)
         io.run();
         (void)stop_ros;
 
-        // Database work still queued finishes; then the listener stops before
-        // the fleet it posts to goes away.
-        pool.join();
+        // Shutdown already wrote what was queued. Stop the listener before the
+        // fleet it posts to goes away.
         db.disconnect();
         return fleet.exit_code();
     }

@@ -200,7 +200,7 @@ The envelope is [msgs/README.md](../msgs/README.md): one struct per topic. Worke
 
 ### Supervision in the controller
 
-`pgdemo-controller` ([`controller/src/Fleet.hpp`](../controller/src/Fleet.hpp)) runs the fleet on one `io_context` thread, which alone owns the process table, the slots and the sessions, so none of them needs a lock. libpqxx blocks, so every database call runs on a thread pool through `co_await on_db(...)`, and the coroutine resumes on the io thread. The listener thread and the ROS executor only `post` onto that thread.
+`pgdemo-controller` ([`controller/src/Fleet.hpp`](../controller/src/Fleet.hpp)) runs the fleet on one `io_context` thread, which alone owns the process table, the slots, the sessions and each node's sample queue, so none of them needs a lock. libpqxx blocks, so every database call runs on that same thread, one at a time, through `on_db()`. The listener thread and the ROS executor only `post` onto that thread. Each device process has its own ROS executor.
 
 ```mermaid
 flowchart TB
@@ -212,24 +212,23 @@ flowchart TB
             sess1["device_session dummy1"]
             sess2["device_session sensor-a"]
         end
-        dbPool["thread_pool: on_db()<br/>blocking libpqxx"]
         listener["libpqxx listener thread"]
-        ros["ROS executor"]
+        ros["ROS spin"]
     end
     subgraph devProc ["pgdemo-device node"]
-        produce["sample timer"]
+        produce["sample timer and its own executor"]
         listen["pgdemo/manager"]
     end
     listener -->|"asio::post"| ioThread
     ros -->|"on_hello, on_uplink"| ioThread
-    sess1 -->|"co_await on_db"| dbPool
+    ioThread -->|"on_db(), one query connection"| pg[("PostgreSQL")]
     reaper -->|"fork + execv"| devProc
     produce -->|"pgdemo/worker"| sess1
     sess1 -->|"pgdemo/manager"| listen
 ```
 
 - **Starting a process.** `argv` is built before `fork()`. Between `fork()` and `execv()` the child only makes async-signal-safe calls: default signal dispositions, an empty signal mask, `prctl(PR_SET_PDEATHSIG, SIGTERM)` (plus a `getppid()` check for a parent that died first), and `close_range(3, ...)` so that no descriptor of the controller (sockets, libpq connections) leaks into the device.
-- **Signals.** SIGINT, SIGTERM and SIGCHLD are blocked before any thread exists, so the pool and the listener inherit the mask, and only the io thread receives them through `signal_set`.
+- **Signals.** SIGINT, SIGTERM and SIGCHLD are blocked before any thread exists, so the listener and the ROS spin inherit the mask, and only the io thread receives them through `signal_set`.
 - **Reaping and restarts.** `reap_loop()` calls `waitpid(-1, WNOHANG)` on each SIGCHLD. A process that ends while its device is still `ACTIVE` is restarted after an exponential backoff of 1 s to 30 s, reset once a process has stayed online for 60 s. `AUTH_FAILED` and `DISABLED` are not retried until the identity changes (rotation, lifted hold).
 - **Stuck processes.** A device that sends nothing for 30 s (it heartbeats every 5 s) is killed and restarted when this controller forked it. A node started elsewhere is released; there is no pid to signal.
 - **Capacity.** `--max-devices N` (16) bounds the number of processes. Devices over the limit are `UNMANAGED` and take the next free slot; an enrollment that finds no slot is refused with `CAPACITY`.

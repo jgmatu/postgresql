@@ -12,40 +12,40 @@ Sources:
 
 ## Startup
 
-`main` blocks `SIGINT`, `SIGTERM` and `SIGCHLD` before any thread exists, so the pool and the listener inherit the mask. Children start with an empty mask (`spawn_process`). `SIGPIPE` is ignored.
+`main` blocks `SIGINT`, `SIGTERM` and `SIGCHLD` before any thread exists, so the listener and the ROS spin inherit the mask. Children start with an empty mask (`spawn_process`). `SIGPIPE` is ignored.
 
 It then connects as `pgdemo-controller`, creates the current and upcoming history partitions, builds the fleet and takes `devices-dir/.controller.lock`. The four channels are registered, the subscriptions to `pgdemo/worker/` are active, and the listener loop starts **before** `Fleet::start()`. `boot()` therefore reads devices and open enrollments while both `LISTEN` and the topics are already active: a commit or a `hello` in between is either in that read or arrives as an event.
 
-`Fleet::start()` spawns six coroutines on the `io_context` and `main` unblocks the signals so Asio's `signal_set` can receive them. `io.run()` returns when shutdown has finished. Queued database work is joined, the listener stops, and the process exits with `Fleet::exit_code()`: `0` after a signal, `1` when the listener connection was lost (a supervisor can restart it). A bad option exits `2`.
+`Fleet::start()` spawns six coroutines on the `io_context` and `main` unblocks the signals so Asio's `signal_set` can receive them. `io.run()` returns when shutdown has finished. The listener then stops, and the process exits with `Fleet::exit_code()`: `0` after a signal, `1` when the listener connection was lost (a supervisor can restart it). A bad option exits `2`.
 
 ## Threads
 
-The `io_context` runs with one thread. That thread owns the process table, the slots, the sessions and the shared telemetry queue, so none of them takes a lock. The libpqxx listener thread only posts into `notify()`, and the ROS executor only posts each worker message onto the same thread. Database calls block, so a coroutine `co_await`s `on_db()` on the thread pool and resumes on the io thread with the result. Each `on_db()` checks out one [`ConnectionPool::Lease`](../libs/db/include/db/ConnectionPool.hpp) and returns it when the transaction ends, including when it throws. Workers never see that lease: they have no connection string, and `close_range` between `fork` and `execv` drops every descriptor the pool holds. Writes of `device_session` go through the `writes_` strand, which keeps their order; shutdown resets sessions on that same strand, after every state already queued.
+The `io_context` runs with one thread. That thread owns the process table, the slots, the sessions and each node's sample queue, so none of them takes a lock. The libpqxx listener thread only posts into `notify()`, and the ROS executor only posts each worker message onto the same thread. Each device process has its own ROS executor for `pgdemo/worker/` and `pgdemo/manager/`. Database calls block, so `on_db()` runs them on the io thread, one at a time, on the single query connection opened at start. The `LISTEN` connection is separate. Workers never see that connection: they have no connection string, and `close_range` between `fork` and `execv` drops every descriptor it holds. While an `INSERT` runs, this thread does not reap children or take signals; the batch below keeps that pause to one transaction.
 
 ```mermaid
 flowchart TB
     subgraph ctl [pgdemo-controller]
         listener[listener thread]
+        ros[ROS spin]
         subgraph ioThread [io_context thread]
-            fleet[Fleet slots and sessions]
+            fleet[Fleet slots, sessions and per-node queues]
         end
-        pool[thread pool]
     end
     pg[(PostgreSQL)]
     devices[pgdemo-device children]
 
     listener -->|post notify| fleet
-    fleet -->|on_db and session writes| pool
-    pool --> pg
+    ros -->|post hello and uplink| fleet
+    fleet -->|one transaction at a time| pg
     listener -.->|LISTEN NOTIFY| pg
     fleet -->|fork plus execv| devices
-    devices -->|pgdemo/worker and pgdemo/manager| fleet
+    devices -->|own ROS executor| ros
 ```
 
 ## Command line
 
 ```text
-pgdemo-controller [--conninfo STR] [--pool-size N] [--max-devices N]
+pgdemo-controller [--conninfo STR] [--max-devices N]
                   [--device-bin PATH] [--devices-dir DIR]
                   [--enrollment-timeout-s N] [--pending-max-age-s N]
                   [--maintenance-interval-s N]
@@ -53,8 +53,7 @@ pgdemo-controller [--conninfo STR] [--pool-size N] [--max-devices N]
 
 | Option | Default | Effect |
 |---|---|---|
-| `--conninfo` | `PG*` environment | libpq connection string |
-| `--pool-size` | 8 | Query connections and database threads |
+| `--conninfo` | `PG*` environment | libpq connection string. One query connection is opened; the listener connection is separate |
 | `--max-devices` | 16 | Device processes run at once; the rest are `UNMANAGED` |
 | `--device-bin` | Beside this binary, else `../device/pgdemo-device` | `pgdemo-device` executable. It must be executable |
 | `--devices-dir` | `run/devices` | One key directory per device, mode `0700`. The lock file is `DIR/.controller.lock` |
@@ -107,7 +106,7 @@ The pid is recorded before the child can publish. `set_state` writes `STARTING`.
 4. Challenge-response, 5 s for the proof. The controller re-reads the device, the active roots and the CRL, so a revocation committed a moment ago counts. The checks themselves are [docs/DEVICE_PKI.md](../docs/DEVICE_PKI.md#5-authentication). An identity that is not `ACTIVE` ends the session as `DISABLED`. A failed proof ends it as `AUTH_FAILED` and clears `wanted`: the process is left down until the identity changes.
 5. `serve()` marks the session online **before** reading the applied configuration, so a configuration committed from here on is published after the initial `pgdemo/manager/config`. It writes `ONLINE` and reads samples until the session closes.
 
-`read_samples()` refreshes `last_frame` on every message, including `heartbeat`, and pushes samples onto the shared telemetry queue. It does not open a database session. The manager publishes `pgdemo/manager/` (`config`, `bye`, the handshake) with the device name stamped on it. The inbox holds 64 uplink messages; one that does not fit is dropped.
+`read_samples()` refreshes `last_frame` on every message, including `heartbeat`, and pushes samples onto that node's queue. It does not open a database session. The manager publishes `pgdemo/manager/` (`config`, `bye`, the handshake) with the device name stamped on it. The inbox holds 64 uplink messages; one that does not fit is dropped.
 
 When the session ends, the slot drops it and writes `OFFLINE` if it was `ONLINE` or `STARTING`. A child is then sent `SIGTERM`. A node this controller did not fork only gets `bye`.
 
@@ -142,13 +141,13 @@ An exit the controller did not request, while the next launch is `Run`, waits `1
 
 `maintenance_loop()` runs every 30 s. It expires enrollments older than `--enrollment-timeout-s`, sweeps (re-reads every device and every pending enrollment, drops slots whose device row is gone, reconciles), and, every `--maintenance-interval-s`, creates the upcoming history partitions. The sweep is what notices a certificate that expired without a write. If `listener_alive()` is false it shuts down with exit code 1.
 
-Shutdown, from `SIGINT` or `SIGTERM`, publishes `bye` and sends `SIGTERM` to every child, waits up to 5 s, and `SIGKILL`s whoever is left. It flushes the telemetry queue, releases the lock, resets every session on the write strand, and stops the `io_context`.
+Shutdown, from `SIGINT` or `SIGTERM`, publishes `bye` and sends `SIGTERM` to every child, waits up to 5 s, and `SIGKILL`s whoever is left. It flushes every sample queue, releases the lock, resets every session, and stops the `io_context`.
 
-## Telemetry queue
+## Telemetry queues
 
-Samples from every worker share one queue on the io thread. A `heartbeat`, a CSR, a proof and a session write do not enter it: those still call `on_db()` at once, on the same pool.
+Each device node has its own sample queue on its slot. A node publishes one payload, so the queue holds that payload's samples. A `heartbeat`, a CSR, a proof and a session write do not enter it: those call `on_db()` at once, on this same thread.
 
-The queue holds 4096 samples. Past that, the sample that just arrived is dropped and counted, and the session coroutine does not wait. `telemetry_loop()` flushes when 64 samples are queued or 100 ms have passed. One flush checks out one `Lease`, inserts every row into `telemetry_scalar`, `telemetry_gps`, `telemetry_xy` or `telemetry_xyz` (one statement per payload present), and upserts `device_state` once per device with the highest `seq` in the batch. The statement trigger notifies the server once per insert. The server reads what it has not consumed yet and advances `telemetry_read_cursor` in that same read. A flush that fails is logged and those samples are not retried. Shutdown flushes whatever remains after the workers have been closed, before it resets `device_session`.
+A queue holds 256 samples. Past that, the sample that just arrived is dropped and counted, and the session coroutine does not wait. Forgetting a slot moves its samples aside so the next flush still writes them. `telemetry_loop()` flushes when 64 samples are waiting across every queue, or 100 ms have passed. One flush is one transaction: it inserts every row into `telemetry_scalar`, `telemetry_gps`, `telemetry_xy` or `telemetry_xyz` (one statement per payload present) and upserts `device_state` once per device with the highest `seq` in the batch. The statement trigger notifies the server once per insert. The server reads what it has not consumed yet and advances `telemetry_read_cursor` in that same read. A flush that fails is logged and those samples are not retried. Shutdown flushes whatever remains after the workers have been closed, before it resets `device_session`.
 
 ## What changes the fleet
 
