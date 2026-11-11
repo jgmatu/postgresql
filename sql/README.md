@@ -14,7 +14,7 @@ A database created with an earlier schema (one table per dummy, or devices witho
 |---|---|
 | [`00_roles.sql`](00_roles.sql) | Cluster roles and role memberships |
 | [`01_data.sql`](01_data.sql) | PostGIS, `device_type`, `device`, `device_state`, the monthly-partitioned `telemetry_scalar`, `telemetry_gps`, `telemetry_xy` and `telemetry_xyz`, the server's `telemetry_read_cursor`, and the partition maintenance functions |
-| [`02_config.sql`](02_config.sql) | Control plane: request id sequence, applied configuration, request queue, errors and audits, all keyed by `device_id` |
+| [`02_config.sql`](02_config.sql) | Configuration: request id sequence, applied configuration, request queue, errors and audits, all keyed by `device_id` |
 | [`03_identity.sql`](03_identity.sql) | Device identity: `root_ca`, `device_certificate`, `crl`, `device_enrollment`, `device_session`, the binding foreign keys, `issue_device_certificate()`, `reject_enrollment()`, and the seed enrollments |
 | [`03_users.sql`](03_users.sql) | `app_users`, the `app_role` type, `auth_fetch_user()` and the last-admin guard |
 | [`04_triggers.sql`](04_triggers.sql) | `NOTIFY` triggers: one channel per topic, with the device in the payload |
@@ -24,33 +24,16 @@ PostGIS lives in schema `extensions`, not in `public`. `05_views.sql` revokes ev
 
 ## Entity relationships
 
-Solid lines are foreign keys. Dotted lines are logical links without a foreign key: telemetry and audit rows must outlive the device they describe.
+The tables fall into five domains. `device` is the hub of the first four. Solid lines are foreign keys. Dotted lines are logical links without a foreign key: telemetry and the configuration audits outlive the device, and a CRL entry outlives the certificate. `app_users` has no foreign key into any of them and stays last.
+
+### Device
+
+The registry and the latest sample. `device_state` is deleted with the device.
 
 ```mermaid
 erDiagram
     device_type ||--o{ device : "type_id"
     device ||--o| device_state : "last sample, ON DELETE CASCADE"
-    device ||--o| device_config : "applied, ON DELETE CASCADE"
-    device ||--o{ device_config_pending : "desired, ON DELETE CASCADE"
-    device_config_pending ||--o| device_config_errors : "request_id, ON DELETE CASCADE"
-    device ||..o{ telemetry_scalar : "device_id (no FK)"
-    device ||..o{ telemetry_gps : "device_id (no FK)"
-    device ||..o{ telemetry_xy : "device_id (no FK)"
-    device ||..o{ telemetry_xyz : "device_id (no FK)"
-    telemetry_read_cursor ||..|| telemetry_scalar : "channel, no FK"
-    telemetry_read_cursor ||..|| telemetry_gps : "channel, no FK"
-    telemetry_read_cursor ||..|| telemetry_xy : "channel, no FK"
-    telemetry_read_cursor ||..|| telemetry_xyz : "channel, no FK"
-    device ||..o{ device_config_history : "device_id (audit)"
-    device_config_pending |o..|| device_config_pending_history : "request_id (audit)"
-    device ||--|{ device_certificate : "has had 1..n, ON DELETE CASCADE"
-    device_certificate ||--|| device : "current: (cert_id, device_id), ON DELETE CASCADE"
-    root_ca ||--o{ device_certificate : "ca_id, ON DELETE RESTRICT"
-    root_ca ||--o{ crl : "ca_id"
-    device_certificate ||..o| crl : "(ca_id, serial), no FK"
-    device_type ||--o{ device_enrollment : "type_id"
-    device |o--o{ device_enrollment : "device_id, ON DELETE SET NULL"
-    device ||--o| device_session : "ON DELETE CASCADE"
 
     device_type {
         text type_id PK "sine | sawtooth | white_noise | gps_orbit | scatter | cloud"
@@ -65,6 +48,155 @@ erDiagram
         text type_id FK
         int cert_id FK,UK "current certificate, NOT NULL"
         timestamptz created_at
+    }
+    device_state {
+        int device_id PK,FK
+        double value "scalar devices"
+        geography position "gps devices, Point SRID 4326"
+        point xy "scatter devices"
+        geometry xyz "cloud devices, PointZ SRID 0"
+        bigint seq
+        timestamptz updated_at
+    }
+```
+
+### Telemetry
+
+Append-only history, one table per payload, plus the server's read cursor. None of these rows reference `device`.
+
+```mermaid
+erDiagram
+    device ||..o{ telemetry_scalar : "device_id, no FK"
+    device ||..o{ telemetry_gps : "device_id, no FK"
+    device ||..o{ telemetry_xy : "device_id, no FK"
+    device ||..o{ telemetry_xyz : "device_id, no FK"
+    telemetry_read_cursor ||..|| telemetry_scalar : "channel, no FK"
+    telemetry_read_cursor ||..|| telemetry_gps : "channel, no FK"
+    telemetry_read_cursor ||..|| telemetry_xy : "channel, no FK"
+    telemetry_read_cursor ||..|| telemetry_xyz : "channel, no FK"
+
+    device {
+        int device_id PK
+    }
+    telemetry_scalar {
+        bigint history_id PK
+        timestamptz recorded_at PK "partition key"
+        int device_id
+        double value
+        bigint seq
+    }
+    telemetry_gps {
+        bigint history_id PK
+        timestamptz recorded_at PK "partition key"
+        int device_id
+        geography position "Point, SRID 4326"
+        bigint seq
+    }
+    telemetry_xy {
+        bigint history_id PK
+        timestamptz recorded_at PK "partition key"
+        int device_id
+        point xy "NOT NULL, native point"
+        bigint seq
+    }
+    telemetry_xyz {
+        bigint history_id PK
+        timestamptz recorded_at PK "partition key"
+        int device_id
+        geometry xyz "PointZ, SRID 0, NOT NULL"
+        bigint seq
+    }
+    telemetry_read_cursor {
+        text channel PK "telemetry_scalar | telemetry_gps | telemetry_xy | telemetry_xyz"
+        bigint history_id "last consumed, 0 before the first read"
+    }
+```
+
+### Configuration
+
+The applied row and the request queue belong to the device and disappear with it. The two history tables do not.
+
+```mermaid
+erDiagram
+    device ||--o| device_config : "applied, ON DELETE CASCADE"
+    device ||--o{ device_config_pending : "desired, ON DELETE CASCADE"
+    device_config_pending ||--o| device_config_errors : "request_id, ON DELETE CASCADE"
+    device ||..o{ device_config_history : "device_id, no FK"
+    device_config_pending |o..|| device_config_pending_history : "request_id, no FK"
+
+    device {
+        int device_id PK
+    }
+    device_config {
+        int device_id PK,FK
+        int rate_ms "50..10000"
+        double amplitude "(0, 1000]"
+        boolean is_active
+        bigint request_id
+        timestamptz applied_at
+    }
+    device_config_pending {
+        bigint request_id PK "from request_id_seq"
+        int device_id FK
+        int requested_rate_ms
+        double requested_amplitude
+        boolean requested_is_active
+        text status "PENDING | SUCCESS | ERROR | TIMEOUT"
+        text requested_by
+        timestamptz requested_at
+        timestamptz completed_at
+    }
+    device_config_errors {
+        bigint error_id PK
+        bigint request_id FK,UK
+        int device_id
+        text error_code
+        text error_detail
+        timestamptz occurred_at
+    }
+    device_config_history {
+        bigint history_id PK
+        int device_id
+        int rate_ms
+        double amplitude
+        boolean is_active
+        bigint request_id
+        timestamptz recorded_at
+    }
+    device_config_pending_history {
+        bigint history_id PK
+        bigint request_id
+        int device_id
+        int requested_rate_ms
+        double requested_amplitude
+        boolean requested_is_active
+        text requested_by
+        timestamptz recorded_at
+    }
+```
+
+### Identity
+
+A device and its current certificate point at each other. Enrollments and the process session hang off the device; the CRL does not point back at the certificate.
+
+```mermaid
+erDiagram
+    device ||--|{ device_certificate : "has had 1..n, ON DELETE CASCADE"
+    device_certificate ||--|| device : "current (cert_id, device_id), ON DELETE CASCADE"
+    root_ca ||--o{ device_certificate : "ca_id, ON DELETE RESTRICT"
+    root_ca ||--o{ crl : "ca_id"
+    device_certificate ||..o| crl : "(ca_id, serial), no FK"
+    device_type ||--o{ device_enrollment : "type_id"
+    device |o--o{ device_enrollment : "device_id, ON DELETE SET NULL"
+    device ||--o| device_session : "ON DELETE CASCADE"
+
+    device {
+        int device_id PK
+        text name UK
+        int cert_id FK,UK "current certificate, NOT NULL"
+    }
+    device_type {
+        text type_id PK
     }
     root_ca {
         int ca_id PK
@@ -118,93 +250,12 @@ erDiagram
         timestamptz last_seen
         text last_error
     }
-    device_state {
-        int device_id PK,FK
-        double value "scalar devices"
-        geography position "gps devices, Point SRID 4326"
-        point xy "scatter devices"
-        geometry xyz "cloud devices, PointZ SRID 0"
-        bigint seq
-        timestamptz updated_at
-    }
-    telemetry_scalar {
-        bigint history_id PK
-        timestamptz recorded_at PK "partition key"
-        int device_id
-        double value
-        bigint seq
-    }
-    telemetry_gps {
-        bigint history_id PK
-        timestamptz recorded_at PK "partition key"
-        int device_id
-        geography position "Point, SRID 4326"
-        bigint seq
-    }
-    telemetry_xy {
-        bigint history_id PK
-        timestamptz recorded_at PK "partition key"
-        int device_id
-        point xy "NOT NULL, native point"
-        bigint seq
-    }
-    telemetry_xyz {
-        bigint history_id PK
-        timestamptz recorded_at PK "partition key"
-        int device_id
-        geometry xyz "PointZ, SRID 0, NOT NULL"
-        bigint seq
-    }
-    telemetry_read_cursor {
-        text channel PK "telemetry_scalar | telemetry_gps | telemetry_xy | telemetry_xyz"
-        bigint history_id "last consumed, 0 before the first read"
-    }
-    device_config {
-        int device_id PK,FK
-        int rate_ms "50..10000"
-        double amplitude "(0, 1000]"
-        boolean is_active
-        bigint request_id
-        timestamptz applied_at
-    }
-    device_config_pending {
-        bigint request_id PK "from request_id_seq"
-        int device_id FK
-        int requested_rate_ms
-        double requested_amplitude
-        boolean requested_is_active
-        text status "PENDING | SUCCESS | ERROR | TIMEOUT"
-        text requested_by
-        timestamptz requested_at
-        timestamptz completed_at
-    }
-    device_config_errors {
-        bigint error_id PK
-        bigint request_id FK,UK
-        int device_id
-        text error_code
-        text error_detail
-        timestamptz occurred_at
-    }
-    device_config_history {
-        bigint history_id PK
-        int device_id
-        int rate_ms
-        double amplitude
-        boolean is_active
-        bigint request_id
-        timestamptz recorded_at
-    }
-    device_config_pending_history {
-        bigint history_id PK
-        bigint request_id
-        int device_id
-        int requested_rate_ms
-        double requested_amplitude
-        boolean requested_is_active
-        text requested_by
-        timestamptz recorded_at
-    }
+```
+
+`app_users` is the directory of panel accounts. It shares no key with a device.
+
+```mermaid
+erDiagram
     app_users {
         int user_id PK
         text username UK
@@ -215,9 +266,7 @@ erDiagram
     }
 ```
 
-## Data plane
-
-### Devices
+## Device
 
 | Table | Columns | Constraints and indexes |
 |---|---|---|
@@ -237,6 +286,8 @@ erDiagram
 | `cloud` | `xyz` | 500 ms | 100 | independent uniform `x`, `y` and `z` in `[-amplitude, amplitude]` |
 
 `device` starts empty. `03_identity.sql` queues three enrollments, `dummy1` (`sine`), `dummy2` (`sawtooth`) and `dummy3` (`gps_orbit`), so the client, the captures and the end-to-end suite keep their arguments; the devices appear when the controller first runs and their certificates are issued. A later scalar type without a generator of its own gets `sine`. `gps` uses the orbit, `xy` uses the square and `xyz` uses the cube.
+
+## Telemetry
 
 ### Writing a sample
 
@@ -306,7 +357,7 @@ flowchart TB
 - **Pruning.** A query with a `recorded_at` range scans only the partitions that overlap it, and the `(device_id, recorded_at DESC)` index narrows each one to the device. Use UTC bounds, because the month boundaries are UTC.
 - **Visible routing.** `GET /api/devices/{name}/history` returns `tableoid::regclass` with each row, so the client sees the partition that stored it.
 
-## Control plane
+## Configuration
 
 The server writes the *desired* configuration and the controller writes the *applied* configuration. Requests travel as rows, and `NOTIFY` only wakes the other side.
 
@@ -319,7 +370,7 @@ The server writes the *desired* configuration and the controller writes the *app
 | `device_config_history` | Audit of every applied configuration, including the type defaults a device starts with. |
 | `device_config_pending_history` | Audit of every enqueue. `request_id` is not a foreign key, so the audit survives queue cleanup and device removal. |
 
-The controller drains the queue with `SELECT ... FROM device_config_pending p JOIN device d ... FOR UPDATE OF p SKIP LOCKED`. `OF p` locks only the queue row: the controller has no `UPDATE` on `device`, and locking `device` rows would need it.
+The controller reads the `PENDING` rows without locking them and forwards each one to the worker. When the worker answers, it locks that row with `SELECT ... FROM device_config_pending p JOIN device d ... WHERE p.request_id = $1 AND p.status = 'PENDING' FOR UPDATE OF p` and writes `SUCCESS` or `ERROR`. `OF p` locks only the queue row: the controller has no `UPDATE` on `device`, and locking `device` rows would need it.
 
 ### Device lifecycle
 
