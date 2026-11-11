@@ -22,7 +22,7 @@ class Fleet;
 /**
  * @brief The `pgdemo_controller` node.
  *
- * Owns the `pgdemo/manager` publishers, the nine `pgdemo/worker` subscriptions,
+ * Owns the `pgdemo/manager` publishers, the `pgdemo/worker` subscriptions,
  * the 100 ms wall timer and the `sigwait` thread. `hello` calls `Fleet::on_hello`;
  * every other worker topic calls `Fleet::on_uplink`. `main` keeps the options,
  * the database and `rclcpp::spin`.

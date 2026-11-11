@@ -882,107 +882,116 @@ std::optional<AppliedConfig> DatabaseManager::init_device_config(int device_id)
     return applied_from_row(res[0]);
 }
 
-DrainStats DatabaseManager::drain_pending(
-    const std::function<ConfigOutcome(const ConfigRequest&)>& decide,
-    const std::function<void(const AppliedConfig&)>& on_applied, std::chrono::seconds max_age)
+ForwardBatch DatabaseManager::forwardable_pending(std::chrono::seconds max_age)
 {
-    DrainStats stats;
+    ForwardBatch batch;
     auto lease = pool_.acquire();
-
-    for (;;)
     {
         pqxx::work txn(lease.get());
-        // FOR UPDATE OF p: the controller may not lock rows of `device`. A device
-        // removed meanwhile takes its PENDING rows with it (ON DELETE CASCADE).
+        const auto stale = txn.exec(
+            "UPDATE device_config_pending SET status = 'TIMEOUT', completed_at = clock_timestamp()"
+            " WHERE status = 'PENDING'"
+            " AND extract(epoch FROM clock_timestamp() - requested_at) > $1"
+            " RETURNING request_id, device_id, extract(epoch FROM clock_timestamp() - requested_at)::float8",
+            pqxx::params{static_cast<double>(max_age.count())});
+        for (const auto& row : stale)
+        {
+            const auto id = row[0].as<std::int64_t>();
+            const int device_id = row[1].as<int>();
+            const double age_s = row[2].as<double>();
+            const auto detail = std::format("request waited {:.0f} s (limit {} s)", age_s, max_age.count());
+            txn.exec("INSERT INTO device_config_errors (request_id, device_id, error_code, error_detail)"
+                     " VALUES ($1, $2, 'EXPIRED', $3)",
+                     pqxx::params{id, device_id, detail})
+                .no_rows();
+            log::warn(kLog, std::format("request {} expired: {}", id, detail));
+            ++batch.expired;
+        }
+        txn.commit();
+    }
+    {
+        pqxx::work txn(lease.get());
         const auto res = txn.exec(
             "SELECT p.request_id, p.device_id, d.name, p.requested_rate_ms, p.requested_amplitude,"
-            " p.requested_is_active, p.requested_by,"
-            " extract(epoch FROM clock_timestamp() - p.requested_at)::float8"
+            " p.requested_is_active, p.requested_by"
             " FROM device_config_pending p JOIN device d USING (device_id)"
             " WHERE p.status = 'PENDING'"
-            " ORDER BY p.requested_at, p.request_id"
-            " LIMIT 1"
-            " FOR UPDATE OF p SKIP LOCKED");
-        if (res.empty())
+            " ORDER BY p.requested_at, p.request_id");
+        for (const auto& row : res)
         {
-            txn.commit();
-            break;
+            ConfigRequest req;
+            req.request_id = row[0].as<std::int64_t>();
+            req.device_id = row[1].as<int>();
+            req.device = row[2].as<std::string>();
+            req.rate_ms = row[3].as<int>();
+            req.amplitude = row[4].as<double>();
+            req.is_active = row[5].as<bool>();
+            req.requested_by = row[6].as<std::string>();
+            batch.pending.push_back(std::move(req));
         }
-
-        const auto row = res[0];
-        ConfigRequest req;
-        req.request_id = row[0].as<std::int64_t>();
-        req.device_id = row[1].as<int>();
-        req.device = row[2].as<std::string>();
-        req.rate_ms = row[3].as<int>();
-        req.amplitude = row[4].as<double>();
-        req.is_active = row[5].as<bool>();
-        req.requested_by = row[6].as<std::string>();
-        const double age_s = row[7].as<double>();
-
-        ConfigOutcome outcome;
-        bool expired = false;
-        if (age_s > static_cast<double>(max_age.count()))
-        {
-            expired = true;
-            outcome = ConfigOutcome::failure(
-                "EXPIRED", std::format("request waited {:.0f} s (limit {} s)", age_s, max_age.count()));
-        }
-        else
-        {
-            outcome = decide(req);
-        }
-
-        if (outcome.ok)
-        {
-            const pqxx::params p{req.device_id, req.rate_ms, req.amplitude, req.is_active, req.request_id};
-            txn.exec("INSERT INTO device_config (device_id, rate_ms, amplitude, is_active, request_id, applied_at)"
-                     " VALUES ($1, $2, $3, $4, $5, clock_timestamp())"
-                     " ON CONFLICT (device_id) DO UPDATE SET rate_ms = EXCLUDED.rate_ms,"
-                     " amplitude = EXCLUDED.amplitude, is_active = EXCLUDED.is_active,"
-                     " request_id = EXCLUDED.request_id, applied_at = EXCLUDED.applied_at",
-                     p)
-                .no_rows();
-            txn.exec("INSERT INTO device_config_history (device_id, rate_ms, amplitude, is_active, request_id)"
-                     " VALUES ($1, $2, $3, $4, $5)",
-                     p)
-                .no_rows();
-            txn.exec("UPDATE device_config_pending SET status = 'SUCCESS', completed_at = clock_timestamp()"
-                     " WHERE request_id = $1",
-                     pqxx::params{req.request_id})
-                .no_rows();
-            txn.commit();
-
-            ++stats.applied;
-            log::info(kLog, std::format("request {} applied to {} (rate_ms={} amplitude={} active={})",
-                                        req.request_id, req.device, req.rate_ms, req.amplitude,
-                                        req.is_active));
-            if (on_applied)
-            {
-                on_applied(AppliedConfig{req.device_id, req.device, req.rate_ms, req.amplitude,
-                                         req.is_active, req.request_id});
-            }
-        }
-        else
-        {
-            txn.exec("INSERT INTO device_config_errors (request_id, device_id, error_code, error_detail)"
-                     " VALUES ($1, $2, $3, $4)",
-                     pqxx::params{req.request_id, req.device_id, outcome.error_code, outcome.error_detail})
-                .no_rows();
-            txn.exec(std::format("UPDATE device_config_pending SET status = '{}',"
-                                 " completed_at = clock_timestamp() WHERE request_id = $1",
-                                 expired ? "TIMEOUT" : "ERROR"),
-                     pqxx::params{req.request_id})
-                .no_rows();
-            txn.commit();
-
-            if (expired) ++stats.expired;
-            else ++stats.rejected;
-            log::warn(kLog, std::format("request {} rejected: {} ({})", req.request_id,
-                                        outcome.error_code, outcome.error_detail));
-        }
+        txn.commit();
     }
-    return stats;
+    return batch;
+}
+
+bool DatabaseManager::complete_pending(std::int64_t request_id, const ConfigOutcome& outcome)
+{
+    if (request_id == 0) return false;
+    auto lease = pool_.acquire();
+    pqxx::work txn(lease.get());
+    const auto res = txn.exec(
+        "SELECT p.device_id, d.name, p.requested_rate_ms, p.requested_amplitude, p.requested_is_active"
+        " FROM device_config_pending p JOIN device d USING (device_id)"
+        " WHERE p.request_id = $1 AND p.status = 'PENDING'"
+        " FOR UPDATE OF p",
+        pqxx::params{request_id});
+    if (res.empty())
+    {
+        txn.commit();
+        return false;
+    }
+    const auto row = res[0];
+    const int device_id = row[0].as<int>();
+    const auto device = row[1].as<std::string>();
+    const int rate_ms = row[2].as<int>();
+    const double amplitude = row[3].as<double>();
+    const bool active = row[4].as<bool>();
+
+    if (outcome.ok)
+    {
+        const pqxx::params p{device_id, rate_ms, amplitude, active, request_id};
+        txn.exec("INSERT INTO device_config (device_id, rate_ms, amplitude, is_active, request_id, applied_at)"
+                 " VALUES ($1, $2, $3, $4, $5, clock_timestamp())"
+                 " ON CONFLICT (device_id) DO UPDATE SET rate_ms = EXCLUDED.rate_ms,"
+                 " amplitude = EXCLUDED.amplitude, is_active = EXCLUDED.is_active,"
+                 " request_id = EXCLUDED.request_id, applied_at = EXCLUDED.applied_at",
+                 p)
+            .no_rows();
+        txn.exec("INSERT INTO device_config_history (device_id, rate_ms, amplitude, is_active, request_id)"
+                 " VALUES ($1, $2, $3, $4, $5)",
+                 p)
+            .no_rows();
+        txn.exec("UPDATE device_config_pending SET status = 'SUCCESS', completed_at = clock_timestamp()"
+                 " WHERE request_id = $1",
+                 pqxx::params{request_id})
+            .no_rows();
+        txn.commit();
+        log::info(kLog, std::format("request {} applied to {} (rate_ms={} amplitude={} active={})", request_id, device,
+                                    rate_ms, amplitude, active));
+        return true;
+    }
+
+    txn.exec("INSERT INTO device_config_errors (request_id, device_id, error_code, error_detail)"
+             " VALUES ($1, $2, $3, $4)",
+             pqxx::params{request_id, device_id, outcome.error_code, outcome.error_detail})
+        .no_rows();
+    txn.exec("UPDATE device_config_pending SET status = 'ERROR', completed_at = clock_timestamp()"
+             " WHERE request_id = $1",
+             pqxx::params{request_id})
+        .no_rows();
+    txn.commit();
+    log::warn(kLog, std::format("request {} rejected: {} ({})", request_id, outcome.error_code, outcome.error_detail));
+    return true;
 }
 
 boost::json::value DatabaseManager::fetch_sync_status(DbRole role)

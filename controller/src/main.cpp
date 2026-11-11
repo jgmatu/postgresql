@@ -11,7 +11,8 @@
 //   enrollment_requested --> start the device with --enroll / --rotate
 //   enrollment_events    --> deliver the issued certificate to its process
 //   device_events        --> stop / restart on delete, revocation, rotation
-//   config_requested     --> drain PENDING --> validate --> commit --> config frame
+//   config_requested     --> forward PENDING on pgdemo/manager/config; the worker's
+//                            config/applied is what commits SUCCESS or ERROR
 
 #include <pthread.h>
 #include <unistd.h>

@@ -57,8 +57,10 @@ public:
     void send_rejected(std::string code, std::string detail);
     /// Publish a 32-byte challenge nonce.
     void send_challenge(const std::array<unsigned char, 32>& bytes);
-    /// Publish applied configuration.
+    /// Publish the configuration in force. `request_id` is 0 for the type defaults.
     void send_config(const db::AppliedConfig& config);
+    /// Forward one desired request. The worker validates it and answers on `config/applied`.
+    void send_desired(const db::ConfigRequest& request);
     /// Further publishes are dropped.
     void close();
     /// True after `close()`.
@@ -104,5 +106,8 @@ private:
     Downlink downlink_;
     bool closed_{false};
 };
+
+/// Expire stale requests and publish the rest to each online session.
+void forward_configs(SessionDeps& deps);
 
 } // namespace pgdemo::controller

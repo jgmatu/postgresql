@@ -6,6 +6,7 @@
 // (or first obtains a certificate, when enrolling or rotating), then streams
 // samples until the manager says bye or a signal arrives.
 
+#include "ConfigCheck.hpp"
 #include "Stream.hpp"
 
 #include <pki/CertVerifier.hpp>
@@ -19,6 +20,7 @@
 #include <pgdemo_msgs/msg/certificate.hpp>
 #include <pgdemo_msgs/msg/challenge.hpp>
 #include <pgdemo_msgs/msg/config.hpp>
+#include <pgdemo_msgs/msg/config_applied.hpp>
 #include <pgdemo_msgs/msg/csr.hpp>
 #include <pgdemo_msgs/msg/error.hpp>
 #include <pgdemo_msgs/msg/gps_sample.hpp>
@@ -193,6 +195,7 @@ public:
         gps_ = create_publisher<msg::GpsSample>(topics::kGps, qos);
         xy_ = create_publisher<msg::XySample>(topics::kXy, qos);
         xyz_ = create_publisher<msg::XyzSample>(topics::kXyz, qos);
+        applied_ = create_publisher<msg::ConfigApplied>(topics::kConfigApplied, qos);
 
         bye_ = create_subscription<msg::Bye>(topics::kBye, qos, [this](msg::Bye::ConstSharedPtr m) { on_bye(*m); });
         rejected_ = create_subscription<msg::Rejected>(
@@ -394,11 +397,29 @@ private:
         }
     }
 
+    void publish_applied(const msg::Config& msg, bool ok, std::string code, std::string detail)
+    {
+        msg::ConfigApplied out;
+        out.device = opts_.name;
+        out.request_id = msg.request_id;
+        out.ok = ok;
+        out.code = std::move(code);
+        out.detail = std::move(detail);
+        applied_->publish(out);
+    }
+
     void on_config(const msg::Config& msg)
     {
         if ((phase_ != Phase::Config && phase_ != Phase::Run) || !mine(msg.device)) return;
+        if (const auto bad = check_config(static_cast<int>(msg.rate_ms), msg.amplitude))
+        {
+            log::warn(tag(), std::format("config refused: {} ({})", bad->code, bad->detail));
+            publish_applied(msg, false, bad->code, bad->detail);
+            return;
+        }
         const bool first = phase_ == Phase::Config;
         stream_.on_config(msg);
+        publish_applied(msg, true, {}, {});
         if (first)
         {
             phase_ = Phase::Run;
@@ -429,6 +450,7 @@ private:
     rclcpp::Publisher<msg::GpsSample>::SharedPtr gps_;
     rclcpp::Publisher<msg::XySample>::SharedPtr xy_;
     rclcpp::Publisher<msg::XyzSample>::SharedPtr xyz_;
+    rclcpp::Publisher<msg::ConfigApplied>::SharedPtr applied_;
     rclcpp::Subscription<msg::Bye>::SharedPtr bye_;
     rclcpp::Subscription<msg::Rejected>::SharedPtr rejected_;
     rclcpp::Subscription<msg::Certificate>::SharedPtr certificate_;

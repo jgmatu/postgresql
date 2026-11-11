@@ -313,7 +313,7 @@ The server writes the *desired* configuration and the controller writes the *app
 | Object | Role |
 |---|---|
 | `request_id_seq` | `BIGINT` sequence. Several server instances can enqueue concurrently without coordinating. |
-| `device_config` | Applied state, one row per device. `rate_ms BETWEEN 50 AND 10000`, `amplitude > 0 AND amplitude <= 1000`. The `CHECK`s back up the controller's own validation, so the applied state can never be invalid. Created from the type defaults by `issue_device_certificate()` when a device is enrolled (the controller writes them again if missing), and updated by the controller for every request it applies. |
+| `device_config` | Applied state, one row per device. `rate_ms BETWEEN 50 AND 10000`, `amplitude > 0 AND amplitude <= 1000`. The `CHECK`s back up the worker's validation, so the applied state can never be invalid. Created from the type defaults by `issue_device_certificate()` when a device is enrolled (the controller writes them again if missing), and updated by the controller when the worker accepts a request. |
 | `device_config_pending` | Desired state and durable queue. `status` goes from `PENDING` to `SUCCESS`, `ERROR` or `TIMEOUT`. Values are only loosely constrained (`requested_rate_ms > 0`): an out-of-range request is accepted, travels the loop and comes back as `ERROR` with a reason. Partial index `(requested_at) WHERE status = 'PENDING'` for the queue scan, and `(device_id, requested_at DESC)`. |
 | `device_config_errors` | Why a request failed, at most one row per request (`request_id UNIQUE`). Index `(device_id, occurred_at DESC)`. |
 | `device_config_history` | Audit of every applied configuration, including the type defaults a device starts with. |

@@ -6,6 +6,7 @@ module pgdemo_msgs {
       int32 rate_ms;
       double amplitude;
       boolean is_active;
+      int64 request_id;
     };
   };
 };

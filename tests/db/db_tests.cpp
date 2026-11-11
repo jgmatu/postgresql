@@ -564,9 +564,9 @@ TEST_F(DbTest, NormalRoleCannotListUsers)
     EXPECT_NO_THROW(server_->list_users(db::DbRole::Admin));
 }
 
-// The whole control-plane loop with the production pieces: Dispatcher on the
-// server side, queue drain on config_requested on the controller side, and the
-// completion coming back as config_events / error_events.
+// The whole control-plane loop: the worker's answer is what completes the row.
+// config_requested wakes the controller, which records that answer, and
+// config_events / error_events wake the server.
 TEST_F(DbTest, ConfigLoopAppliesAndRejectsThroughNotify)
 {
     server_->register_listen_async("config_events", [this](boost::json::object m) {
@@ -581,12 +581,13 @@ TEST_F(DbTest, ConfigLoopAppliesAndRejectsThroughNotify)
     server_->run_listener_loop();
 
     controller_->register_listen_async("config_requested", [this](boost::json::object) {
-        controller_->drain_pending(
-            [](const db::ConfigRequest& r) {
-                return r.rate_ms >= 50 ? db::ConfigOutcome::success()
-                                       : db::ConfigOutcome::failure("INVALID_RATE", "too fast");
-            },
-            [this](const db::AppliedConfig&) { applied_.fetch_add(1); }, 600s);
+        const auto batch = controller_->forwardable_pending(600s);
+        for (const auto& r : batch.pending)
+        {
+            const auto outcome = r.rate_ms >= 50 ? db::ConfigOutcome::success()
+                                                 : db::ConfigOutcome::failure("INVALID_RATE", "too fast");
+            if (controller_->complete_pending(r.request_id, outcome) && outcome.ok) applied_.fetch_add(1);
+        }
     });
     controller_->run_listener_loop();
 
@@ -631,16 +632,10 @@ TEST_F(DbTest, StaleRequestsExpireInsteadOfApplying)
     server_->add_pending_config(db::DbRole::Admin, request(id, dev, 500));
     std::this_thread::sleep_for(1100ms);
 
-    bool decided = false;
-    const auto stats = controller_->drain_pending(
-        [&](const db::ConfigRequest&) {
-            decided = true;
-            return db::ConfigOutcome::success();
-        },
-        [](const db::AppliedConfig&) {}, 1s);
-    EXPECT_GE(stats.expired, 1u);
+    const auto batch = controller_->forwardable_pending(1s);
+    EXPECT_GE(batch.expired, 1u);
+    EXPECT_TRUE(batch.pending.empty());
     EXPECT_EQ(status_of(id), "TIMEOUT");
-    EXPECT_FALSE(decided);
 }
 
 // Registering and removing a device is a row change announced on

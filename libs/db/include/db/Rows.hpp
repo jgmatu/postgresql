@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include <db/Tables.hpp>
 
@@ -160,7 +161,7 @@ struct ConfigRequest
     std::string requested_by;    ///< username of the admin who submitted it
 };
 
-/// Decision taken by the controller for one queued request.
+/// Decision reported by the worker for one queued request. The controller records it.
 struct ConfigOutcome
 {
     bool ok{false};            ///< true: apply; false: record an error
@@ -177,12 +178,11 @@ struct ConfigOutcome
     }
 };
 
-/// Result of a call to `drain_pending`.
-struct DrainStats
+/// Requests still waiting for the worker, after the stale ones were expired.
+struct ForwardBatch
 {
-    std::size_t applied{0};   ///< requests committed to `device_config`
-    std::size_t rejected{0};  ///< requests refused by `decide` (status ERROR)
-    std::size_t expired{0};   ///< requests older than `max_age` (status TIMEOUT)
+    std::vector<ConfigRequest> pending; ///< still `PENDING`; the controller forwards these
+    std::size_t expired{0};             ///< marked `TIMEOUT` because they waited longer than `max_age`
 };
 
 /// Row returned by `auth_fetch_user()`.

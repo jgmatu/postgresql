@@ -1,0 +1,11 @@
+module pgdemo_msgs {
+  module msg {
+    struct ConfigApplied {
+      string device;
+      int64 request_id;
+      boolean ok;
+      string code;
+      string detail;
+    };
+  };
+};

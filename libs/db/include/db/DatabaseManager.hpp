@@ -55,8 +55,8 @@ namespace pgdemo::db {
  * lease, so the call checks one out. An exception thrown by a callback is logged
  * and does not stop the listener.
  *
- * `drain_pending` keeps its lease across `decide` and `on_applied`. Those
- * callbacks must not call back into this object on the same thread.
+ * `forwardable_pending` and `complete_pending` each take one lease and release it
+ * before returning. The listener thread only queues the notification.
  */
 class DatabaseManager
 {
@@ -349,26 +349,29 @@ public:
     std::optional<AppliedConfig> init_device_config(int device_id);
 
     /**
-     * @brief Process every PENDING request, oldest first.
+     * @brief Expire stale `PENDING` requests and return the ones still waiting.
      *
-     * Each request is locked with `FOR UPDATE SKIP LOCKED`, so several controllers
-     * may drain the same queue. Requests older than `max_age` are marked TIMEOUT.
-     * Otherwise `decide` validates the request:
-     * - success: UPSERT `device_config` + history + status SUCCESS (fires `config_events`)
-     * - failure: INSERT `device_config_errors` + status ERROR (fires `error_events`)
+     * A request older than `max_age` becomes `TIMEOUT` with an `EXPIRED` error
+     * (`error_events`) and is not returned. The rows that stay `PENDING` are not
+     * modified: the worker has not accepted them yet.
      *
-     * `on_applied` runs after the commit, with the configuration now in force.
-     * One pooled connection is held for the whole drain. `decide` and `on_applied`
-     * must not call back into this `DatabaseManager` on the same thread.
-     *
-     * @param decide     validation of one request
-     * @param on_applied called after each successful commit
-     * @param max_age    requests that waited longer become TIMEOUT without `decide`
-     * @return how many requests were applied, rejected and expired
+     * @param max_age requests that waited longer become TIMEOUT
+     * @return the live requests, oldest first, and how many were expired
      */
-    DrainStats drain_pending(const std::function<ConfigOutcome(const ConfigRequest&)>& decide,
-                             const std::function<void(const AppliedConfig&)>& on_applied,
-                             std::chrono::seconds max_age);
+    ForwardBatch forwardable_pending(std::chrono::seconds max_age);
+
+    /**
+     * @brief Record the worker's answer for one request that is still `PENDING`.
+     *
+     * Success upserts `device_config` and its history (`config_events`). Failure
+     * inserts `device_config_errors` (`error_events`). A request that is no longer
+     * `PENDING`, or `request_id` 0, is left untouched.
+     *
+     * @param request_id the queued request
+     * @param outcome    what the worker reported
+     * @return true when a `PENDING` row was completed
+     */
+    bool complete_pending(std::int64_t request_id, const ConfigOutcome& outcome);
 
     /**
      * @brief `v_device_config_sync_status`: applied vs desired state per device.

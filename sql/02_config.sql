@@ -32,8 +32,8 @@ SET ROLE demo_owner;
 
 CREATE SEQUENCE IF NOT EXISTS request_id_seq AS BIGINT;
 
--- Applied state. CHECKs are a second line of defence behind the controller's
--- own validation: the applied state can never hold an invalid configuration.
+-- Applied state. CHECKs are a second line of defence behind the worker's
+-- validation: the applied state can never hold an invalid configuration.
 CREATE TABLE IF NOT EXISTS device_config (
     device_id   INT PRIMARY KEY REFERENCES device (device_id) ON DELETE CASCADE,
     rate_ms     INT NOT NULL CHECK (rate_ms BETWEEN 50 AND 10000),

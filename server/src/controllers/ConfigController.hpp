@@ -28,13 +28,14 @@ namespace pgdemo::server {
  *   1. request_id = nextval('request_id_seq')
  *   2. Dispatcher registers a waiter for request_id
  *   3. INSERT into device_config_pending (trigger: NOTIFY config_requested)
- *   4. the controller validates and commits: device_config (NOTIFY config_events)
- *      or device_config_errors (NOTIFY error_events)
+ *   4. the worker accepts or rejects the forwarded configuration; the controller
+ *      commits device_config (NOTIFY config_events) or device_config_errors
+ *      (NOTIFY error_events)
  *   5. the listener thread calls Dispatcher::dispatch(request_id, ...) and this
  *      thread wakes up
  *
  * If no answer arrives in time the request stays queued; the reply is 202 and
- * the controller applies it when it next drains the queue.
+ * the controller forwards it again when it next reads the queue.
  */
 class ConfigController : public oatpp::web::server::api::ApiController
 {
@@ -109,7 +110,7 @@ public:
             }
 
             // The server only checks types. Whether the values are acceptable is the
-            // controller's decision, and a rejection comes back as error_events.
+            // worker's decision, and a rejection comes back as error_events.
             req.request_id = s_->db->generate_request_id(c.role);
 
             std::exception_ptr submit_error;

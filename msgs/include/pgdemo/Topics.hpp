@@ -22,8 +22,11 @@ inline constexpr const char* kChallenge = "pgdemo/manager/security/challenge";
 /// Worker to manager. Certificate and signature of the nonce.
 inline constexpr const char* kProof = "pgdemo/worker/security/proof";
 
-/// Manager to worker, after the proof and whenever configuration changes.
+/// Manager to worker. A desired configuration, forwarded from `device_config_pending`.
+/// `request_id` is 0 for the type defaults sent when the session goes online.
 inline constexpr const char* kConfig = "pgdemo/manager/config";
+/// Worker to manager. The worker accepted the configuration, or refused it and kept the previous one.
+inline constexpr const char* kConfigApplied = "pgdemo/worker/config/applied";
 
 /// Worker to manager. One scalar sample.
 inline constexpr const char* kScalar = "pgdemo/worker/telemetry/scalar";

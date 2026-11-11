@@ -4,6 +4,7 @@
 
 #include <pgdemo/Topics.hpp>
 
+#include <pgdemo_msgs/msg/config_applied.hpp>
 #include <pgdemo_msgs/msg/csr.hpp>
 #include <pgdemo_msgs/msg/error.hpp>
 #include <pgdemo_msgs/msg/gps_sample.hpp>
@@ -59,6 +60,7 @@ void Manager::subscribe(Fleet& fleet)
     const auto qos = rclcpp::QoS(rclcpp::KeepLast(16)).reliable();
     const auto hello_qos = rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local();
     namespace msg = pgdemo_msgs::msg;
+    using topics::kConfigApplied;
     using topics::kCsr;
     using topics::kError;
     using topics::kGps;
@@ -78,6 +80,8 @@ void Manager::subscribe(Fleet& fleet)
         kCsr, qos, [&fleet](msg::Csr::ConstSharedPtr m) { fleet.on_uplink(*m); }));
     subscriptions_.push_back(node_->create_subscription<msg::Proof>(
         kProof, qos, [&fleet](msg::Proof::ConstSharedPtr m) { fleet.on_uplink(*m); }));
+    subscriptions_.push_back(node_->create_subscription<msg::ConfigApplied>(
+        kConfigApplied, qos, [&fleet](msg::ConfigApplied::ConstSharedPtr m) { fleet.on_uplink(*m); }));
     subscriptions_.push_back(node_->create_subscription<msg::ScalarSample>(
         kScalar, qos, [&fleet](msg::ScalarSample::ConstSharedPtr m) { fleet.on_uplink(*m); }));
     subscriptions_.push_back(node_->create_subscription<msg::GpsSample>(

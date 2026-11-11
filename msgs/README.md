@@ -10,7 +10,7 @@ ROS 2 discovers nodes as peers. Inside this system that does not grant authority
 flowchart LR
     workers[pgdemo_device workers]
     manager[pgdemo_controller manager]
-    workers -->|"pgdemo/worker: hello, heartbeat, error, csr, proof, telemetry"| manager
+    workers -->|"pgdemo/worker: hello, heartbeat, error, csr, proof, config applied, telemetry"| manager
     manager -->|"pgdemo/manager: bye, challenge, certificate, rejected, config"| workers
 ```
 
@@ -37,7 +37,14 @@ The nonce and the signature are raw bytes. The text the worker signs is unchange
 
 ## Configuration
 
-`pgdemo/manager/config`, struct `Config`, published by the manager after the proof and again when applied configuration changes. Fields: `device`, `device_id`, `rate_ms`, `amplitude`, `is_active`. The worker applies it at once and re-arms its timer.
+The manager forwards a desired configuration. The worker decides whether it can run with it, and only then does the controller write the database. `config_requested` is the PostgreSQL channel that wakes the controller; it is not a ROS topic.
+
+| Topic | Struct | Publisher | Fields |
+|---|---|---|---|
+| `pgdemo/manager/config` | `Config` | manager | `device`, `device_id`, `rate_ms`, `amplitude`, `is_active`, `request_id` (`0` for the type defaults sent when the session goes online) |
+| `pgdemo/worker/config/applied` | `ConfigApplied` | worker | `device`, `request_id`, `ok`, `code`, `detail` |
+
+The worker accepts `rate_ms` in `[50, 10000]` and `amplitude` in `(0, 1000]`, the same bounds as `device_config`. An accepted message is applied at once and the sample timer is re-armed. A refusal is published with `ok` false (`INVALID_RATE` or `INVALID_AMPLITUDE`) and the previous configuration stays in force. The controller records `ok` as `SUCCESS` in `device_config` and a refusal as `ERROR` in `device_config_errors`. Those writes are what notify the server.
 
 ## Telemetry
 

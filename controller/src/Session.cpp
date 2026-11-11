@@ -188,12 +188,41 @@ void Session::send_config(const db::AppliedConfig& config)
     msg.rate_ms = config.rate_ms;
     msg.amplitude = config.amplitude;
     msg.is_active = config.is_active;
+    msg.request_id = config.request_id.value_or(0);
+    downlink_.config(std::move(msg));
+}
+
+void Session::send_desired(const db::ConfigRequest& request)
+{
+    if (closed_ || !downlink_.config) return;
+    pgdemo_msgs::msg::Config msg;
+    msg.device = name_;
+    msg.device_id = request.device_id;
+    msg.rate_ms = request.rate_ms;
+    msg.amplitude = request.amplitude;
+    msg.is_active = request.is_active;
+    msg.request_id = request.request_id;
     downlink_.config(std::move(msg));
 }
 
 void Session::close()
 {
     closed_ = true;
+}
+
+void forward_configs(SessionDeps& deps)
+{
+    const auto batch = deps.db.forwardable_pending(deps.table.options().pending_max_age);
+    std::size_t sent = 0;
+    for (const auto& req : batch.pending)
+    {
+        auto* slot = deps.table.find(req.device);
+        if (slot == nullptr || !slot->session || !slot->session->online) continue;
+        slot->session->send_desired(req);
+        ++sent;
+    }
+    if (sent != 0 || batch.expired != 0)
+        log::info(kLog, std::format("config forwarded: {} sent, {} expired", sent, batch.expired));
 }
 
 void Session::admit(SessionDeps& deps, pgdemo_msgs::msg::Hello hello)
@@ -461,6 +490,7 @@ void enter_online(SessionDeps& deps, ProcessTable::Slot& slot)
     const auto config = deps.db.init_device_config(device.device_id);
     if (!config) throw Refusal("", "device deleted");
     session->send_config(*config);
+    forward_configs(deps);
 
     ProcessTable::Slot* s = deps.table.find(name);
     if (s == nullptr || s->session != session) throw Refusal("", "device deleted");
@@ -524,6 +554,22 @@ void on_online(SessionDeps& deps, ProcessTable::Slot& slot, const Uplink& msg)
                     return;
                 }
                 deps.writer.push(name, db::XyzSample{session->device_id, m.x, m.y, m.z, m.seq});
+            }
+            else if constexpr (std::is_same_v<T, pgdemo_msgs::msg::ConfigApplied>)
+            {
+                if (m.request_id == 0) return;
+                const auto outcome = m.ok ? db::ConfigOutcome::success()
+                                          : db::ConfigOutcome::failure(m.code.empty() ? "REJECTED" : m.code,
+                                                                       m.detail.empty() ? "worker rejected the configuration"
+                                                                                        : m.detail);
+                try
+                {
+                    deps.db.complete_pending(m.request_id, outcome);
+                }
+                catch (const std::exception& e)
+                {
+                    log::warn(kLog, std::format("{}: configuration {} not recorded: {}", name, m.request_id, e.what()));
+                }
             }
             else
                 log::warn(kLog, std::format("{}: ignoring message while online", name));

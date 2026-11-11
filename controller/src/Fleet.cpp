@@ -37,17 +37,6 @@ std::optional<double> field_number(const boost::json::object& o, std::string_vie
     return v->to_number<double>();
 }
 
-/// Validation of a desired configuration. Pure: no side effects.
-db::ConfigOutcome decide(const db::ConfigRequest& r)
-{
-    if (r.rate_ms < 50 || r.rate_ms > 10000)
-        return db::ConfigOutcome::failure("INVALID_RATE", std::format("rate_ms {} outside [50, 10000]", r.rate_ms));
-    if (!(r.amplitude > 0.0) || r.amplitude > 1000.0)
-        return db::ConfigOutcome::failure("INVALID_AMPLITUDE",
-                                          std::format("amplitude {} outside (0, 1000]", r.amplitude));
-    return db::ConfigOutcome::success();
-}
-
 } // namespace
 
 Fleet::Fleet(db::DatabaseManager& db, TelemetryWriter& writer, FleetOptions opts, Downlink downlink, SignalState& signals,
@@ -341,17 +330,8 @@ void Fleet::on_device_event(std::string action, std::string name, int device_id)
 
 void Fleet::drain()
 {
-    std::vector<db::AppliedConfig> applied;
-    const auto stats = db_.drain_pending(
-        decide, [&applied](const db::AppliedConfig& c) { applied.push_back(c); }, table_.options().pending_max_age);
-    for (const auto& c : applied)
-    {
-        auto* s = table_.find_by_id(c.device_id);
-        if (s != nullptr && s->session && s->session->online) s->session->send_config(c);
-    }
-    if (stats.applied + stats.rejected + stats.expired > 0)
-        log::info(kLog, std::format("queue drained: {} applied, {} rejected, {} expired", stats.applied, stats.rejected,
-                                    stats.expired));
+    auto deps = this->deps();
+    forward_configs(deps);
 }
 
 void Fleet::sweep()

@@ -145,6 +145,7 @@ sequenceDiagram
     participant D as Dispatcher
     participant PG as PostgreSQL
     participant C as controller listener
+    participant W as pgdemo-device
     A->>S: POST /api/config {device, rate_ms}
     S->>PG: v_device_config_sync_status for the device (404 unknown, 409 uninitialised)
     S->>PG: SELECT nextval('request_id_seq')  (SET LOCAL ROLE demo_admin)
@@ -152,12 +153,14 @@ sequenceDiagram
     D->>D: register id (before submit)
     D->>PG: submit(): INSERT device_config_pending (+ _history), COMMIT
     PG-->>C: NOTIFY config_requested {request_id, device_id}
-    C->>PG: SELECT ... WHERE status='PENDING' FOR UPDATE OF p SKIP LOCKED
-    alt valid
+    C->>W: pgdemo/manager/config {request_id, rate_ms, amplitude, is_active}
+    alt worker accepts
+        W->>C: pgdemo/worker/config/applied ok
         C->>PG: UPSERT device_config, INSERT history, status=SUCCESS, COMMIT
         PG-->>S: NOTIFY config_events {request_id, device, ...}
         S->>D: dispatch(id, SUCCESS)
-    else invalid
+    else worker rejects
+        W->>C: pgdemo/worker/config/applied code
         C->>PG: INSERT device_config_errors, status=ERROR, COMMIT
         PG-->>S: NOTIFY error_events {request_id, error_code}
         S->>D: dispatch(id, ERROR)
@@ -169,12 +172,12 @@ sequenceDiagram
 
 Properties of this loop:
 
-- **The queue is durable and notifications are not.** `NOTIFY` is a wake-up call, never the data. The controller drains every `PENDING` row each time it is woken, and once at start-up after `LISTEN` is active. A request made while the controller was down is applied when it comes back.
-- **One manager drains the queue.** `FOR UPDATE SKIP LOCKED` takes each row once. A second controller on this machine exits because the first holds `run/devices/.controller.lock`; one ROS domain runs one manager.
-- **Stale requests do not apply.** A request older than `--pending-max-age-s` (600 s by default) becomes `TIMEOUT` with error `EXPIRED`, so an old intent does not overwrite a newer reality.
-- **Validation belongs to the zone that executes.** The server checks types and the role; the controller decides whether the values are acceptable. The answer travels back through the database like any other state.
+- **The queue is durable and notifications are not.** `NOTIFY` is a wake-up call, never the data. The controller forwards every `PENDING` row each time it is woken, and once at start-up after `LISTEN` is active. A request made while the controller was down is forwarded when it comes back, and written only after the worker answers.
+- **One manager forwards the queue.** A second controller on this machine exits because the first holds `run/devices/.controller.lock`; one ROS domain runs one manager. Recording the answer locks that `PENDING` row, so a repeated acknowledgement does not write twice.
+- **Stale requests do not apply.** A request older than `--pending-max-age-s` (600 s by default) becomes `TIMEOUT` with error `EXPIRED`, without asking the worker, so an old intent does not overwrite a newer reality.
+- **Validation belongs to the worker.** The server checks types and the role. The worker accepts `rate_ms` in `[50, 10000]` and `amplitude` in `(0, 1000]`, or refuses and keeps its previous configuration. The controller records that answer, and it travels back through the database like any other state.
 - **Partial updates.** Fields left out of the POST body are taken from the applied configuration. A device the controller has not initialised yet has none, so the server answers `409`.
-- **Devices react immediately.** After the commit, the manager publishes `pgdemo/manager/config`. The worker applies it and re-arms its sample timer, so a new rate takes effect without waiting out the old period. A process that starts later receives the applied configuration right after it authenticates.
+- **The worker applies before the database does.** The manager publishes `pgdemo/manager/config` while the row is still `PENDING`. The worker re-arms its sample timer when it accepts, and the controller then commits. A process that starts later receives the configuration already in `device_config` right after it authenticates, with `request_id` 0.
 
 ## 4. The Dispatcher
 
@@ -216,7 +219,7 @@ stateDiagram-v2
 
 A query checkout is a `Lease`: `acquire()` blocks until a connection is free, and the destructor returns it, including when the transaction throws. `SET LOCAL ROLE` is transaction-scoped, so a role cannot leak into the next checkout of that connection. `disconnect()` joins the listener first, then waits until every lease is back before closing the sockets.
 
-Callbacks run on the listener thread. They may call query methods (that thread does not already hold a lease) and must stay short: the server's `dispatch` + `publish` are bounded, and the controller's callback only queues the notification. The spin timer drains it. `drain_pending` holds its lease across `decide` and `on_applied`; those two callbacks must not call back into `DatabaseManager`.
+Callbacks run on the listener thread. They may call query methods (that thread does not already hold a lease) and must stay short: the server's `dispatch` + `publish` are bounded, and the controller's callback only queues the notification. The spin timer reads it. `forwardable_pending` and `complete_pending` each take one lease and release it before returning.
 
 ## 6. Monthly partitioning
 

@@ -15,6 +15,7 @@ set(PGDEMO_IDL
     msg/Challenge.idl
     msg/Proof.idl
     msg/Config.idl
+    msg/ConfigApplied.idl
     msg/ScalarSample.idl
     msg/GpsSample.idl
     msg/XySample.idl

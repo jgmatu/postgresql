@@ -14,6 +14,7 @@
 #include <pgdemo_msgs/msg/heartbeat.hpp>
 #include <pgdemo_msgs/msg/scalar_sample.hpp>
 
+#include "ConfigCheck.hpp"
 #include "Generators.hpp"
 #include "Stream.hpp"
 
@@ -41,6 +42,25 @@ msg::Config config(int32_t device_id, int32_t rate_ms, double amplitude, bool ac
 }
 
 } // namespace
+
+TEST(ConfigCheck, AcceptsOnlyValuesTheTableCanStore)
+{
+    EXPECT_FALSE(device::check_config(50, 0.1).has_value());
+    EXPECT_FALSE(device::check_config(10000, 1000.0).has_value());
+
+    const auto rate = device::check_config(49, 1.0);
+    ASSERT_TRUE(rate.has_value());
+    EXPECT_EQ(rate->code, "INVALID_RATE");
+
+    const auto fast = device::check_config(10001, 1.0);
+    ASSERT_TRUE(fast.has_value());
+    EXPECT_EQ(fast->code, "INVALID_RATE");
+
+    const auto amp = device::check_config(100, 1000.1);
+    ASSERT_TRUE(amp.has_value());
+    EXPECT_EQ(amp->code, "INVALID_AMPLITUDE");
+    EXPECT_EQ(device::check_config(100, 0.0)->code, "INVALID_AMPLITUDE");
+}
 
 // The node re-arms its timer when on_config reports Config. tick() itself never
 // waits, so a config that shortens the rate takes effect on the next tick.
