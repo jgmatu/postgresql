@@ -229,6 +229,27 @@ export interface PkiCa {
   revoked: CrlEntry[];
 }
 
+/** One public certificate from `GET /api/pki/origin`. */
+export interface OriginCert {
+  name?: string;
+  subject?: string;
+  subject_cn?: string;
+  fingerprint: string;
+  serial?: string;
+  not_before: string;
+  not_after: string;
+  cert_pem: string;
+  device?: string;
+  current?: boolean;
+}
+
+/** `GET /api/pki/origin`: factory root, manager certificate and factory-issued workers. */
+export interface PkiOrigin {
+  factory: OriginCert | null;
+  manager: OriginCert | null;
+  workers: OriginCert[];
+}
+
 export interface ConfigHistoryRow {
   history_id: number;
   device_id: number;
