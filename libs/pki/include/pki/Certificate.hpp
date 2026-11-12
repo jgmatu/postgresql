@@ -45,6 +45,18 @@ CertInfo inspect_certificate(std::string_view pem);
 /// Lower-case hex of `bytes`.
 std::string to_hex(std::span<const std::uint8_t> bytes);
 
+/**
+ * @brief Inverse of `to_hex()`.
+ * @throws std::invalid_argument on malformed input
+ */
+std::vector<std::uint8_t> from_hex(std::string_view hex);
+
+/// UTC `YYYY-MM-DDTHH:MM:SSZ`, the form stored in `timestamptz` parameters.
+std::string format_time(std::chrono::system_clock::time_point tp);
+
+/// Subject CN of the manager certificate this model issues.
+inline constexpr std::string_view kManagerCommonName = "pgdemo-manager";
+
 /// Standard base64 (with padding) of `bytes`.
 std::string base64_encode(std::span<const std::uint8_t> bytes);
 

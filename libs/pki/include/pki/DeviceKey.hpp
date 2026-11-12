@@ -26,6 +26,17 @@ public:
     static DeviceKey generate();
 
     /**
+     * @brief The same P-384 key every time for the same 32-byte seed.
+     *
+     * HKDF-SHA384 with info `pgdemo/worker-key/v1` expands the seed to 64 bytes.
+     * The integer is reduced modulo `n - 1` and then increased by one, so the
+     * secp384r1 scalar is in `1 .. n - 1`. The ECDSA nonce stays random.
+     *
+     * @throws std::invalid_argument if `seed` is not 32 bytes
+     */
+    static DeviceKey from_seed(std::span<const std::uint8_t> seed);
+
+    /**
      * @brief Load a PKCS#8 PEM key written by `save()`.
      * @throws std::runtime_error if the file cannot be read or is not P-384
      */
@@ -50,6 +61,15 @@ public:
      * @return the CSR, PEM
      */
     [[nodiscard]] std::string csr_pem(std::string_view cn) const;
+
+    /**
+     * @brief Self-signed certificate for `CN=cn`, proof that this process holds the key.
+     *
+     * The factory checks this signature and returns a new certificate for the
+     * same public key. `server_auth` selects `serverAuth`; otherwise `clientAuth`.
+     * @return the certificate, PEM
+     */
+    [[nodiscard]] std::string self_signed_pem(std::string_view cn, bool server_auth = false) const;
 
     /// ECDSA-SHA384 signature of `message`, raw `r || s` (96 bytes).
     [[nodiscard]] std::vector<std::uint8_t> sign(std::span<const std::uint8_t> message) const;

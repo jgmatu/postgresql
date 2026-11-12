@@ -1,9 +1,12 @@
 #include <pki/DeviceKey.hpp>
 
 #include <botan/auto_rng.h>
+#include <botan/bigint.h>
 #include <botan/data_src.h>
 #include <botan/ec_group.h>
+#include <botan/ec_scalar.h>
 #include <botan/ecdsa.h>
+#include <botan/kdf.h>
 #include <botan/pkcs10.h>
 #include <botan/pkcs8.h>
 #include <botan/pubkey.h>
@@ -29,6 +32,22 @@ DeviceKey DeviceKey::generate()
 {
     Botan::AutoSeeded_RNG rng;
     return DeviceKey(std::make_unique<Botan::ECDSA_PrivateKey>(rng, Botan::EC_Group::from_name("secp384r1")));
+}
+
+DeviceKey DeviceKey::from_seed(std::span<const std::uint8_t> seed)
+{
+    if (seed.size() != 32) throw std::invalid_argument("DeviceKey: seed must be 32 bytes");
+    auto kdf = Botan::KDF::create_or_throw("HKDF(SHA-384)");
+    constexpr std::string_view kInfo = "pgdemo/worker-key/v1";
+    const auto info = std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t*>(kInfo.data()), kInfo.size());
+    const auto okm = kdf->derive_key<Botan::secure_vector<std::uint8_t>>(64, seed, {}, info);
+    Botan::BigInt x(okm.data(), okm.size());
+    const auto group = Botan::EC_Group::from_name("secp384r1");
+    Botan::BigInt modulus = group.get_order();
+    modulus -= 1;
+    x %= modulus;
+    x += 1;
+    return DeviceKey(std::make_unique<Botan::ECDSA_PrivateKey>(group, Botan::EC_Scalar::from_bigint(group, x)));
 }
 
 DeviceKey DeviceKey::load(const std::string& path)
@@ -75,6 +94,16 @@ std::string DeviceKey::csr_pem(std::string_view cn) const
     opts.add_ex_constraint("PKIX.ClientAuth");
     Botan::AutoSeeded_RNG rng;
     return Botan::X509::create_cert_req(opts, *key_, "SHA-384", rng).PEM_encode();
+}
+
+std::string DeviceKey::self_signed_pem(std::string_view cn, bool server_auth) const
+{
+    Botan::X509_Cert_Options opts;
+    opts.common_name = std::string(cn);
+    opts.constraints = Botan::Key_Constraints::DigitalSignature;
+    opts.add_ex_constraint(server_auth ? "PKIX.ServerAuth" : "PKIX.ClientAuth");
+    Botan::AutoSeeded_RNG rng;
+    return Botan::X509::create_self_signed_cert(opts, *key_, "SHA-384", rng).PEM_encode();
 }
 
 std::vector<std::uint8_t> DeviceKey::sign(std::span<const std::uint8_t> message) const

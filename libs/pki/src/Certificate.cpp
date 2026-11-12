@@ -9,12 +9,30 @@
 
 #include <algorithm>
 #include <cctype>
+#include <format>
 
 namespace pgdemo::pki {
 
 std::string to_hex(std::span<const std::uint8_t> bytes)
 {
     return Botan::hex_encode(bytes.data(), bytes.size(), false);
+}
+
+std::vector<std::uint8_t> from_hex(std::string_view hex)
+{
+    try
+    {
+        return Botan::hex_decode(hex);
+    }
+    catch (const std::exception& e)
+    {
+        throw std::invalid_argument(std::string("invalid hex: ") + e.what());
+    }
+}
+
+std::string format_time(std::chrono::system_clock::time_point tp)
+{
+    return std::format("{:%FT%TZ}", std::chrono::floor<std::chrono::seconds>(tp));
 }
 
 std::string base64_encode(std::span<const std::uint8_t> bytes)
