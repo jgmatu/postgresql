@@ -87,6 +87,35 @@ sequenceDiagram
 
 While the segment is open, the canvas follows the SSE of the digest. The full frame is drawn only after the key exists. The browser does not talk to MinIO.
 
+## Producer and consumer
+
+The controller produces the body and the server consumes it. The bulk frame never crosses a socket between them. MinIO is the buffer, attached to `zone_a` and `zone_b` the way PostgreSQL is, so each process uses the address of its own zone. PostgreSQL is the hand-off. The consumer learns that an object exists when the producer has finished it and written the key.
+
+Two credentials, both from the environment and neither committed. The controller's pair can put, abort a multipart upload, and delete an object it failed to finish. The server's pair can get. The server cannot overwrite a recording, and the controller's secret never sits on the server. The panel receives neither pair. A short-lived URL, when the server mints one, is signed with the read credential and names one key.
+
+The order is the protocol. The producer completes the multipart upload, then writes the key and commits. The `NOTIFY` fires on that commit. The consumer selects that key and gets that object. It does not list the bucket and it does not poll. A failed upload deletes the partial object and leaves the key empty, so the consumer has nothing to open. Reading the same key again is safe. The object is not replaced.
+
+```mermaid
+flowchart LR
+    subgraph zoneB [Zone B]
+        producer[pgdemo-controller]
+    end
+    subgraph buffer [MinIO on both zones]
+        bucket[Private bucket]
+    end
+    subgraph handoff [PostgreSQL]
+        key[Object key on the digest row]
+    end
+    subgraph zoneA [Zone A]
+        consumer[pgdemo-server]
+    end
+
+    producer -->|PUT the closed MCAP| bucket
+    producer -->|write the key after the object is complete| key
+    key -->|NOTIFY| consumer
+    consumer -->|GET that key| bucket
+```
+
 ## Browser
 
 The graphics engine is the browser. [frontend/src/components/point-cloud.tsx](frontend/src/components/point-cloud.tsx) already draws with three.js, and the same canvas is the view for both moments. It receives only what the server hands it. Visualization is the scene updating as digests arrive. Analysis of the full frame starts when the closed object is delivered. A correction made on that canvas goes back as rows. The MCAP stays the recording.
@@ -111,7 +140,7 @@ flowchart LR
 - [ ] **The digest, with the rules of `telemetry_*`.** Monthly partitions, no foreign key to `device`, one `NOTIFY` per `INSERT`, and a read cursor. The body is the local MCAP and the MinIO upload when the segment closes. The upload writes the key. A failed upload deletes the partial object, leaves the key empty, and marks the segment `FAILED`.
 
   - [ ] **Schema.** A digest table partitioned by month on `recorded_at`, with no foreign key to `device`. Columns: `device_id`, `seq`, the sample time, pose, point count, a box, an indicator, a segment id, and an object key that stays empty until the upload. A statement trigger, its channel, a `telemetry_read_cursor` row, and the grants: the controller inserts the digest and later writes the key, the server reads and advances the cursor. One row in [sql/README.md](sql/README.md).
-  - [ ] **MinIO.** The service attached to `zone_a` and `zone_b`, a bucket, and credentials from the environment, not committed. Still no TCP between `pgdemo-server` and `pgdemo-controller`.
+  - [ ] **MinIO.** The service attached to `zone_a` and `zone_b`, a private bucket, and two credentials from the environment: the controller may put and delete a failed upload, the server may get. Neither secret is committed. Still no TCP between `pgdemo-server` and `pgdemo-controller`.
   - [ ] **Record.** The controller appends the frame to the local MCAP and, on the current cadence (64 samples or 100 ms), inserts the digest and updates `device_state`. The queue of 256 still drops the sample that just arrived.
   - [ ] **Upload.** When the segment closes, a multipart upload, then the key written on the rows of that segment. On failure: delete the partial object, leave the key empty, and mark the segment `FAILED`.
   - [ ] **Live read.** The server `LISTEN`s on the new channel, reads the cursor, and publishes the digest on the SSE stream that already exists. A query by device and `recorded_at` returns the key.
