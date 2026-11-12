@@ -200,6 +200,16 @@ public:
         });
     }
 
+    /// `GET /api/pki/origin` (any role): the factory root, the manager certificate and
+    /// the worker certificates issued by that root. No private key is returned.
+    ENDPOINT("GET", "/api/pki/origin", origin, REQUEST(std::shared_ptr<IncomingRequest>, request))
+    {
+        return http::guarded("pki origin", [&] {
+            const auto c = http::caller_of(request);
+            return http::json_response(Status::CODE_200, s_->db->fetch_origin(c.role));
+        });
+    }
+
     /// `GET /api/pki/crl` (any role): 200 `application/x-pem-file`, a CRL signed now by the CA.
     ENDPOINT("GET", "/api/pki/crl", crl, REQUEST(std::shared_ptr<IncomingRequest>, request))
     {

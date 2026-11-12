@@ -17,11 +17,15 @@
 #include <cstdlib>
 #include <filesystem>
 #include <format>
+#include <fstream>
 #include <iostream>
+#include <sstream>
 #include <memory>
 #include <string>
 #include <string_view>
 #include <thread>
+
+#include <pki/Certificate.hpp>
 
 #include <auth/JwtManager.hpp>
 #include <auth/PasswordHasher.hpp>
@@ -71,6 +75,7 @@ void usage()
                  "  --config-timeout-ms N     POST /api/config wait (default 2000)\n"
                  "  --ca-key PATH             device CA private key (default run/ca/ca.key)\n"
                  "  --ca-cert PATH            device CA certificate (default run/ca/ca.crt)\n"
+                 "  --factory-cert PATH       public factory root; registered when the file exists\n"
                  "  --cert-validity-days N    lifetime of device certificates (default 365)\n"
                  "  --enroll-timeout-ms N     POST /api/devices and rotate wait (default 5000)\n"
                  "  --webroot PATH            control panel (static export of frontend/) served on GET /*\n";
@@ -98,6 +103,7 @@ ServerConfig parse(int argc, char** argv)
         else if (a == "--config-timeout-ms") c.config_timeout_ms = std::stoi(next());
         else if (a == "--ca-key") c.ca_key = next();
         else if (a == "--ca-cert") c.ca_cert = next();
+        else if (a == "--factory-cert") c.factory_cert = next();
         else if (a == "--cert-validity-days") c.cert_validity_days = std::stoi(next());
         else if (a == "--enroll-timeout-ms") c.enroll_timeout_ms = std::stoi(next());
         else if (a == "--webroot") c.webroot = next();
@@ -297,6 +303,23 @@ int run(const ServerConfig& cfg)
     services->hub = std::make_shared<EventHub>();
     services->db = std::make_shared<db::DatabaseManager>(cfg.conninfo, "pgdemo-server", cfg.pool_size);
     services->db->connect();
+    if (std::filesystem::is_regular_file(cfg.factory_cert))
+    {
+        try
+        {
+            std::ifstream in(cfg.factory_cert);
+            std::stringstream pem;
+            pem << in.rdbuf();
+            const auto info = pki::inspect_certificate(pem.str());
+            services->db->ensure_factory_root("CN=" + info.subject_cn, info.fingerprint, info.pem,
+                                              pki::format_time(info.not_before), pki::format_time(info.not_after));
+            log::info(kLog, "factory root " + info.fingerprint);
+        }
+        catch (const std::exception& e)
+        {
+            log::warn(kLog, std::string("factory root not registered: ") + e.what());
+        }
+    }
     services->signer = make_signer(cfg, services->db);
 
     // Registration phase, then activation (see DatabaseManager).

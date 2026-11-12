@@ -29,6 +29,7 @@ struct ServerConfig
     int config_timeout_ms = 2000;               ///< `--config-timeout-ms`: POST /api/config wait
     std::string ca_key = "run/ca/ca.key";       ///< `--ca-key`: device CA private key (signs CSRs)
     std::string ca_cert = "run/ca/ca.crt";      ///< `--ca-cert`: device CA certificate
+    std::string factory_cert = "run/factory/root.crt"; ///< `--factory-cert`: public factory root, when it exists
     int cert_validity_days = 365;               ///< `--cert-validity-days`: lifetime of device certificates
     int enroll_timeout_ms = 5000;               ///< `--enroll-timeout-ms`: POST /api/devices and rotate wait
     std::string webroot;                        ///< `--webroot`: control panel files; empty serves the API only
