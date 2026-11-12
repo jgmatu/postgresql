@@ -29,7 +29,7 @@ If the digest itself reached thousands of batches per second, the wake-up would 
 
 ## Components
 
-Two planes. The control plane is the one the demo already runs. The fat-data plane is the spool and MinIO. The server reads the digest and does not see the body.
+Two planes. The control plane is the one the demo already runs. The fat-data plane is the spool and MinIO. While the segment is open the server reads the digest and does not see the body. After the key is written it reads that closed object from MinIO. The panel talks only to the server.
 
 ```mermaid
 flowchart TB
@@ -52,7 +52,8 @@ flowchart TB
     controller -->|INSERT digest, UPSERT device_state| digest
     digest -->|NOTIFY on commit| server
     server -->|unread rows| cursor
-    server -->|SSE| panel
+    server -->|SSE of the digest| panel
+    server -->|GET a closed object| minio
     controller --> spool
     spool -->|upload when the segment closes| minio
 ```
@@ -65,6 +66,7 @@ sequenceDiagram
     participant controller as pgdemo-controller
     participant db as PostgreSQL
     participant server as pgdemo-server
+    participant panel as Control panel
     participant store as MinIO
 
     worker->>controller: frame
@@ -72,14 +74,36 @@ sequenceDiagram
     controller->>db: INSERT the digest, UPSERT device_state, COMMIT
     db-->>server: NOTIFY
     server->>db: SELECT unread digests, advance telemetry_read_cursor
-    server-->>server: publish the digest on SSE
+    server-->>panel: SSE of the digest
+    panel->>panel: draw the digest on the three.js canvas
     controller->>store: upload the closed segment
     controller->>db: write the object key on the rows of that segment
-    server->>db: SELECT keys by device and recorded_at
-    server->>store: open those objects for post-mortem
+    db-->>server: NOTIFY key ready
+    server->>db: SELECT the key
+    server->>store: GET the closed object
+    server-->>panel: short-lived URL, or the object through the API
+    panel->>panel: draw that object on the same canvas
 ```
 
-Live analysis is the SSE step. Post-mortem analysis is the last two steps. The key may still be empty during the first steps.
+While the segment is open, the canvas follows the SSE of the digest. The full frame is drawn only after the key exists. The browser does not talk to MinIO.
+
+## Browser
+
+The graphics engine is the browser. [frontend/src/components/point-cloud.tsx](frontend/src/components/point-cloud.tsx) already draws with three.js, and the same canvas is the view for both moments. It receives only what the server hands it. Visualization is the scene updating as digests arrive. Analysis of the full frame starts when the closed object is delivered. A correction made on that canvas goes back as rows. The MCAP stays the recording.
+
+```mermaid
+flowchart LR
+    subgraph handed [What the server hands over]
+        sse[SSE digest while the segment is open]
+        closedObj[Closed object after the key is ready]
+    end
+    subgraph engine [Browser graphics engine]
+        canvas[three.js canvas]
+        sse -->|pose, box, decimated points| canvas
+        closedObj -->|full frame| canvas
+    end
+    canvas -->|correction| rows[Rows in PostgreSQL]
+```
 
 ## Milestones
 
@@ -91,6 +115,12 @@ Live analysis is the SSE step. Post-mortem analysis is the last two steps. The k
   - [ ] **Record.** The controller appends the frame to the local MCAP and, on the current cadence (64 samples or 100 ms), inserts the digest and updates `device_state`. The queue of 256 still drops the sample that just arrived.
   - [ ] **Upload.** When the segment closes, a multipart upload, then the key written on the rows of that segment. On failure: delete the partial object, leave the key empty, and mark the segment `FAILED`.
   - [ ] **Live read.** The server `LISTEN`s on the new channel, reads the cursor, and publishes the digest on the SSE stream that already exists. A query by device and `recorded_at` returns the key.
+
+- [ ] **The panel.** The browser draws with the three.js canvas in [frontend/src/components/point-cloud.tsx](frontend/src/components/point-cloud.tsx). A full frame is not read from MinIO while the segment is open: one notification per frame would bring back the load this cut avoids. The object appears when the segment closes.
+
+  - [ ] **Live scene.** The open segment feeds the canvas from the digest SSE: pose, box, and the decimated points. The canvas does not ask for the body, and the browser does not talk to MinIO.
+  - [ ] **Key ready.** When the controller writes the key, a `NOTIFY` says the object can be read. The server checks the token, reads the key from the row, and gives the panel a short-lived URL or the object through the API. The bucket credentials stay on the server.
+  - [ ] **Closed object.** The same canvas draws that object for the later look. A correction made in the scene is stored as rows in PostgreSQL. The MCAP is left as it was uploaded.
 
 - [ ] **The proof.** While a large frame is flowing, the telemetry tables do not grow by the size of that frame. The SSE stream shows the digest. A query for the segment returns a key whose object is intact in MinIO.
 
