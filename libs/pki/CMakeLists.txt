@@ -3,6 +3,7 @@ add_library(pgdemo_pki STATIC
     src/CertificateAuthority.cpp
     src/CertVerifier.cpp
     src/DeviceKey.cpp
+    src/PufTable.cpp
 )
 add_library(pgdemo::pki ALIAS pgdemo_pki)
 
