@@ -28,6 +28,7 @@ add_subdirectory(libs/pki)
 add_subdirectory(msgs)
 add_subdirectory(device)
 add_subdirectory(controller)
+add_subdirectory(factory)
 add_subdirectory(server)
 
 if(PGDEMO_BUILD_TESTS)
