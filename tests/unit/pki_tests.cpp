@@ -8,6 +8,9 @@
 #include <pki/CertVerifier.hpp>
 #include <pki/CertificateAuthority.hpp>
 #include <pki/DeviceKey.hpp>
+#include <pki/FactoryChannel.hpp>
+#include <pki/Handshake.hpp>
+#include <pki/PufTable.hpp>
 
 #include <botan/auto_rng.h>
 #include <botan/data_src.h>
@@ -17,12 +20,17 @@
 #include <botan/x509_crl.h>
 #include <botan/x509self.h>
 
+#include <array>
+#include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <span>
 #include <sstream>
 #include <string>
+#include <thread>
 
 namespace fs = std::filesystem;
 using namespace pgdemo::pki;
@@ -217,6 +225,178 @@ TEST_F(PkiTest, KeySurvivesSaveAndLoadWithMode0600)
     const auto msg = proof_message(random_bytes(32), "sensor-a", cert.fingerprint);
     EXPECT_TRUE(CertVerifier::verify_signature(cert.pem, msg, loaded.sign(msg)));
     EXPECT_FALSE(read_file(path).empty());
+}
+
+std::span<const std::uint8_t> bytes_of(std::string_view text)
+{
+    return {reinterpret_cast<const std::uint8_t*>(text.data()), text.size()};
+}
+
+TEST_F(PkiTest, SameSeedDerivesTheSamePkcs8)
+{
+    std::array<std::uint8_t, 32> seed{};
+    for (std::size_t i = 0; i < seed.size(); ++i) seed[i] = static_cast<std::uint8_t>(i + 1);
+    const auto a = (dir_ / "seed-a.key").string();
+    const auto b = (dir_ / "seed-b.key").string();
+    DeviceKey::from_seed(seed).save(a);
+    DeviceKey::from_seed(seed).save(b);
+    EXPECT_EQ(read_file(a), read_file(b));
+    seed[0] = static_cast<std::uint8_t>(seed[0] ^ 0xff);
+    const auto c = (dir_ / "seed-c.key").string();
+    DeviceKey::from_seed(seed).save(c);
+    EXPECT_NE(read_file(a), read_file(c));
+}
+
+TEST_F(PkiTest, PufTableKeepsTheSeedOfADevice)
+{
+    const auto path = dir_ / "devices.puf";
+    PufTable table(path);
+    const auto first = table.seed_for(7);
+    EXPECT_EQ(table.seed_for(7), first);
+    EXPECT_NE(table.seed_for(8), first);
+    EXPECT_EQ(fs::status(path).permissions() & fs::perms::all, fs::perms::owner_read | fs::perms::owner_write);
+    const auto again = (dir_ / "puf-again.key").string();
+    const auto once = (dir_ / "puf-once.key").string();
+    DeviceKey::from_seed(first).save(once);
+    DeviceKey::from_seed(PufTable(path).seed_for(7)).save(again);
+    EXPECT_EQ(read_file(once), read_file(again));
+}
+
+TEST_F(PkiTest, FactorySignsTheWorkerAndTheManager)
+{
+    const auto worker = DeviceKey::generate();
+    const auto manager = DeviceKey::generate();
+    const auto worker_cert =
+        ca_->sign_presented(worker.self_signed_pem("sensor-a"), "sensor-a", CertificateAuthority::PresentedUse::Worker);
+    const auto manager_cert = ca_->sign_presented(manager.self_signed_pem(std::string(kManagerCommonName), true),
+                                                  std::string(kManagerCommonName),
+                                                  CertificateAuthority::PresentedUse::Manager);
+    const auto root = ca_->certificate_pem();
+    const auto payload = manager_crl_payload({});
+    const auto signature = manager.sign(bytes_of(payload));
+    verify_factory_pair(worker_cert.pem, manager_cert.pem, root, "sensor-a", payload, signature);
+
+    EXPECT_EQ(expect_code([&] {
+                  verify_factory_pair(worker_cert.pem, manager_cert.pem, other_->certificate_pem(), "sensor-a", payload,
+                                      signature);
+              }),
+              "CERT_CHAIN");
+    EXPECT_EQ(expect_code([&] {
+                  verify_factory_pair(worker_cert.pem, manager_cert.pem, root, "other", payload, signature);
+              }),
+              "CERT_SUBJECT");
+    const auto revoked = manager_crl_payload({worker_cert.serial});
+    const auto revoked_sig = manager.sign(bytes_of(revoked));
+    EXPECT_EQ(expect_code([&] {
+                  verify_factory_pair(worker_cert.pem, manager_cert.pem, root, "sensor-a", revoked, revoked_sig);
+              }),
+              "CERT_REVOKED");
+    EXPECT_EQ(expect_code([&] {
+                  verify_factory_pair(worker_cert.pem, manager_cert.pem, root, "sensor-a", payload, worker.sign(bytes_of(payload)));
+              }),
+              "CERT_CHAIN");
+
+    CertVerifier demo({other_->certificate_pem()});
+    EXPECT_EQ(expect_code([&] { demo.verify(worker_cert.pem, "sensor-a", {}); }), "CERT_CHAIN");
+}
+
+TEST_F(PkiTest, FactoryChannelReturnsTheSignedCertificate)
+{
+    const auto worker = DeviceKey::generate();
+    const auto presented = worker.self_signed_pem("sensor-a");
+    std::atomic<bool> stop{false};
+    std::atomic<std::uint16_t> bound{0};
+    std::thread server([&] { serve_factory(0, *ca_, stop, &bound); });
+    for (int i = 0; i < 200 && bound.load() == 0; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    ASSERT_NE(bound.load(), 0);
+    const auto pem = request_signature("127.0.0.1", bound.load(), "worker", "sensor-a", presented);
+    stop.store(true);
+    server.join();
+
+    const auto manager = DeviceKey::generate();
+    const auto manager_cert = ca_->sign_presented(manager.self_signed_pem(std::string(kManagerCommonName), true),
+                                                  std::string(kManagerCommonName),
+                                                  CertificateAuthority::PresentedUse::Manager);
+    const auto payload = manager_crl_payload({});
+    verify_factory_pair(pem, manager_cert.pem, ca_->certificate_pem(), "sensor-a", payload, manager.sign(bytes_of(payload)));
+    const auto probe = random_bytes(32);
+    EXPECT_TRUE(CertVerifier::verify_signature(pem, probe, worker.sign(probe)));
+}
+
+TEST_F(PkiTest, HandshakeAuthenticatesTheWorkerAndHonoursTheCrl)
+{
+    const auto worker = DeviceKey::generate();
+    const auto manager = DeviceKey::generate();
+    const auto worker_key = (dir_ / "hs-worker.key").string();
+    const auto manager_key = (dir_ / "hs-manager.key").string();
+    worker.save(worker_key);
+    manager.save(manager_key);
+    const auto worker_cert =
+        ca_->sign_presented(worker.self_signed_pem("sensor-a"), "sensor-a", CertificateAuthority::PresentedUse::Worker);
+    const auto manager_cert = ca_->sign_presented(manager.self_signed_pem(std::string(kManagerCommonName), true),
+                                                  std::string(kManagerCommonName),
+                                                  CertificateAuthority::PresentedUse::Manager);
+    const auto root = ca_->certificate_pem();
+    const auto payload = manager_crl_payload({});
+    const auto signature = manager.sign(bytes_of(payload));
+    const auto worker_pem = read_file(worker_key);
+    const auto manager_pem = read_file(manager_key);
+
+    HandshakeListener listener(manager_pem, manager_cert.pem, root);
+    std::string peer_fingerprint;
+    std::exception_ptr failure;
+    std::thread accepted([&] {
+        try
+        {
+            const auto peer = listener.accept_one();
+            verify_factory_pair(peer.pem, manager_cert.pem, root, "sensor-a", payload, signature);
+            peer_fingerprint = inspect_certificate(peer.pem).fingerprint;
+        }
+        catch (...)
+        {
+            failure = std::current_exception();
+        }
+    });
+    const auto manager_peer =
+        handshake_connect("127.0.0.1", listener.port(), worker_pem, worker_cert.pem, root, kManagerCommonName);
+    accepted.join();
+    if (failure) std::rethrow_exception(failure);
+    EXPECT_EQ(peer_fingerprint, worker_cert.fingerprint);
+    EXPECT_EQ(inspect_certificate(manager_peer.pem).fingerprint, manager_cert.fingerprint);
+
+    const auto revoked = manager_crl_payload({worker_cert.serial});
+    const auto revoked_sig = manager.sign(bytes_of(revoked));
+    std::string revoked_code;
+    std::thread rejected([&] {
+        try
+        {
+            const auto peer = listener.accept_one();
+            verify_factory_pair(peer.pem, manager_cert.pem, root, "sensor-a", revoked, revoked_sig);
+        }
+        catch (const PkiError& e)
+        {
+            revoked_code = e.code;
+        }
+    });
+    (void)handshake_connect("127.0.0.1", listener.port(), worker_pem, worker_cert.pem, root, kManagerCommonName);
+    rejected.join();
+    EXPECT_EQ(revoked_code, "CERT_REVOKED");
+
+    std::thread rejected_root([&] {
+        try
+        {
+            (void)listener.accept_one();
+        }
+        catch (...)
+        {
+        }
+    });
+    EXPECT_EQ(expect_code([&] {
+                  (void)handshake_connect("127.0.0.1", listener.port(), worker_pem, worker_cert.pem,
+                                          other_->certificate_pem(), kManagerCommonName);
+              }),
+              "CERT_CHAIN");
+    rejected_root.join();
 }
 
 } // namespace
