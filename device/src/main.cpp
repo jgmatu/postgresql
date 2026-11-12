@@ -12,6 +12,9 @@
 #include <pki/CertVerifier.hpp>
 #include <pki/Certificate.hpp>
 #include <pki/DeviceKey.hpp>
+#include <pki/FactoryChannel.hpp>
+#include <pki/Handshake.hpp>
+#include <pki/PufTable.hpp>
 
 #include <log/Log.hpp>
 #include <pgdemo/Topics.hpp>
@@ -44,6 +47,7 @@
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <string>
 
 namespace pgdemo::device {
@@ -72,7 +76,12 @@ void usage(std::ostream& out)
            "  --payload   scalar, gps, xy or xyz\n"
            "  --dir       key directory: key.pem and cert.pem\n"
            "  --enroll    generate a key, send a CSR and store the issued certificate\n"
-           "  --rotate    same, replacing the current key once the new certificate arrives\n";
+           "  --rotate    same, replacing the current key once the new certificate arrives\n"
+           "  --device-id id stored in devices.puf; a missing id is created and reused\n"
+           "  --puf       path of devices.puf\n"
+           "  --factory   HOST:PORT of the factory, used when cert.pem is absent\n"
+           "  --factory-root  factory root certificate\n"
+           "  --manager-tls   HOST:PORT of the mutual handshake\n";
 }
 
 struct Options
@@ -83,6 +92,11 @@ struct Options
     fs::path dir;
     std::string mode = "run";
     std::int64_t request_id = 0;
+    std::optional<std::int64_t> device_id;
+    fs::path puf;
+    std::string factory;
+    fs::path factory_root;
+    std::string manager_tls;
 };
 
 struct UsageError : std::runtime_error
@@ -112,6 +126,11 @@ Options parse_args(int argc, char** argv)
             o.mode = arg.substr(2);
             o.request_id = std::stoll(value);
         }
+        else if (arg == "--device-id") o.device_id = std::stoll(value);
+        else if (arg == "--puf") o.puf = value;
+        else if (arg == "--factory") o.factory = value;
+        else if (arg == "--factory-root") o.factory_root = value;
+        else if (arg == "--manager-tls") o.manager_tls = value;
         else throw UsageError(std::format("unknown option {}", arg));
     }
     if (o.name.empty() || o.type.empty() || o.dir.empty())
@@ -144,6 +163,56 @@ void write_file(const fs::path& p, const std::string& data)
         out << data;
     }
     fs::rename(tmp, p);
+}
+
+std::pair<std::string, std::uint16_t> split_endpoint(const std::string& endpoint)
+{
+    const auto colon = endpoint.rfind(':');
+    if (colon == std::string::npos || colon == 0) throw std::runtime_error("expected HOST:PORT, got " + endpoint);
+    return {endpoint.substr(0, colon), static_cast<std::uint16_t>(std::stoi(endpoint.substr(colon + 1)))};
+}
+
+/// Derive the key from devices.puf when this worker has no key yet, ask the
+/// factory for a certificate, and finish the mutual handshake when the stored
+/// certificate was issued by that root. A certificate from the demo CA keeps
+/// the enrollment that already runs.
+void prepare_origin(const Options& opts)
+{
+    const fs::path key_path = opts.dir / "key.pem";
+    const fs::path cert_path = opts.dir / "cert.pem";
+    if (opts.device_id && !opts.puf.empty() && !fs::exists(key_path))
+    {
+        const auto seed = pki::PufTable(opts.puf).seed_for(*opts.device_id);
+        pki::DeviceKey::from_seed(seed).save(key_path.string());
+        log::info("device", opts.name + ": derived the key from devices.puf");
+    }
+    if (!opts.factory.empty() && fs::exists(key_path) && !fs::exists(cert_path))
+    {
+        const auto [host, port] = split_endpoint(opts.factory);
+        auto key = pki::DeviceKey::load(key_path.string());
+        const auto pem = pki::request_signature(host, port, "worker", opts.name, key.self_signed_pem(opts.name));
+        write_file(cert_path, pem);
+        log::info("device", opts.name + ": factory signed the certificate");
+    }
+    if (opts.manager_tls.empty() || opts.factory_root.empty() || !fs::exists(key_path) || !fs::exists(cert_path)) return;
+    const auto root = read_file(opts.factory_root);
+    const auto cert = read_file(cert_path);
+    try
+    {
+        pki::CertVerifier({root}).verify(cert, opts.name, {});
+    }
+    catch (const pki::PkiError& e)
+    {
+        if (e.code == "CERT_CHAIN" || e.code == "CERT_SUBJECT")
+        {
+            log::info("device", opts.name + ": certificate is not from the factory root");
+            return;
+        }
+        throw;
+    }
+    const auto [host, port] = split_endpoint(opts.manager_tls);
+    pki::handshake_connect(host, port, read_file(key_path), cert, root, pki::kManagerCommonName);
+    log::info("device", opts.name + ": mutual handshake with the manager");
 }
 
 /// Node name from a device name. ROS names allow letters, digits and underscore.
@@ -183,6 +252,7 @@ public:
     {
         fs::create_directories(opts_.dir);
         ::chmod(opts_.dir.c_str(), 0700);
+        prepare_origin(opts_);
 
         const auto qos = rclcpp::QoS(rclcpp::KeepLast(16)).reliable();
         const auto hello_qos = rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local();
