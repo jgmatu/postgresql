@@ -118,7 +118,11 @@ flowchart LR
 
 ## Browser
 
-The graphics engine is the browser. [frontend/src/components/point-cloud.tsx](frontend/src/components/point-cloud.tsx) already draws with three.js, and the same canvas is the view for both moments. It receives only what the server hands it. Visualization is the scene updating as digests arrive. Analysis of the full frame starts when the closed object is delivered. A correction made on that canvas goes back as rows. The MCAP stays the recording.
+The strong point of the view is that the graphics engine is the browser. three.js, through React Three Fiber, draws into a WebGL canvas in [frontend/src/components/point-cloud.tsx](frontend/src/components/point-cloud.tsx). The GPU of the machine that opened the panel does the instancing, the shading and the camera. The server hands over numbers and, once the segment has closed, one object. Rasterizing stays on that GPU, next to the person looking at the scene. three.js ships inside the panel bundle.
+
+That split is what a point cloud, a reshape and a further view of the fleet all share. The canvas already places one instanced sphere per sample and orbits the camera around the origin, with the radius, the azimuth around Y and the polar angle read out every frame. A denser cloud stays on the same path: positions sit in a buffer the GPU draws, and the page keeps the interaction, an orbit, a selection or a measure. Reshaping an object is an edit on that canvas. The edit returns to PostgreSQL as rows, and the MCAP in MinIO stays the recording that was uploaded. Another visualization tool for this system is another view on this canvas, still served with the panel and still talking only to the server.
+
+The canvas has two inputs. While the segment is open it follows the digest SSE, pose, box and the decimated points, and the scene moves on the digest. When the key is ready the same canvas draws the closed object for the later look. MinIO stays behind the server.
 
 ```mermaid
 flowchart LR
@@ -126,12 +130,15 @@ flowchart LR
         sse[SSE digest while the segment is open]
         closedObj[Closed object after the key is ready]
     end
-    subgraph engine [Browser graphics engine]
-        canvas[three.js canvas]
-        sse -->|pose, box, decimated points| canvas
+    subgraph engine [Browser]
+        canvas[WebGL canvas]
+        gpu["GPU: instancing, shading, camera"]
+        sse -->|"pose, box, decimated points"| canvas
         closedObj -->|full frame| canvas
+        canvas --> gpu
     end
-    canvas -->|correction| rows[Rows in PostgreSQL]
+    gpu -->|orbit, selection, measure| tool[Visualization tool]
+    gpu -->|a reshape, stored as rows| rows[PostgreSQL]
 ```
 
 ## Milestones
@@ -145,7 +152,7 @@ flowchart LR
   - [ ] **Upload.** When the segment closes, a multipart upload, then the key written on the rows of that segment. On failure: delete the partial object, leave the key empty, and mark the segment `FAILED`.
   - [ ] **Live read.** The server `LISTEN`s on the new channel, reads the cursor, and publishes the digest on the SSE stream that already exists. A query by device and `recorded_at` returns the key.
 
-- [ ] **The panel.** The browser draws with the three.js canvas in [frontend/src/components/point-cloud.tsx](frontend/src/components/point-cloud.tsx). A full frame is not read from MinIO while the segment is open: one notification per frame would bring back the load this cut avoids. The object appears when the segment closes.
+- [ ] **The panel.** The browser draws with the WebGL canvas in [frontend/src/components/point-cloud.tsx](frontend/src/components/point-cloud.tsx). three.js is bundled, and the GPU of that browser does the instancing, the shading and the camera. A full frame is not read from MinIO while the segment is open: one notification per frame would bring back the load this cut avoids. The object appears when the segment closes.
 
   - [ ] **Live scene.** The open segment feeds the canvas from the digest SSE: pose, box, and the decimated points. The canvas does not ask for the body, and the browser does not talk to MinIO.
   - [ ] **Key ready.** When the controller writes the key, a `NOTIFY` says the object can be read. The server checks the token, reads the key from the row, and gives the panel a short-lived URL or the object through the API. The bucket credentials stay on the server.
