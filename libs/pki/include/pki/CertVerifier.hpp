@@ -54,6 +54,19 @@ public:
                     const std::set<std::string>& revoked_serials,
                     std::chrono::system_clock::time_point now = std::chrono::system_clock::now()) const;
 
+    /// Which extended key usage `verify_as` requires.
+    enum class CertUse { Client, Server };
+
+    /**
+     * @brief `verify`, with `clientAuth` or `serverAuth`.
+     *
+     * `verify` is the client check used by the running enrollment. The factory
+     * model uses `Server` for the manager certificate.
+     */
+    CertInfo verify_as(std::string_view cert_pem, std::string_view expected_cn,
+                       const std::set<std::string>& revoked_serials, CertUse use,
+                       std::chrono::system_clock::time_point now = std::chrono::system_clock::now()) const;
+
     /**
      * @brief Check an ECDSA-SHA384 signature (raw `r || s`) with the key of `cert_pem`.
      * @return false for a bad signature or an unusable certificate
@@ -64,5 +77,18 @@ public:
 private:
     std::unique_ptr<Botan::Certificate_Store_In_Memory> store_;
 };
+
+/// Canonical text the manager signs: a header and one serial per line, sorted.
+std::string manager_crl_payload(const std::set<std::string>& serials);
+
+/**
+ * @brief Both certificates were signed by `root_pem`, the worker CN matches,
+ * and the manager's signature over `crl_payload` does not list the worker.
+ *
+ * @throws PkiError `CERT_CHAIN`, `CERT_SUBJECT`, `CERT_REVOKED`
+ */
+void verify_factory_pair(std::string_view worker_pem, std::string_view manager_pem, std::string_view root_pem,
+                         std::string_view worker_cn, std::string_view crl_payload,
+                         std::span<const std::uint8_t> crl_signature);
 
 } // namespace pgdemo::pki

@@ -68,6 +68,31 @@ public:
                       std::chrono::seconds validity = std::chrono::days(365)) const;
 
     /**
+     * @brief Who the presented self-signed certificate is for.
+     *
+     * `Worker` is issued `clientAuth`. `Manager` is issued `serverAuth`.
+     * Both are end-entity certificates (`CA:FALSE`, `digitalSignature`).
+     */
+    enum class PresentedUse { Worker, Manager };
+
+    /**
+     * @brief Check a self-signed certificate and issue one for the same public key.
+     *
+     * The presented certificate must be self-signed by an ECDSA P-384 key
+     * (proof of possession), carry `CN=expected_cn`, and must not be a CA.
+     * The issued certificate replaces it; `sign_csr` is unchanged.
+     *
+     * @param cert_pem    self-signed certificate, PEM
+     * @param expected_cn name the certificate is for
+     * @param use         worker (`clientAuth`) or manager (`serverAuth`)
+     * @param validity    lifetime; `not_before` is one minute in the past
+     * @return the certificate signed by this CA
+     * @throws PkiError `CERT_MALFORMED`, `CERT_CHAIN`, `CERT_SUBJECT`
+     */
+    CertInfo sign_presented(std::string_view cert_pem, std::string_view expected_cn, PresentedUse use,
+                            std::chrono::seconds validity = std::chrono::days(365)) const;
+
+    /**
      * @brief A signed X.509 CRL listing `revoked`.
      * @param revoked     revoked certificates of this CA
      * @param next_update `nextUpdate` offset from now

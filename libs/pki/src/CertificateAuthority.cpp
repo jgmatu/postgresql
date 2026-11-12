@@ -101,6 +101,54 @@ CertInfo CertificateAuthority::sign_csr(std::string_view csr_pem, std::string_vi
     return inspect_certificate(cert.PEM_encode());
 }
 
+CertInfo CertificateAuthority::sign_presented(std::string_view cert_pem, std::string_view expected_cn, PresentedUse use,
+                                              std::chrono::seconds validity) const
+{
+    Botan::X509_Certificate presented = [](std::string_view pem) {
+        try
+        {
+            Botan::DataSource_Memory src(pem);
+            return Botan::X509_Certificate(src);
+        }
+        catch (const std::exception& e)
+        {
+            throw PkiError("CERT_MALFORMED", std::string("certificate does not parse: ") + e.what());
+        }
+    }(cert_pem);
+
+    const auto pub = presented.subject_public_key();
+    if (!pub || pub->algo_name() != "ECDSA" || pub->key_length() != 384)
+        throw PkiError("CERT_MALFORMED", "the presented key must be ECDSA P-384");
+    if (presented.issuer_dn() != presented.subject_dn() || !presented.check_signature(*pub))
+        throw PkiError("CERT_CHAIN", "the presented certificate is not signed by its own key");
+    const std::string cn = presented.subject_dn().get_first_attribute("CN");
+    if (cn != expected_cn)
+        throw PkiError("CERT_SUBJECT", "certificate CN '" + cn + "' is not '" + std::string(expected_cn) + "'");
+    if (presented.is_CA_cert()) throw PkiError("CERT_CHAIN", "a presented certificate cannot be a CA");
+
+    Botan::X509_DN subject;
+    subject.add_attribute("X520.CommonName", cn);
+    Botan::Extensions ext;
+    ext.add(std::make_unique<Botan::Cert_Extension::Basic_Constraints>(false), true);
+    ext.add(std::make_unique<Botan::Cert_Extension::Key_Usage>(Botan::Key_Constraints::DigitalSignature), true);
+    const char* eku = use == PresentedUse::Manager ? "PKIX.ServerAuth" : "PKIX.ClientAuth";
+    ext.add(std::make_unique<Botan::Cert_Extension::Extended_Key_Usage>(
+        std::vector<Botan::OID>{Botan::OID::from_string(eku)}));
+    const auto& spki = presented.subject_public_key_info();
+    ext.add(std::make_unique<Botan::Cert_Extension::Subject_Key_ID>(spki, "SHA-256"));
+    ext.add(std::make_unique<Botan::Cert_Extension::Authority_Key_ID>(cert_->subject_key_id()));
+
+    Botan::AutoSeeded_RNG rng;
+    Botan::X509_CA ca(*cert_, *key_, "SHA-384", rng);
+    const Botan::BigInt serial(rng, 128);
+    const auto now = std::chrono::system_clock::now();
+    const auto cert = Botan::X509_CA::make_cert(
+        ca.signature_op(), rng, serial, ca.algorithm_identifier(), spki,
+        Botan::X509_Time(now - std::chrono::minutes(1)), Botan::X509_Time(now + validity), cert_->subject_dn(),
+        subject, ext);
+    return inspect_certificate(cert.PEM_encode());
+}
+
 std::string CertificateAuthority::crl_pem(const std::vector<RevokedCert>& revoked,
                                           std::chrono::seconds next_update) const
 {
