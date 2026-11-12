@@ -163,3 +163,51 @@ flowchart LR
   - [ ] **Table size.** A fixture frame larger than the digest row, and the relation size does not grow by that frame.
   - [ ] **SSE.** The event carries the digest fields and does not carry the frame bytes.
   - [ ] **Object.** The key from the query opens an object in MinIO identical to the MCAP left on the spool.
+
+## Two trust models
+
+Workers against the manager already have a trust model, written in [docs/DEVICE_PKI.md](docs/DEVICE_PKI.md). The factory is a second origin. The running demo keeps the first. `run/ca/ca.key` stays where that document puts it.
+
+### The model that runs
+
+`pgdemo-server` holds `run/ca/ca.key` and signs the CSR and the CRL. The controller verifies, and signing stays with the server. The worker generates an ECDSA P-384 key in software, publishes the CSR on ROS, and proves the key with the challenge in [section 5](docs/DEVICE_PKI.md#5-authentication): `pgdemo/manager/security/challenge` and `pgdemo/worker/security/proof`. Admission is that challenge. The CA key stays in zone A. In Docker the `ca-keys` volume is mounted by `init` and the server. When `run/factory/root.key` and `run/controller/manager.key` are absent, this is the whole of device identity.
+
+### What the PoCFHE PKI contributes
+
+From [pki/README.md](https://github.com/jgmatu/PoCFHE/blob/main/pki/README.md) this demo takes three ideas: a simulated PUF of 256 bits as the root of the worker's life, a factory CA that attests that origin, and authentication in both directions. The manager does not hold the worker's usage private key.
+
+The 256-bit seed derives the usage private key, and that key stays ECDSA P-384. The factory is the root of this second model. The PoC keeps what is its own: FHE, `K_aes`, the session HKDF, the P-521 curve, the `authorized_cazas.json` list, and the TCP handshake. There the `master.key` derives the AES key and the ECDSA pair is born separately, and the factory CA is still absent.
+
+The seed and the private key stay on the worker. The self-signed certificate is what travels to the factory. The factory returns a new certificate for the same public key.
+
+### The factory model
+
+[factory/README.md](factory/README.md) is the process. [device/README.md](device/README.md#simulated-puf) is the seed. The schema is in [sql/README.md](sql/README.md#device-identity).
+
+```mermaid
+sequenceDiagram
+    participant factory as Factory
+    participant worker as Worker
+    participant manager as Manager
+
+    factory->>factory: root key already on disk
+    worker->>worker: seed in devices.puf, same P-384 key
+    worker->>factory: self-signed certificate
+    factory-->>worker: certificate signed by the factory root
+    manager->>factory: self-signed certificate, the first start
+    factory-->>manager: manager certificate signed by the factory root
+    manager->>manager: signs its own revocation list
+    worker->>manager: mutual TLS, then the list
+```
+
+- `scripts/gen-factory.sh` creates `run/factory/root.key` before `pgdemo-factory` starts. The process exits if the key is missing. The certificate is a `root_ca` row named `factory`. The private key is not stored.
+- A missing `device_id` in `devices.puf` is generated once and kept. The same id derives the same P-384 key. The worker sends a self-signed certificate. The factory signs the worker and, the first time, the manager. There is no second issuer.
+- The manager signs `manager_revocation` with its own key. That list is not the `crl` table. A serial on it is not authenticated, even when the worker certificate still chains to the factory.
+- The mutual TLS 1.3 handshake runs when the controller and the worker configure their ROS nodes. The challenge of the model that already runs stays. It is skipped only for a certificate that chains to the factory root.
+
+- [x] **The factory chain.** A `factory` directory, a simulated PUF, one signature from that root, and mutual TLS when the files exist. The model in [docs/DEVICE_PKI.md](docs/DEVICE_PKI.md) keeps running.
+
+  - [x] **Factory.** `pgdemo-factory`, and its certificate stored in `root_ca` under the name `factory`.
+  - [x] **Boot.** The worker reads or creates its seed in `devices.puf`, derives the P-384 key, and sends a self-signed certificate. The seed and the private key stay on the worker.
+  - [x] **One signature.** The factory signs the worker and the manager. The manager signs its own revocation list.
+  - [x] **Handshake.** The worker and the manager authenticate with mutual TLS when the ROS node is configured. The manager presents the certificate the factory signed.

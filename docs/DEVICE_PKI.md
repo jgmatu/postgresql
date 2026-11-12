@@ -2,6 +2,8 @@
 
 Every device has an X.509 certificate issued by an internal root CA. Its process proves, each time it connects, that it holds the matching private key. This document covers the trust model, the schema behind it, the enrollment and rotation flows, how the controller runs and authenticates device processes, and what revoking or deleting a certificate does.
 
+A second origin, the factory, signs the manager and the workers from a key derived from a simulated PUF. It does not replace this CA, this CSR or this challenge. It is [factory/README.md](../factory/README.md), and the worker side is [device/README.md](../device/README.md). When `run/factory/root.key` and `run/controller/manager.key` are absent, this document is the whole of device identity.
+
 1. [Trust model](#1-trust-model)
 2. [Schema](#2-schema)
 3. [Enrollment and rotation](#3-enrollment-and-rotation)
@@ -22,7 +24,7 @@ Every device has an X.509 certificate issued by an internal root CA. Its process
 | Device certificate | `run/devices/NAME/cert.pem` and `device_certificate` | everyone |
 
 - **The server signs, it never verifies a device.** It checks the CSR (self-signature, ECDSA P-384, `CN` equal to the device name, no CA request) and then issues a certificate with a fixed profile, whatever the CSR asked for: subject `CN=NAME` only, `basicConstraints CA:FALSE` (critical), `keyUsage digitalSignature` (critical), `extendedKeyUsage clientAuth`, subject and authority key identifiers, a random 128-bit serial, ECDSA-SHA384, `--cert-validity-days` (365) of validity.
-- **The controller verifies, it never signs.** It checks the chain against the active `root_ca` rows, the validity dates, the CRL, and that the process holds the key (challenge-response, [section 5](#5-authentication)).
+- **The controller verifies, it never signs** with this CA. It checks the chain against the active `root_ca` rows, the validity dates, the CRL, and that the process holds the key (challenge-response, [section 5](#5-authentication)). The factory origin, when its files exist, has the manager sign its own revocation list with `run/controller/manager.key`. Worker certificates on that path are signed by the factory.
 - **No key crosses a zone.** The CA key stays in zone A, device keys in zone B. Only CSRs, certificates and the CRL travel, through PostgreSQL.
 
 ```mermaid

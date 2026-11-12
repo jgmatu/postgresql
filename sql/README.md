@@ -15,7 +15,7 @@ A database created with an earlier schema (one table per dummy, or devices witho
 | [`00_roles.sql`](00_roles.sql) | Cluster roles and role memberships |
 | [`01_data.sql`](01_data.sql) | PostGIS, `device_type`, `device`, `device_state`, the monthly-partitioned `telemetry_scalar`, `telemetry_gps`, `telemetry_xy` and `telemetry_xyz`, the server's `telemetry_read_cursor`, and the partition maintenance functions |
 | [`02_config.sql`](02_config.sql) | Configuration: request id sequence, applied configuration, request queue, errors and audits, all keyed by `device_id` |
-| [`03_identity.sql`](03_identity.sql) | Device identity: `root_ca`, `device_certificate`, `crl`, `device_enrollment`, `device_session`, the binding foreign keys, `issue_device_certificate()`, `reject_enrollment()`, and the seed enrollments |
+| [`03_identity.sql`](03_identity.sql) | Device identity: `root_ca`, `device_certificate`, `crl`, `manager_certificate`, `manager_revocation`, `manager_crl_signature`, `device_enrollment`, `device_session`, the binding foreign keys, `issue_device_certificate()`, `reject_enrollment()`, the factory registration functions, and the seed enrollments |
 | [`03_users.sql`](03_users.sql) | `app_users`, the `app_role` type, `auth_fetch_user()` and the last-admin guard |
 | [`04_triggers.sql`](04_triggers.sql) | `NOTIFY` triggers: one channel per topic, with the device in the payload |
 | [`05_views.sql`](05_views.sql) | Views and every `GRANT` |
@@ -184,8 +184,11 @@ erDiagram
     device ||--|{ device_certificate : "has had 1..n, ON DELETE CASCADE"
     device_certificate ||--|| device : "current (cert_id, device_id), ON DELETE CASCADE"
     root_ca ||--o{ device_certificate : "ca_id, ON DELETE RESTRICT"
+    root_ca ||--o| manager_certificate : "name factory, one row"
     root_ca ||--o{ crl : "ca_id"
     device_certificate ||..o| crl : "(ca_id, serial), no FK"
+    manager_certificate ||..|| manager_crl_signature : "signs the list, no FK"
+    manager_crl_signature ||..o{ manager_revocation : "serials, no FK"
     device_type ||--o{ device_enrollment : "type_id"
     device |o--o{ device_enrollment : "device_id, ON DELETE SET NULL"
     device ||--o| device_session : "ON DELETE CASCADE"
@@ -229,6 +232,27 @@ erDiagram
         text reason "RFC 5280"
         timestamptz revoked_at
         text revoked_by
+    }
+    manager_certificate {
+        int cert_id PK "one row"
+        int ca_id FK
+        text serial
+        text fingerprint_sha256 UK
+        text subject_cn
+        text cert_pem
+    }
+    manager_revocation {
+        text serial PK
+        text fingerprint_sha256 UK
+        text device_name
+        text cert_pem
+        timestamptz revoked_at
+    }
+    manager_crl_signature {
+        boolean id PK "one row"
+        text payload
+        text signature "hex"
+        timestamptz signed_at
     }
     device_enrollment {
         bigint request_id PK "from request_id_seq"
@@ -414,9 +438,12 @@ Every device is bound to an X.509 certificate (ECDSA P-384) signed by the intern
 
 | Table | Contents | Constraints |
 |---|---|---|
-| `root_ca` | The CA certificates the database trusts: `name`, `subject`, `fingerprint_sha256`, `cert_pem`, validity, `is_active` | `name` and `fingerprint_sha256` unique. Inserted by `db-init.sh` as the owner; nobody else writes it. The private key is never in the database |
+| `root_ca` | The CA certificates the database trusts: `name`, `subject`, `fingerprint_sha256`, `cert_pem`, validity, `is_active` | `name` and `fingerprint_sha256` unique. `db-init.sh` inserts the device CA. `register_factory_root()` inserts the row named `factory` when that certificate exists. The private key is never in the database |
 | `device_certificate` | Every certificate ever issued to a device: `device_id`, `ca_id`, `serial`, `fingerprint_sha256`, `subject_cn`, validity, `cert_pem`, `issued_at` | Unique `(ca_id, serial)` and `fingerprint_sha256`; unique `(cert_id, device_id)` as the target of the binding; FK `device_id` `ON DELETE CASCADE` (deferred); FK `ca_id` `ON DELETE RESTRICT`; `check_certificate_subject` makes `subject_cn` equal the device name |
-| `crl` | One row per revoked certificate: `(ca_id, serial)` PK, `fingerprint_sha256`, `device_name`, `cert_pem`, `reason`, `revoked_at`, `revoked_by` | No FK to `device_certificate`, so an entry outlives the certificate and the device. `reason` is one of six RFC 5280 names (`unspecified`, `keyCompromise`, `affiliationChanged`, `superseded`, `cessationOfOperation`, `certificateHold`). `protect_crl` refuses `UPDATE` and `DELETE` unless the reason is `certificateHold`: a hold can be lifted (deleted) or made permanent (updated) |
+| `crl` | One row per revoked certificate: `(ca_id, serial)` PK, `fingerprint_sha256`, `device_name`, `cert_pem`, `reason`, `revoked_at`, `revoked_by` | No FK to `device_certificate`, so an entry outlives the certificate and the device. `reason` is one of six RFC 5280 names (`unspecified`, `keyCompromise`, `affiliationChanged`, `superseded`, `cessationOfOperation`, `certificateHold`). `protect_crl` refuses `UPDATE` and `DELETE` unless the reason is `certificateHold`: a hold can be lifted (deleted) or made permanent (updated). This is the issuing CA's list. The manager's own list is the two tables below |
+| `manager_certificate` | The one certificate the factory issued to the manager: `ca_id`, `serial`, `fingerprint_sha256`, `subject_cn`, validity, `cert_pem` | One row (`manager_certificate_singleton`). FK `ca_id` to the factory root. `register_manager_certificate()` keeps the first row |
+| `manager_revocation` | Workers the manager has revoked: `serial` PK, `fingerprint_sha256`, `device_name`, `cert_pem`, `revoked_at` | No FK to `device_certificate`, so a row outlives the certificate. `add_manager_revocation()` inserts one serial |
+| `manager_crl_signature` | The manager's signature over that list: `payload`, `signature` (hex), `signed_at` | One row. `replace_manager_crl()` writes it. The signature is checked with the manager certificate, not with the factory key |
 | `device_enrollment` | Enrollment and rotation requests: `request_id` (from `request_id_seq`), `kind` (`ENROLL`, `ROTATE`), `name`, `type_id`, `device_id`, `status`, `csr_pem`, `cert_id`, `error_code`, `error_detail`, `requested_by`, timestamps | Partial unique index on `name` while `PENDING` or `CSR_SUBMITTED`; FK `device_id` `ON DELETE SET NULL`, so the history outlives the device. `check_enrollment` refuses an `ENROLL` for a taken name and takes a rotation's name and type from its device; `check_enrollment_transition` allows only `PENDING` to `CSR_SUBMITTED`, then `ISSUED`, with `REJECTED` or `EXPIRED` from either |
 | `device_session` | The controller's view of each device process: `state`, `pid`, `connected_at`, `last_seen`, `last_error` | PK and FK `device_id` `ON DELETE CASCADE`. Written only by the controller |
 
@@ -431,7 +458,9 @@ How the original requirements map onto constraints:
 | Revoked means out of service, not deleted | Revoking inserts into `crl`; the device row, its certificates and its telemetry stay, and `v_device_identity` reports `REVOKED` |
 | A revocation is permanent | `protect_crl`; only a `certificateHold` entry can be lifted (deleted) |
 
-`issue_device_certificate(request_id, ca_fingerprint, serial, fingerprint, subject_cn, not_before, not_after, cert_pem)` is the only way a certificate enters the database. It is `SECURITY DEFINER` (owner `demo_owner`, `search_path` pinned) and only `demo_server` may execute it. It locks the enrollment, checks it is `CSR_SUBMITTED`, that the subject is the requested name and that the CA is an active `root_ca`, then for `ENROLL` inserts the device, its first certificate and its `device_config` (plus history) from the type defaults, and for `ROTATE` inserts the new certificate, moves `device.cert_id` and revokes the previous certificate as `superseded` unless it was already revoked. `reject_enrollment(request_id, code, detail)` closes a request without a certificate; the server calls it when a CSR fails verification.
+`issue_device_certificate(request_id, ca_fingerprint, serial, fingerprint, subject_cn, not_before, not_after, cert_pem)` is how an enrollment certificate enters the database and how a device row is born. It is `SECURITY DEFINER` (owner `demo_owner`, `search_path` pinned) and only `demo_server` may execute it. It locks the enrollment, checks it is `CSR_SUBMITTED`, that the subject is the requested name and that the CA is an active `root_ca`, then for `ENROLL` inserts the device, its first certificate and its `device_config` (plus history) from the type defaults, and for `ROTATE` inserts the new certificate, moves `device.cert_id` and revokes the previous certificate as `superseded` unless it was already revoked. `reject_enrollment(request_id, code, detail)` closes a request without a certificate; the server calls it when a CSR fails verification.
+
+`register_factory_worker(...)` stores a certificate the factory signed for a device that already exists. It does not move `device.cert_id`. `register_factory_root()`, `register_manager_certificate()`, `replace_manager_crl()` and `add_manager_revocation()` are the same kind of function for the factory origin. The controller executes them. The server executes `register_factory_root()` when `run/factory/root.crt` is present.
 
 `v_device_identity` joins each device with its current certificate, its CA and the CRL, and derives `identity`:
 
@@ -475,6 +504,7 @@ The controller runs a process only for an `ACTIVE` device, and refuses an authen
 | `touch_updated_at()` | trigger | Body of `trg_app_users_touch` |
 | `issue_device_certificate(...)` | `SECURITY DEFINER` | Record a signed certificate for an enrollment: create the device or rotate it (see [Device identity](#device-identity)). `EXECUTE` for `demo_server`. |
 | `reject_enrollment(p_request_id bigint, p_code text, p_detail text)` | `SECURITY DEFINER`, returns whether the request was still open | Close an enrollment without a certificate. `EXECUTE` for `demo_server`. |
+| `register_factory_root(...)`, `register_manager_certificate(...)`, `register_factory_worker(...)`, `add_manager_revocation(...)`, `replace_manager_crl(...)` | `SECURITY DEFINER` | Store the factory root, the manager certificate, a factory-issued worker certificate, and the manager's signed list. They do not move `device.cert_id`. `EXECUTE` for `demo_controller`; `register_factory_root` also for `demo_server`. |
 | `check_certificate_subject()`, `protect_crl()`, `check_enrollment()`, `check_enrollment_transition()` | trigger | The identity invariants of `03_identity.sql` |
 | `notify_telemetry_batch()`, `notify_device_change()`, `notify_crl_change()`, `notify_session_change()`, `notify_enrollment()`, `notify_config_request()`, `notify_config_change()`, `notify_config_error()` | trigger | Build the JSON payload and call `pg_notify` |
 
@@ -550,7 +580,7 @@ flowchart LR
 | `demo_normal` | no | Group behind the JWT role `normal`: read only. |
 | `demo_admin` | no | Group behind the JWT role `admin`. Member of `demo_normal`, plus enrollment, revocation and removal of devices, enqueue and user management. It cannot create a device or a certificate. |
 | `demo_server` | yes | Zone A. `NOINHERIT`, and holds `demo_admin` and `demo_normal` `WITH INHERIT FALSE, SET TRUE`: each API request runs under `SET LOCAL ROLE demo_admin` or `demo_normal`, chosen from the verified JWT. Its base role is the certificate authority and the telemetry reader: it reads CSRs, calls `issue_device_certificate()`, reads the history tables and updates `telemetry_read_cursor`. |
-| `demo_controller` | yes | Zone B. Least privilege on the device registry and identity (read only), the enrollment status, the sessions, the queue, the applied configuration and the data. No access to `app_users`. |
+| `demo_controller` | yes | Zone B. Read on the device registry and identity, the factory registration functions, the enrollment status, the sessions, the queue, the applied configuration and the data. No access to `app_users`. |
 
 Passwords for the two login roles are set by `scripts/db-init.sh`, never in these files.
 
@@ -561,6 +591,7 @@ Passwords for the two login roles are set by `scripts/db-init.sh`, never in thes
 | `root_ca` | SELECT | SELECT | SELECT | SELECT |
 | `device_certificate` | SELECT | SELECT, DELETE | SELECT | – |
 | `crl` | SELECT | SELECT; INSERT; UPDATE `reason`, `revoked_at`, `revoked_by`; DELETE (all limited by `protect_crl`) | SELECT | – |
+| `manager_certificate`, `manager_revocation`, `manager_crl_signature` | SELECT | SELECT | SELECT | SELECT |
 | `device_enrollment` | SELECT | SELECT; INSERT `request_id`, `kind`, `name`, `type_id`, `device_id`, `requested_by` | SELECT; UPDATE `status`, `csr_pem`, `csr_at`, `error_code`, `error_detail`, `decided_at` | SELECT `request_id`, `kind`, `name`, `type_id`, `status`, `csr_pem`, `requested_by` |
 | `device_session` | SELECT | SELECT | SELECT, INSERT, UPDATE | – |
 | `device_state` | SELECT | SELECT | SELECT, INSERT, UPDATE | – |
@@ -578,6 +609,8 @@ Passwords for the two login roles are set by `scripts/db-init.sh`, never in thes
 | `v_users_directory` | – | SELECT | – | – |
 | `auth_fetch_user()` | – | – | – | EXECUTE |
 | `issue_device_certificate()`, `reject_enrollment()` | – | – | – | EXECUTE |
+| `register_factory_root()` | – | – | EXECUTE | EXECUTE |
+| `register_manager_certificate()`, `replace_manager_crl()`, `add_manager_revocation()`, `register_factory_worker()` | – | – | EXECUTE | – |
 | `ensure_monthly_partitions()` | – | – | EXECUTE | – |
 
 `demo_admin` inherits everything in the `demo_normal` column. It can write `password_hash` but cannot read it. Identity columns (`device.device_id`, `history_id`, `error_id`) need no sequence privilege: the identity sequence is used on behalf of the table. [`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md#authorization-twice) explains how the server picks the group for each request, and why PostgreSQL enforces the same authorization as the HTTP layer.
@@ -591,7 +624,7 @@ The model scales in the number of devices without schema changes, but the demo k
 - **One `device_state` row per device.** It is UPDATE-heavy: keep `fillfactor` below 100 so the updates stay HOT, and let autovacuum run often on it.
 - **Row Level Security.** All authenticated users see every device. Tenants or owners would add an owner column to `device` and RLS policies on `device`, `device_state` and the telemetry tables keyed by `device_id`.
 - **One process per device, one batch per window.** The manager supervises a `pgdemo-device` worker per device (bounded by `--max-devices`). Samples share one queue and are written when 64 are queued or 100 ms have passed: one transaction, one `INSERT` per payload, and one `NOTIFY` per statement. A larger fleet would run devices on their own hosts with mutual TLS to an ingestion endpoint, using the same certificates.
-- **No OCSP, no intermediate CA.** Revocation is checked against the `crl` table at every authentication and pushed to the controller by `NOTIFY`; the signed X.509 CRL (`GET /api/pki/crl`) is for external verifiers. A real PKI would keep the root offline and sign with an intermediate.
+- **No OCSP, no intermediate CA.** Revocation of the device CA is checked against the `crl` table at every authentication and pushed to the controller by `NOTIFY`; the signed X.509 CRL (`GET /api/pki/crl`) is for external verifiers. The factory root is also `pathlen:0` and signs end-entity certificates only. The manager's list is `manager_revocation`, signed by the manager key, and is not this CRL. A real PKI would keep the root offline and sign with an intermediate.
 
 ## Inspecting the live schema
 

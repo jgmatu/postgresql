@@ -1,6 +1,6 @@
 # pgdemo-device
 
-One simulated device, one process, one ROS 2 node (`pgdemo_device_<name>`). It has no database login. The manager starts it with `fork` + `execv`, or it is started by hand on another host in the same ROS domain. The structs and the full topic list are [msgs/README.md](../msgs/README.md). How the manager admits, reaps and restarts it is [controller/README.md](../controller/README.md). The certificate and the proof are [docs/DEVICE_PKI.md](../docs/DEVICE_PKI.md).
+One simulated device, one process, one ROS 2 node (`pgdemo_device_<name>`). It has no database login. The manager starts it with `fork` + `execv`, or it is started by hand on another host in the same ROS domain. The structs and the full topic list are [msgs/README.md](../msgs/README.md). How the manager admits, reaps and restarts it is [controller/README.md](../controller/README.md). The certificate and the proof of the enrollment that already runs are [docs/DEVICE_PKI.md](../docs/DEVICE_PKI.md). The factory that signs a second certificate, from a key derived from a simulated PUF, is [factory/README.md](../factory/README.md).
 
 ## Shared topics
 
@@ -43,9 +43,13 @@ The worker also cannot take another device's place. The manager admits a session
 ```text
 pgdemo-device --name NAME --type TYPE --payload scalar|gps|xy|xyz --dir DIR
               [--enroll REQUEST_ID | --rotate REQUEST_ID]
+              [--device-id ID --puf PATH]
+              [--factory HOST:PORT] [--factory-root PATH] [--manager-tls HOST:PORT]
 ```
 
 `--name` is the device name and the certificate CN. `--type` selects the generator. `--payload` is `scalar`, `gps`, `xy` or `xyz`, and the process publishes only that telemetry topic. `--dir` holds `key.pem` and `cert.pem`, mode `0700`. `--enroll` and `--rotate` generate a key, publish a CSR and store the issued certificate; `--rotate` replaces the key only once the new certificate arrives.
+
+`--device-id` and `--puf` are the simulated PUF, described below. `--factory` is where a missing `cert.pem` is sent for signature. `--factory-root` is that root's certificate. `--manager-tls` is the mutual handshake. The controller passes them only while the factory origin is up. Without them the process is the enrollment in [docs/DEVICE_PKI.md](../docs/DEVICE_PKI.md).
 
 The node name replaces `.` and `-` in the device name with `_`.
 
@@ -62,3 +66,62 @@ The node name replaces `.` and `-` in the device name with `_`.
 | 2 | Bad arguments |
 | 3 | The CA refused the enrollment |
 | 4 | No key or certificate on disk |
+
+## Simulated PUF
+
+`devices.puf` is one file, mode 0600, shared by the workers. The controller's default path is `run/devices/devices.puf`. A line is a `device_id` and 32 bytes of seed in hexadecimal. Writers take an exclusive lock, so several processes can append. A `device_id` with no line yet gets a seed, and that line is kept. The same `device_id` on the next start reads that line.
+
+`DeviceKey::from_seed` expands the seed with HKDF-SHA384, info `pgdemo/worker-key/v1`, to 64 bytes. The integer modulo `n - 1`, plus one, is the secp384r1 scalar, so the same seed is the same P-384 key. The ECDSA nonce stays random. The seed and the private key stay on the worker. What travels is a self-signed certificate.
+
+Before the ROS node exists, and only when the flags are set:
+
+1. `--device-id` and `--puf`, and no `key.pem`: derive the key and save it, mode 0600. A `key.pem` already on disk is left alone, so a device enrolled with a CSR keeps that key.
+2. `--factory`, a key, and no `cert.pem`: send the self-signed certificate and store the one the factory returns.
+3. `--manager-tls` and `--factory-root`, and a `cert.pem` that chains to that root under this device's name: TLS 1.3, both sides present a certificate, and the manager's CN must be `pgdemo-manager`. A certificate from the demo CA does not chain. The handshake is skipped and the challenge continues. A certificate that does chain, and a handshake that fails, exits `1`.
+
+The controller adds `--device-id` and `--puf` on a `Run` of a device that already has a row. `--factory`, `--factory-root` and `--manager-tls` go on every launch while the origin is up. An enrollment still generates its key with the CSR path.
+
+```mermaid
+flowchart TD
+    start[process start]
+    haveKey{"key.pem already on disk"}
+    puf{"--device-id and --puf are set"}
+    known{"this device_id has a line"}
+    draw["draw 32 bytes and append the line"]
+    readSeed[read the stored seed]
+    derive["HKDF-SHA384, save key.pem"]
+    needCert{"--factory is set, key.pem exists, cert.pem does not"}
+    ask["send the self-signed certificate and store the signed PEM"]
+    canShake{"--manager-tls and --factory-root, and both files exist"}
+    chains{"certificate chains to the factory root under --name"}
+    shake["mutual TLS 1.3, manager CN pgdemo-manager"]
+    stop[exit 1]
+    node[create the ROS node]
+    enroll{"--enroll or --rotate"}
+    csr["generate a software key as key.next.pem and publish the CSR"]
+    proof["sign the challenge nonce with key.pem"]
+
+    start --> haveKey
+    haveKey -->|yes| needCert
+    haveKey -->|no| puf
+    puf -->|no| needCert
+    puf -->|yes| known
+    known -->|yes| readSeed
+    known -->|no| draw
+    readSeed --> derive
+    draw --> derive
+    derive --> needCert
+    needCert -->|yes| ask
+    needCert -->|no| canShake
+    ask --> canShake
+    canShake -->|no| node
+    canShake -->|yes| chains
+    chains -->|yes| shake
+    chains -->|no| node
+    shake -->|ok| node
+    shake -->|fails| stop
+    chains -->|other error| stop
+    node --> enroll
+    enroll -->|yes| csr
+    enroll -->|no| proof
+```

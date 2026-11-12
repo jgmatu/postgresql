@@ -41,6 +41,7 @@ An error body is `{"error","message"}`. An unknown `/api` path is a JSON `404`, 
 | `POST /api/devices/{name}/rotate` | admin | New key and certificate; the old one is revoked as `superseded`. `409` while revoked or suspended |
 | `GET /api/enrollments?device=&limit=`, `GET /api/enrollments/{id}` | any | Enrollment and rotation requests and their outcome |
 | `GET /api/pki/ca` | any | The root CAs, the signing CA's fingerprint and the revoked serials |
+| `GET /api/pki/origin` | any | The factory root, the manager certificate and the worker certificates that root issued. No private key |
 | `GET /api/pki/crl` | any | The X.509 CRL in PEM, signed by the CA when requested |
 | `GET /api/stream?channels=&devices=` | any | Server-Sent Events. Channels: `telemetry_scalar`, `telemetry_gps`, `telemetry_xy`, `telemetry_xyz`, `device`, `enrollment`, `config`, `error` (default all); `devices` filters by name |
 | `GET /api/config` | any | `v_device_config_sync_status`: applied, desired, `SYNC`/`PENDING`/`ERROR`/`UNINITIALISED` |

@@ -13,6 +13,7 @@ Sources:
 | [`src/Session.hpp`](src/Session.hpp), [`src/Session.cpp`](src/Session.cpp) | Handshake of one worker, then online samples |
 | [`src/TelemetryWriter.hpp`](src/TelemetryWriter.hpp), [`src/TelemetryWriter.cpp`](src/TelemetryWriter.cpp) | One sample queue and one thread per node |
 | [`src/Spawn.cpp`](src/Spawn.cpp) | `fork` + `execv` of `pgdemo-device` |
+| [`src/Origin.hpp`](src/Origin.hpp), [`src/Origin.cpp`](src/Origin.cpp) | First manager certificate, its CRL, and the mutual handshake when the factory files exist |
 
 ## Startup
 
@@ -66,6 +67,7 @@ pgdemo-controller [--conninfo STR] [--max-devices N]
                   [--device-bin PATH] [--devices-dir DIR]
                   [--enrollment-timeout-s N] [--pending-max-age-s N]
                   [--maintenance-interval-s N]
+                  [--manager-key PATH] [--factory-cert PATH] [--factory HOST:PORT]
 ```
 
 | Option | Default | Effect |
@@ -77,10 +79,19 @@ pgdemo-controller [--conninfo STR] [--max-devices N]
 | `--enrollment-timeout-s` | 120 | Open enrollments older than this become `EXPIRED` |
 | `--pending-max-age-s` | 600 | `PENDING` configuration older than this becomes `TIMEOUT` |
 | `--maintenance-interval-s` | 3600 | How often partition maintenance runs |
+| `--manager-key` | `run/controller/manager.key` | Manager private key. Absent, the factory origin stays off |
+| `--factory-cert` | `run/factory/root.crt` | Public factory root. Absent, the factory origin stays off |
+| `--factory` | `127.0.0.1:9443` | `pgdemo-factory`. Used the first time the manager certificate is missing |
 
 Device names cannot start with a dot, so `.controller.lock` never clashes with a key directory.
 
 `ProcessTable::acquire_lock()` takes an exclusive `fcntl` lock on that file. A second controller on this machine exits. The lock is per process and is not inherited across `fork`, so a device child does not release it. One ROS domain runs one controller.
+
+## Factory origin
+
+[`controller/scripts/gen-manager-key.sh`](scripts/gen-manager-key.sh) writes `run/controller/manager.key` before this process starts. The process does not create that key. When the key and `run/factory/root.crt` are both present, startup registers the factory certificate in `root_ca` (the row named `factory`), asks `pgdemo-factory` once for the manager certificate, and signs `manager_revocation` with the manager key. The signature is `manager_crl_signature`. Later starts read the certificate and sign the list again from the rows.
+
+The mutual TLS 1.3 listener then binds `127.0.0.1`. Each accepted worker must chain to the factory root, and its serial must be absent from the signed list. The presented certificate is stored on `device_certificate` with `ca_id` of the factory. `device.cert_id` is not moved. If the factory is down on that first request, the origin stays off and the challenge in [docs/DEVICE_PKI.md](../docs/DEVICE_PKI.md) continues. The factory itself is [factory/README.md](../factory/README.md).
 
 ## Process table
 
@@ -107,7 +118,11 @@ Device names cannot start with a dot, so `.controller.lock` never clashes with a
 ```text
 pgdemo-device --name NAME --type TYPE --payload scalar|gps|xy|xyz --dir DIR
               [--enroll REQUEST_ID | --rotate REQUEST_ID]
+              [--device-id ID --puf PATH]
+              [--factory HOST:PORT] [--factory-root PATH] [--manager-tls HOST:PORT]
 ```
+
+The last five arguments are passed only while the factory origin is up. `--device-id` and `--puf` are added on a `Run` of a device that already has a row. What the worker does with them is [device/README.md](../device/README.md#simulated-puf).
 
 `spawn_process()` builds `argv` before the fork. Between `fork` and `execv` the child only calls async-signal-safe functions: it restores default dispositions for `SIGINT`, `SIGTERM`, `SIGCHLD` and `SIGPIPE`, clears the signal mask, asks for `SIGTERM` when the forking thread dies (`PR_SET_PDEATHSIG`), exits `127` if that parent is already gone, closes every descriptor above stderr, then `execv`. The child is a new ROS node (`pgdemo_device_<name>`); it inherits the parent's ROS environment and nothing of its DDS participant, because `execv` replaces the image. The death signal is tied to the thread that forked, which is the spin thread.
 

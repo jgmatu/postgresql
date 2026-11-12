@@ -166,7 +166,7 @@ The **visualization panel** is the default and the whole app for a `normal` user
 | Detalle | `/device/?name=<device>` | all | `GET /api/devices/{name}`, `…/history?limit=`, `…/certificates`, `GET /api/enrollments?device=`, `GET /api/config/history?device=` | every channel, `devices=<name>` |
 | Configuración | `/config/` | all | `GET /api/config`, `GET /api/config/history`, `GET /api/config/requests/{id}` | `config`, `error` |
 | Mapa | `/map/` | all | `GET /api/devices`, `GET /api/devices/{name}/history` | `telemetry_gps` |
-| PKI | `/pki/` | all | `GET /api/pki/ca`, `GET /api/pki/crl`, `GET /api/enrollments` | `enrollment`, `device` |
+| PKI | `/pki/` | all | `GET /api/pki/ca`, `GET /api/pki/origin`, `GET /api/pki/crl`, `GET /api/enrollments` | `enrollment`, `device` |
 | Eventos | `/events/` | all | — | the ones ticked, `devices=` as typed |
 | Sistema | `/system/` | all | `GET /api/health`, `GET /api/db/info` (every 5 s), `GET /api/device-types`, `GET /VERSION` | — |
 | Histórico | `/history/` | all | `GET /api/devices`, `GET /api/devices/{name}/history?from=&to=&limit=`, `GET /api/config/history?device=`, `GET /api/enrollments?device=`, `GET /api/pki/ca` | — |
@@ -231,7 +231,7 @@ Mapa: the last 120 fixes of each GPS device (`/history`, then `telemetry_gps`), 
 
 ![PKI](docs/screens/pki.png)
 
-PKI: the root CA and the fingerprint it signs with (`GET /api/pki/ca`), the signed CRL (`GET /api/pki/crl`, shown or downloaded as PEM) with the revoked serials, and the enrollment requests.
+PKI: the root CA and the fingerprint it signs with (`GET /api/pki/ca`), then a switch among the factory-issued worker certificates, the manager certificate and the factory root (`GET /api/pki/origin`). Below that, the signed CRL (`GET /api/pki/crl`, shown or downloaded as PEM) with the revoked serials, and the enrollment requests.
 
 ![Eventos](docs/screens/events.png)
 
