@@ -251,6 +251,25 @@ void ProcessTable::start_process(Slot& s)
         argv.push_back(s.next == Launch::Enroll ? "--enroll" : "--rotate");
         argv.push_back(std::to_string(s.next_request));
     }
+    else if (s.device && !opts_.puf_file.empty())
+    {
+        argv.push_back("--device-id");
+        argv.push_back(std::to_string(s.device->device_id));
+        argv.push_back("--puf");
+        argv.push_back(opts_.puf_file.string());
+    }
+    if (!opts_.factory_addr.empty())
+    {
+        argv.push_back("--factory");
+        argv.push_back(opts_.factory_addr);
+    }
+    if (!opts_.manager_tls.empty() && !opts_.factory_root.empty())
+    {
+        argv.push_back("--manager-tls");
+        argv.push_back(opts_.manager_tls);
+        argv.push_back("--factory-root");
+        argv.push_back(opts_.factory_root.string());
+    }
     pid_t pid = 0;
     try
     {

@@ -22,9 +22,13 @@
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <unistd.h>
+
+#include <pki/Handshake.hpp>
 
 #include <db/DatabaseManager.hpp>
 #include <log/Log.hpp>
@@ -33,6 +37,7 @@
 
 #include "Fleet.hpp"
 #include "Manager.hpp"
+#include "Origin.hpp"
 
 namespace {
 
@@ -45,6 +50,7 @@ struct Options
 {
     std::string conninfo;
     controller::FleetOptions fleet;
+    controller::OriginFiles origin;
 };
 
 void usage()
@@ -56,7 +62,10 @@ void usage()
                  "  --devices-dir DIR            key directory of every device (default run/devices)\n"
                  "  --enrollment-timeout-s N     open enrollments older than this become EXPIRED (default 120)\n"
                  "  --pending-max-age-s N        PENDING requests older than this become TIMEOUT (default 600)\n"
-                 "  --maintenance-interval-s N   partition maintenance period (default 3600)\n";
+                 "  --maintenance-interval-s N   partition maintenance period (default 3600)\n"
+                 "  --manager-key PATH           manager key; absent leaves the running enrollment as it is\n"
+                 "  --factory-cert PATH          factory root certificate (default run/factory/root.crt)\n"
+                 "  --factory HOST:PORT          factory process (default 127.0.0.1:9443)\n";
 }
 
 /// pgdemo-device next to this executable, or in the build tree's device/.
@@ -94,6 +103,16 @@ Options parse(int argc, char** argv)
         else if (a == "--enrollment-timeout-s") o.fleet.enrollment_timeout = std::chrono::seconds(positive(a));
         else if (a == "--pending-max-age-s") o.fleet.pending_max_age = std::chrono::seconds(positive(a));
         else if (a == "--maintenance-interval-s") o.fleet.maintenance_interval = std::chrono::seconds(positive(a));
+        else if (a == "--manager-key") o.origin.manager_key = next();
+        else if (a == "--factory-cert") o.origin.factory_cert = next();
+        else if (a == "--factory")
+        {
+            const auto value = next();
+            const auto colon = value.rfind(':');
+            if (colon == std::string::npos || colon == 0) throw std::invalid_argument("--factory needs HOST:PORT");
+            o.origin.factory_host = value.substr(0, colon);
+            o.origin.factory_port = static_cast<std::uint16_t>(std::stoi(value.substr(colon + 1)));
+        }
         else if (a == "-h" || a == "--help")
         {
             usage();
@@ -141,6 +160,9 @@ int main(int argc, char** argv)
         // One connection per device queue, plus one for session and enrollment writes.
         db::DatabaseManager db(opt.conninfo, "pgdemo-controller", opt.fleet.max_devices + 1);
         db.connect();
+        std::unique_ptr<pki::HandshakeListener> origin_listener;
+        std::jthread origin_thread;
+        controller::start_origin(db, opt.fleet, opt.origin, origin_listener, origin_thread);
         for (const auto p : db::kAllPayloads)
             for (const auto& name : db.ensure_history_partitions(p)) log::info(kLog, "created partition " + name);
 

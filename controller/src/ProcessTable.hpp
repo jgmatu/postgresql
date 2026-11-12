@@ -28,6 +28,10 @@ struct FleetOptions
     std::chrono::seconds pending_max_age{600};       ///< config requests older than this become TIMEOUT
     std::chrono::seconds enrollment_timeout{120};    ///< enrollments open longer than this become EXPIRED
     std::chrono::seconds maintenance_interval{3600}; ///< partition maintenance period
+    std::filesystem::path puf_file;                  ///< devices.puf; empty leaves worker keys alone
+    std::filesystem::path factory_root;              ///< factory root certificate passed to workers
+    std::string factory_addr;                        ///< host:port of pgdemo-factory; empty skips signing
+    std::string manager_tls;                         ///< host:port of the mutual handshake; empty skips it
 };
 
 /// How a device process is started.

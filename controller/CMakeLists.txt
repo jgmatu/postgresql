@@ -6,6 +6,7 @@ add_executable(pgdemo-controller
     src/Session.cpp
     src/TelemetryWriter.cpp
     src/Spawn.cpp
+    src/Origin.cpp
 )
 find_package(rclcpp REQUIRED)
 
