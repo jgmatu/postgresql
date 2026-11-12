@@ -7,10 +7,18 @@ Every device is bound to an X.509 certificate (ECDSA P-384) issued by the
 internal root CA. The CA private key never reaches the database: the server
 holds it in a file and signs CSRs; only public material is stored here.
 
-  root_ca             trusted CA certificates (public part only)
-  device_certificate  every certificate a device has ever had (1..n per device)
-  crl                 revoked certificates (RFC 5280 reasons). No foreign key to
-                      device_certificate: a revocation outlives the certificate
+  root_ca             trusted CA certificates (public part only). The row
+                      named factory is the simulation root; its private key
+                      stays in run/factory and never reaches this database.
+  device_certificate  every certificate a device has ever had (1..n per device).
+                      A worker issued by the factory is a row here, ca_id pointing
+                      at that root.
+  crl                 revoked certificates of the CA that issued them. The
+                      manager's own list is manager_revocation, not this table.
+  manager_certificate the one certificate the factory issued to the manager
+  manager_revocation  workers the manager has revoked. No foreign key to
+                      device_certificate: the row outlives the certificate.
+  manager_crl_signature  the manager's signature over that list
   device_enrollment   queue of enrollments and rotations
                       (PENDING -> CSR_SUBMITTED -> ISSUED | REJECTED | EXPIRED)
   device_session      what the controller knows about each device process
@@ -353,6 +361,180 @@ $$;
 
 REVOKE ALL ON FUNCTION issue_device_certificate(bigint, text, text, text, text, timestamptz, timestamptz, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION reject_enrollment(bigint, text, text) FROM PUBLIC;
+
+-- ---------------------------------------------------------------------------
+-- Factory root, the manager certificate, and the manager's own revocation list.
+-- Private keys are not stored. crl stays the revocation list of the issuing CA.
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS manager_certificate (
+    cert_id             INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    ca_id               INT NOT NULL REFERENCES root_ca (ca_id) ON DELETE RESTRICT,
+    serial              TEXT NOT NULL CHECK (serial ~ '^[0-9a-f]{1,40}$'),
+    fingerprint_sha256  TEXT NOT NULL UNIQUE CHECK (fingerprint_sha256 ~ '^[0-9a-f]{64}$'),
+    subject_cn          TEXT NOT NULL,
+    not_before          TIMESTAMPTZ NOT NULL,
+    not_after           TIMESTAMPTZ NOT NULL,
+    cert_pem            TEXT NOT NULL CHECK (cert_pem LIKE '-----BEGIN CERTIFICATE-----%'),
+    issued_at           TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    UNIQUE (ca_id, serial),
+    CHECK (not_before < not_after)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS manager_certificate_singleton ON manager_certificate ((TRUE));
+
+CREATE TABLE IF NOT EXISTS manager_revocation (
+    serial              TEXT PRIMARY KEY CHECK (serial ~ '^[0-9a-f]{1,40}$'),
+    fingerprint_sha256  TEXT NOT NULL UNIQUE CHECK (fingerprint_sha256 ~ '^[0-9a-f]{64}$'),
+    device_name         TEXT NOT NULL,
+    cert_pem            TEXT NOT NULL CHECK (cert_pem LIKE '-----BEGIN CERTIFICATE-----%'),
+    revoked_at          TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+);
+
+CREATE TABLE IF NOT EXISTS manager_crl_signature (
+    id          BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (id),
+    payload     TEXT NOT NULL,
+    signature   TEXT NOT NULL CHECK (signature ~ '^[0-9a-f]+$'),
+    signed_at   TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+);
+
+-- Public certificate of the factory root. The name is the row the handshake selects.
+CREATE OR REPLACE FUNCTION register_factory_root(
+    p_subject     text,
+    p_fingerprint text,
+    p_cert_pem    text,
+    p_not_before  timestamptz,
+    p_not_after   timestamptz
+) RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
+BEGIN
+    INSERT INTO public.root_ca (name, subject, fingerprint_sha256, cert_pem, not_before, not_after)
+    VALUES ('factory', p_subject, p_fingerprint, p_cert_pem, p_not_before, p_not_after)
+    ON CONFLICT (name) DO NOTHING;
+END
+$$;
+
+-- The factory-signed manager certificate. A second call keeps the first row.
+CREATE OR REPLACE FUNCTION register_manager_certificate(
+    p_ca_fingerprint text,
+    p_serial         text,
+    p_fingerprint    text,
+    p_subject_cn     text,
+    p_not_before     timestamptz,
+    p_not_after      timestamptz,
+    p_cert_pem       text
+) RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
+DECLARE
+    v_ca int;
+BEGIN
+    IF EXISTS (SELECT 1 FROM public.manager_certificate) THEN
+        RETURN;
+    END IF;
+    SELECT r.ca_id INTO v_ca FROM public.root_ca r
+    WHERE r.name = 'factory' AND r.fingerprint_sha256 = p_ca_fingerprint AND r.is_active;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'factory root % is not registered', p_ca_fingerprint
+            USING ERRCODE = 'no_data_found';
+    END IF;
+    INSERT INTO public.manager_certificate
+        (ca_id, serial, fingerprint_sha256, subject_cn, not_before, not_after, cert_pem)
+    VALUES (v_ca, p_serial, p_fingerprint, p_subject_cn, p_not_before, p_not_after, p_cert_pem);
+END
+$$;
+
+-- One signature over the canonical list of manager_revocation serials.
+CREATE OR REPLACE FUNCTION replace_manager_crl(p_payload text, p_signature text)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
+BEGIN
+    INSERT INTO public.manager_crl_signature (id, payload, signature)
+    VALUES (TRUE, p_payload, p_signature)
+    ON CONFLICT (id) DO UPDATE
+        SET payload = EXCLUDED.payload, signature = EXCLUDED.signature, signed_at = clock_timestamp();
+END
+$$;
+
+-- A worker the manager has revoked. The signature is replaced separately.
+CREATE OR REPLACE FUNCTION add_manager_revocation(
+    p_serial      text,
+    p_fingerprint text,
+    p_device_name text,
+    p_cert_pem    text
+) RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
+BEGIN
+    INSERT INTO public.manager_revocation (serial, fingerprint_sha256, device_name, cert_pem)
+    VALUES (p_serial, p_fingerprint, p_device_name, p_cert_pem)
+    ON CONFLICT (serial) DO NOTHING;
+END
+$$;
+
+-- Store a factory-signed worker certificate on an existing device.
+-- The certificate already marked by device.cert_id stays the current one.
+-- Returns false when no device has that name.
+CREATE OR REPLACE FUNCTION register_factory_worker(
+    p_subject_cn     text,
+    p_ca_fingerprint text,
+    p_serial         text,
+    p_fingerprint    text,
+    p_not_before     timestamptz,
+    p_not_after      timestamptz,
+    p_cert_pem       text
+) RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
+DECLARE
+    v_dev  int;
+    v_ca   int;
+    v_cert int;
+    v_owner int;
+BEGIN
+    SELECT d.device_id INTO v_dev FROM public.device d WHERE d.name = p_subject_cn;
+    IF NOT FOUND THEN
+        RETURN FALSE;
+    END IF;
+    SELECT r.ca_id INTO v_ca FROM public.root_ca r
+    WHERE r.name = 'factory' AND r.fingerprint_sha256 = p_ca_fingerprint AND r.is_active;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'factory root % is not registered', p_ca_fingerprint
+            USING ERRCODE = 'no_data_found';
+    END IF;
+    SELECT c.cert_id, c.device_id INTO v_cert, v_owner
+    FROM public.device_certificate c WHERE c.fingerprint_sha256 = p_fingerprint;
+    IF FOUND THEN
+        IF v_owner <> v_dev THEN
+            RAISE EXCEPTION 'certificate belongs to another device' USING ERRCODE = 'unique_violation';
+        END IF;
+    ELSE
+        INSERT INTO public.device_certificate
+            (device_id, ca_id, serial, fingerprint_sha256, subject_cn, not_before, not_after, cert_pem)
+        VALUES (v_dev, v_ca, p_serial, p_fingerprint, p_subject_cn, p_not_before, p_not_after, p_cert_pem)
+        RETURNING cert_id INTO v_cert;
+    END IF;
+    RETURN TRUE;
+END
+$$;
+
+REVOKE ALL ON FUNCTION register_factory_root(text, text, text, timestamptz, timestamptz) FROM PUBLIC;
+REVOKE ALL ON FUNCTION register_manager_certificate(text, text, text, text, timestamptz, timestamptz, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION replace_manager_crl(text, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION add_manager_revocation(text, text, text, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION register_factory_worker(text, text, text, text, timestamptz, timestamptz, text) FROM PUBLIC;
 
 -- The seeded devices enroll like any other: the controller starts their
 -- processes, they generate keys and CSRs, and the server signs them.

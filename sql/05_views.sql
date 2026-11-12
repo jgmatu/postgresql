@@ -172,6 +172,7 @@ GRANT SELECT ON device_type, device, device_state, telemetry_scalar, telemetry_g
 GRANT SELECT ON device_config, device_config_pending, device_config_errors, device_config_history TO demo_normal;
 GRANT SELECT ON v_devices, v_device_config_sync_status, v_device_identity TO demo_normal;
 GRANT SELECT ON root_ca, device_certificate, crl, device_enrollment, device_session TO demo_normal;
+GRANT SELECT ON manager_certificate, manager_revocation, manager_crl_signature TO demo_normal;
 
 -- demo_admin: inherits demo_normal (00_roles.sql), plus enrollment, revocation,
 -- removal, enqueue and user management. Identity columns need no sequence privilege.
@@ -195,6 +196,8 @@ GRANT SELECT (device_id, name) ON device TO demo_server;
 GRANT SELECT, UPDATE ON telemetry_read_cursor TO demo_server;
 GRANT EXECUTE ON FUNCTION auth_fetch_user(text) TO demo_server;
 GRANT SELECT ON root_ca TO demo_server;
+GRANT SELECT ON manager_certificate, manager_revocation, manager_crl_signature TO demo_server;
+GRANT EXECUTE ON FUNCTION register_factory_root(text, text, text, timestamptz, timestamptz) TO demo_server;
 GRANT SELECT (request_id, kind, name, type_id, status, csr_pem, requested_by) ON device_enrollment TO demo_server;
 GRANT EXECUTE ON FUNCTION issue_device_certificate(bigint, text, text, text, text, timestamptz, timestamptz, text)
     TO demo_server;
@@ -207,6 +210,14 @@ GRANT INSERT ON telemetry_scalar, telemetry_gps, telemetry_xy, telemetry_xyz TO 
 GRANT SELECT, UPDATE ON device_config_pending TO demo_controller;
 GRANT INSERT ON device_config_history, device_config_errors TO demo_controller;
 GRANT SELECT ON root_ca, device_certificate, crl, device_enrollment, v_device_identity TO demo_controller;
+GRANT SELECT ON manager_certificate, manager_revocation, manager_crl_signature TO demo_controller;
+GRANT EXECUTE ON FUNCTION register_factory_root(text, text, text, timestamptz, timestamptz) TO demo_controller;
+GRANT EXECUTE ON FUNCTION register_manager_certificate(text, text, text, text, timestamptz, timestamptz, text)
+    TO demo_controller;
+GRANT EXECUTE ON FUNCTION replace_manager_crl(text, text) TO demo_controller;
+GRANT EXECUTE ON FUNCTION add_manager_revocation(text, text, text, text) TO demo_controller;
+GRANT EXECUTE ON FUNCTION register_factory_worker(text, text, text, text, timestamptz, timestamptz, text)
+    TO demo_controller;
 GRANT UPDATE (status, csr_pem, csr_at, error_code, error_detail, decided_at) ON device_enrollment TO demo_controller;
 GRANT SELECT, INSERT, UPDATE ON device_session TO demo_controller;
 GRANT EXECUTE ON FUNCTION ensure_monthly_partitions(regclass, date, int) TO demo_controller;
