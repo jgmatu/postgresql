@@ -566,6 +566,57 @@ public:
     /// Every revoked certificate with its reason, for `CertificateAuthority::crl_pem()`.
     std::vector<RevokedPem> load_crl(DbRole role);
 
+    /// The manager's signature over `manager_revocation`.
+    struct ManagerCrlRecord
+    {
+        std::string payload;       ///< canonical serial list
+        std::string signature_hex; ///< raw ECDSA-SHA384 signature, lower-case hex
+    };
+
+    /**
+     * @brief Insert the factory root into `root_ca` when that name is absent.
+     * The private key is not a parameter and is not stored.
+     */
+    void ensure_factory_root(const std::string& subject, const std::string& fingerprint, const std::string& pem,
+                             const std::string& not_before, const std::string& not_after);
+
+    /// True when `manager_certificate` already holds the factory-signed certificate.
+    bool manager_certificate_present();
+
+    /// PEM of the manager certificate, or empty when the row does not exist yet.
+    std::optional<std::string> load_manager_certificate_pem();
+
+    /// Insert the factory-signed manager certificate. A later call keeps the first row.
+    void register_manager_certificate(const std::string& ca_fingerprint, const std::string& serial,
+                                      const std::string& fingerprint, const std::string& subject_cn,
+                                      const std::string& not_before, const std::string& not_after,
+                                      const std::string& pem);
+
+    /// Replace the manager's signature over its revocation list.
+    void replace_manager_crl(const std::string& payload, const std::string& signature_hex);
+
+    /// Record one worker serial on the manager's list. The signature is replaced separately.
+    void add_manager_revocation(const std::string& serial, const std::string& fingerprint,
+                                const std::string& device_name, const std::string& pem);
+
+    /// Serials in `manager_revocation`.
+    std::set<std::string> load_manager_revoked_serials();
+
+    /// The stored signature, or empty when the manager has not signed the list yet.
+    std::optional<ManagerCrlRecord> load_manager_crl();
+
+    /**
+     * @brief Store a factory-signed worker certificate beside the current one.
+     * `device.cert_id` is left as it is.
+     * @return false when no device has that name
+     */
+    bool register_factory_worker(const std::string& subject_cn, const std::string& ca_fingerprint,
+                                 const std::string& serial, const std::string& fingerprint,
+                                 const std::string& not_before, const std::string& not_after, const std::string& pem);
+
+    /// Factory root, manager certificate and factory-issued worker certificates, for the panel.
+    boost::json::value fetch_origin(DbRole role);
+
     // ----------------------------------------------------------------- session
 
     /**

@@ -1406,6 +1406,124 @@ std::vector<RevokedPem> DatabaseManager::load_crl(DbRole role)
     });
 }
 
+void DatabaseManager::ensure_factory_root(const std::string& subject, const std::string& fingerprint,
+                                          const std::string& pem, const std::string& not_before,
+                                          const std::string& not_after)
+{
+    auto lease = pool_.acquire();
+    pqxx::work txn(lease.get());
+    txn.exec("SELECT register_factory_root($1, $2, $3, $4::timestamptz, $5::timestamptz)",
+             pqxx::params{subject, fingerprint, pem, not_before, not_after});
+    txn.commit();
+}
+
+bool DatabaseManager::manager_certificate_present()
+{
+    auto lease = pool_.acquire();
+    pqxx::work txn(lease.get());
+    const auto res = txn.exec("SELECT 1 FROM manager_certificate");
+    txn.commit();
+    return !res.empty();
+}
+
+std::optional<std::string> DatabaseManager::load_manager_certificate_pem()
+{
+    auto lease = pool_.acquire();
+    pqxx::work txn(lease.get());
+    const auto res = txn.exec("SELECT cert_pem FROM manager_certificate");
+    txn.commit();
+    if (res.empty()) return std::nullopt;
+    return res[0][0].as<std::string>();
+}
+
+void DatabaseManager::register_manager_certificate(const std::string& ca_fingerprint, const std::string& serial,
+                                                   const std::string& fingerprint, const std::string& subject_cn,
+                                                   const std::string& not_before, const std::string& not_after,
+                                                   const std::string& pem)
+{
+    auto lease = pool_.acquire();
+    pqxx::work txn(lease.get());
+    txn.exec("SELECT register_manager_certificate($1, $2, $3, $4, $5::timestamptz, $6::timestamptz, $7)",
+             pqxx::params{ca_fingerprint, serial, fingerprint, subject_cn, not_before, not_after, pem});
+    txn.commit();
+}
+
+void DatabaseManager::replace_manager_crl(const std::string& payload, const std::string& signature_hex)
+{
+    auto lease = pool_.acquire();
+    pqxx::work txn(lease.get());
+    txn.exec("SELECT replace_manager_crl($1, $2)", pqxx::params{payload, signature_hex});
+    txn.commit();
+}
+
+void DatabaseManager::add_manager_revocation(const std::string& serial, const std::string& fingerprint,
+                                             const std::string& device_name, const std::string& pem)
+{
+    auto lease = pool_.acquire();
+    pqxx::work txn(lease.get());
+    txn.exec("SELECT add_manager_revocation($1, $2, $3, $4)", pqxx::params{serial, fingerprint, device_name, pem});
+    txn.commit();
+}
+
+std::set<std::string> DatabaseManager::load_manager_revoked_serials()
+{
+    auto lease = pool_.acquire();
+    pqxx::work txn(lease.get());
+    const auto res = txn.exec("SELECT serial FROM manager_revocation ORDER BY serial");
+    txn.commit();
+    std::set<std::string> out;
+    for (const auto& row : res) out.emplace(row[0].view());
+    return out;
+}
+
+std::optional<DatabaseManager::ManagerCrlRecord> DatabaseManager::load_manager_crl()
+{
+    auto lease = pool_.acquire();
+    pqxx::work txn(lease.get());
+    const auto res = txn.exec("SELECT payload, signature FROM manager_crl_signature");
+    txn.commit();
+    if (res.empty()) return std::nullopt;
+    return ManagerCrlRecord{res[0][0].as<std::string>(), res[0][1].as<std::string>()};
+}
+
+bool DatabaseManager::register_factory_worker(const std::string& subject_cn, const std::string& ca_fingerprint,
+                                              const std::string& serial, const std::string& fingerprint,
+                                              const std::string& not_before, const std::string& not_after,
+                                              const std::string& pem)
+{
+    auto lease = pool_.acquire();
+    pqxx::work txn(lease.get());
+    const auto res = txn.exec(
+        "SELECT register_factory_worker($1, $2, $3, $4, $5::timestamptz, $6::timestamptz, $7)",
+        pqxx::params{subject_cn, ca_fingerprint, serial, fingerprint, not_before, not_after, pem});
+    txn.commit();
+    return res[0][0].as<bool>();
+}
+
+boost::json::value DatabaseManager::fetch_origin(DbRole role)
+{
+    return with_role(role, [](pqxx::work& txn) {
+        return parse_json_field(
+            txn.exec("SELECT json_build_object("
+                     "  'factory', (SELECT json_build_object("
+                     "      'name', name, 'subject', subject, 'fingerprint', fingerprint_sha256,"
+                     "      'not_before', not_before, 'not_after', not_after, 'cert_pem', cert_pem)"
+                     "    FROM root_ca WHERE name = 'factory'),"
+                     "  'manager', (SELECT json_build_object("
+                     "      'subject_cn', subject_cn, 'serial', serial, 'fingerprint', fingerprint_sha256,"
+                     "      'not_before', not_before, 'not_after', not_after, 'cert_pem', cert_pem)"
+                     "    FROM manager_certificate),"
+                     "  'workers', (SELECT COALESCE(json_agg(w ORDER BY w.device, w.serial), '[]'::json) FROM ("
+                     "      SELECT d.name AS device, c.serial, c.fingerprint_sha256 AS fingerprint, c.subject_cn,"
+                     "             c.not_before, c.not_after, c.cert_pem, (c.cert_id = d.cert_id) AS current"
+                     "      FROM device_certificate c"
+                     "      JOIN root_ca r ON r.ca_id = c.ca_id AND r.name = 'factory'"
+                     "      JOIN device d ON d.device_id = c.device_id) w)"
+                     ")::text")
+                .one_field());
+    });
+}
+
 // ---------------------------------------------------------------------------
 // Session
 // ---------------------------------------------------------------------------
