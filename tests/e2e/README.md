@@ -1,14 +1,14 @@
 # End-to-end virtualization
 
-The suite runs the demo's own compose file as a throwaway project. Robot Framework, `curl`, `jq` and [`client/pgdemo.sh`](../../client/pgdemo.sh) stay on the host. PostgreSQL, the one-shot `init` container, the server and the controller run in containers. Nothing in the suite uses the host `build/` tree.
+The suite runs [`docker/e2e/compose.yaml`](../../docker/e2e/compose.yaml), which includes the shared [`docker/compose.yaml`](../../docker/compose.yaml) under the project name `pgdemo-e2e`. Robot Framework, `curl`, `jq` and [`client/pgdemo.sh`](../../client/pgdemo.sh) stay on the host. PostgreSQL, the one-shot `init` container, the server and the controller run in containers. Nothing in the suite uses the host `build/` tree.
 
-[`docker/Dockerfile`](../../docker/Dockerfile) builds one image, `pgdemo:latest`: a build stage compiles the three binaries (`pgdemo-server`, `pgdemo-controller`, `pgdemo-device`), and the runtime stage keeps them plus `sql/`, `scripts/` and `webroot/`, the built control panel. `up --build` produces that image. Compose then starts `init`, `server` and `controller` from it and picks the command of each service.
+[`docker/Dockerfile`](../../docker/Dockerfile) builds one image, `pgdemo:latest`: a build stage compiles the three binaries (`pgdemo-server`, `pgdemo-controller`, `pgdemo-device`), and the runtime stage keeps them plus `sql/`, `scripts/`, `webroot/` and [`docker/entrypoint.sh`](../../docker/entrypoint.sh). `up --build` produces that image. Compose then starts `init`, `server` and `controller` from it. `init` runs `scripts/db-init.sh` and exits. The server and the controller exec their binary through the entrypoint.
 
 The suites cover the API (01 to 09), the panel as static files with its headers and its boundary with `/api` (10), and the panel in a real browser (11 to 13, with [Robot Framework Browser](https://robotframework-browser.org/), which drives Playwright and Chromium).
 
 ## CLI
 
-From the repository root. The development stack has to be stopped first (`scripts/stop-all.sh`): it publishes the same `127.0.0.1:8080` and uses the same `172.28.*` subnets. A host `scripts/run-all.sh --http` has to be stopped too, because it listens on `127.0.0.1:8080`. Docker with compose v2, `curl`, `jq` and Node.js with npm (for the browser) must be on the host.
+From the repository root. The operational stack has to be stopped first (`scripts/stop-all.sh`): it publishes the same `127.0.0.1:8080` and uses the same `172.28.*` subnets. Docker with compose v2, `curl`, `jq` and Node.js with npm (for the browser) must be on the host.
 
 `webroot/` must hold the panel before the image is built: run `scripts/fetch-webroot.sh` (the panel CI released from `main`) or `pnpm build` in `frontend/` (needs Catalyst; see [frontend/README.md](../../frontend/README.md)). The suite setup checks for `webroot/index.html` and stops with "ejecuta scripts/fetch-webroot.sh o pnpm build en frontend/" otherwise, rather than failing in every UI test later.
 
@@ -20,7 +20,7 @@ scripts/fetch-webroot.sh          # or: (cd frontend && pnpm build)
 # Compose interpolates the file before it will stop anything. `down` does not
 # use these values; they only have to be set.
 POSTGRES_PASSWORD=x DEMO_ADMIN_PASSWORD=x \
-  docker compose -f docker/compose.yaml down
+  docker compose -f docker/e2e/compose.yaml down
 
 .venv/bin/robot --outputdir build/e2e tests/e2e
 ```
@@ -53,10 +53,10 @@ The UI suites save a screenshot at each step into `<outputdir>/screens/`, embedd
 [`resources/stack.resource`](resources/stack.resource) always invokes:
 
 ```bash
-docker compose -p pgdemo-e2e -f docker/compose.yaml --env-file run/e2e/compose.env
+docker compose -p pgdemo-e2e -f docker/e2e/compose.yaml --env-file run/e2e/compose.env
 ```
 
-The file is the demo's [`docker/compose.yaml`](../../docker/compose.yaml). The project name prefixes every network and volume with `pgdemo-e2e_`, so `down -v` removes `pgdemo-e2e_pgdata`, `pgdemo-e2e_demo-run`, `pgdemo-e2e_ca-keys` and `pgdemo-e2e_device-keys` and leaves the `pgdemo_` volumes alone. Each run therefore starts with a new root CA and no device keys.
+The file includes the shared [`docker/compose.yaml`](../../docker/compose.yaml) and names the project `pgdemo-e2e`. That prefix is on every network and volume, so `down -v` removes `pgdemo-e2e_pgdata`, `pgdemo-e2e_demo-run`, `pgdemo-e2e_ca-keys` and `pgdemo-e2e_device-keys` and leaves the `pgdemo_` volumes of [`docker/operational`](../../docker/operational) alone. Each run therefore starts with a new root CA and no device keys.
 
 Each run generates `POSTGRES_PASSWORD` and `DEMO_ADMIN_PASSWORD` with `secrets.token_hex` and writes them to `run/e2e/compose.env`. That directory lives inside the repository, not in `/tmp`: a snap-packaged Docker CLI cannot see the host's `/tmp`. `run/` is gitignored, and the suite teardown deletes `run/e2e`. Compose would let a variable exported in the shell override that file, so the suite removes both names from the environment it passes to `docker compose`.
 
@@ -93,13 +93,13 @@ flowchart LR
 
 ## What is shared with the development stack
 
-Volumes are isolated by the project name. Three things are not, because [`docker/compose.yaml`](../../docker/compose.yaml) fixes them for every project:
+Volumes are isolated by the project name. Three things are not, because the shared [`docker/compose.yaml`](../../docker/compose.yaml) fixes them for every project:
 
 - The published port `127.0.0.1:8080`.
 - The subnets `172.28.10.0/24` and `172.28.20.0/24`.
 - The image tag `pgdemo:latest`.
 
-The development stack (`docker compose -p pgdemo`, the default project name) has to be stopped before the suite runs, or the port and the subnets collide. A build in either project replaces the local `pgdemo:latest` image the other one would start.
+The operational stack (`docker compose -f docker/operational/compose.yaml`, project `pgdemo`) has to be stopped before the suite runs, or the port and the subnets collide. A build in either project replaces the local `pgdemo:latest` image the other one would start.
 
 ## Lifecycle
 
@@ -114,7 +114,7 @@ The development stack (`docker compose -p pgdemo`, the default project name) has
    - `11__ui_login_and_roles.robot`: the login page, a refused password, `alice` seeing only the visualization tabs and being sent back from `/admin/`, the user menu with role and PostgreSQL group, logout, the admin's amber entry, and a forged token ending the session (`/?expired=1`).
    - `12__ui_visualization.robot`, as `alice`: live rows and `seq` over SSE, the device detail (chart, history, certificates), configuration, the GPS map moving, PKI with the CRL, events filtered on the server by device and by channel, pause, the system tab, and the read-only Histórico tab.
    - `13__ui_admin.robot`, as the admin, on its own device `ui-a`: enrollment and a 409, a configuration applied and a `422 INVALID_RATE`, certificateHold and its release, a rotation and the deletion of the superseded certificate, a confirmed `keyCompromise` revocation that shows up in the CRL, and the removal; then a user created, a duplicate, the user deleted, and the last admin refused. The suite teardown deletes `ui-a` and `ui-user` through the API if a failed test left them, so 99 sees the fleet as 09 left it.
-7. **Shutdown check.** `99__shutdown.robot` runs `compose stop server controller`. The services set `init: true`, so tini is pid 1 and delivers `SIGTERM` to `scripts/run-all.sh`, which stops the process and leaves `listener exiting` in its log. `compose cp server:/app/run/logs` then copies those logs out of the `demo-run` volume. `server` and `controller` share that volume, and `cp` works while the container is stopped.
+7. **Shutdown check.** `99__shutdown.robot` runs `compose stop server controller`. The services set `init: true`, so tini is pid 1 and delivers `SIGTERM` to the binary that `entrypoint.sh` exec'd. The listener logs `listener exiting`. The test reads that with `docker compose logs`, which works while the container is stopped.
 8. **Teardown.** `compose logs` is saved as `compose.log` in the Robot `--outputdir`, then `down -v --remove-orphans` runs again and `run/e2e` is removed.
 
 ## Console output

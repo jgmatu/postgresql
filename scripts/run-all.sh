@@ -1,147 +1,45 @@
 #!/usr/bin/env bash
-# Start the controller and the server against the database set up by db-init.sh.
+# Start the operational stack: PostgreSQL, the server and the controller.
 #
-# Usage: scripts/run-all.sh [--https|--http] [server|controller|all]
+# Usage: scripts/run-all.sh [server|controller|all]
 #
-#   --https   HTTPS, TLS 1.3 only, on port 8443 (default)
-#   --http    plain HTTP on port 8080
+#   server      the API, and the database and init it depends on
+#   controller  the manager, and the database and init it depends on
+#   all         the whole stack (default)
 #
-# TLS 1.3 and the key-exchange groups come from build/server/openssl-oqs.cnf,
-# which pgdemo-server loads before oatpp-openssl creates its SSL_CTX.
+# The server listens on HTTPS inside the container. Compose publishes it on
+# 127.0.0.1:8080. Ctrl-C stops the attached containers. scripts/stop-all.sh
+# stops them from another terminal. Volumes survive both.
 #
-# Each process logs in with its own PostgreSQL role (demo_server, demo_controller)
-# and knows nothing about the other one. The server signs device CSRs with the
-# CA in run/ca/; the controller forks one pgdemo-device node per device, with its
-# keys in run/devices/<name>/. Workers publish pgdemo/worker; the manager publishes pgdemo/manager.
-# Logs go to run/logs/. Ctrl-C stops both. scripts/stop-all.sh stops them from another terminal.
-#
-# Variables (defaults from run/demo.env):
-#   PGDEMO_PGHOST, PGDEMO_PGPORT, PGDEMO_DB   database location
-#   PGDEMO_LISTEN_ADDR (127.0.0.1)            bind address (Docker uses 0.0.0.0)
-#   PGDEMO_CA_DIR (run/ca)                    device CA key and certificate
-#   PGDEMO_DEVICES_DIR (run/devices)          device keys and the controller lock
-#   PGDEMO_MAX_DEVICES (16)                   device processes run at once
-#   PGDEMO_WEBROOT (webroot)                  control panel; served when it has index.html
-#   PGDEMO_SERVER_ARGS, PGDEMO_CONTROLLER_ARGS  extra command-line options
+# The end-to-end suite uses docker/e2e and is not this script.
 set -euo pipefail
 
-if [[ -f /opt/ros/lyrical/setup.bash ]]; then
-    set +u
-    # shellcheck disable=SC1091
-    source /opt/ros/lyrical/setup.bash
-    set -u
-fi
-
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# Generated interface libraries. The image copies them to /app/lib; a local
-# build keeps them under build/msgs, which the binaries also record in RUNPATH.
-if [[ -d /app/lib ]]; then
-    export LD_LIBRARY_PATH="/app/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-elif [[ -d ${ROOT}/build/msgs ]]; then
-    export LD_LIBRARY_PATH="${ROOT}/build/msgs${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-fi
-ENV_FILE="${PGDEMO_ENV_FILE:-${ROOT}/run/demo.env}"
-BUILD="${PGDEMO_BUILD_DIR:-${ROOT}/build}"
-SCHEME=https
+COMPOSE_FILE="${ROOT}/docker/operational/compose.yaml"
+ENV_FILE="${ROOT}/docker/operational/.env"
 WHAT=all
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --https) SCHEME=https ;;
-        --http) SCHEME=http ;;
-        -h|--help) sed -n '2,24p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        --https) ;;
+        --http)
+            printf '[run-all] ERROR: the operational stack is HTTPS\n' >&2
+            exit 1
+            ;;
+        -h|--help) sed -n '2,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
         server|controller|all) WHAT="$1" ;;
         *) printf '[run-all] ERROR: unknown argument %s\n' "$1" >&2; exit 1 ;;
     esac
     shift
 done
 
-die() { printf '[run-all] ERROR: %s\n' "$*" >&2; exit 1; }
-[[ -f "${ENV_FILE}" ]] || die "${ENV_FILE} not found; run scripts/db-init.sh first"
-# shellcheck disable=SC1090
-source "${ENV_FILE}"
+if [[ ! -f "${ENV_FILE}" ]]; then
+    printf '[run-all] ERROR: %s not found; copy docker/operational/.env.example and set both passwords\n' "${ENV_FILE}" >&2
+    exit 1
+fi
 
-case "${WHAT}" in server|controller|all) ;; *) die "unknown target '${WHAT}'" ;; esac
-
-PGHOST_="${PGDEMO_PGHOST:-127.0.0.1}"
-PGPORT_="${PGDEMO_PGPORT:-5432}"
-DB_="${PGDEMO_DB:-pgdemo}"
-CA_DIR="${PGDEMO_CA_DIR:-${ROOT}/run/ca}"
-LOGS="${ROOT}/run/logs"
-mkdir -p "${LOGS}"
-
-pids=()
-logs=()
-tail_pid=""
-cleanup() {
-    trap - INT TERM EXIT
-    for pid in "${pids[@]}"; do kill -TERM "${pid}" 2>/dev/null || true; done
-    for pid in "${pids[@]}"; do wait "${pid}" 2>/dev/null || true; done
-    sleep 0.2
-    [[ -n "${tail_pid}" ]] && kill "${tail_pid}" 2>/dev/null || true
-}
-trap cleanup INT TERM EXIT
-
-start_controller() {
-    [[ -x "${BUILD}/controller/pgdemo-controller" ]] || die "build first: cmake --build build"
-    : > "${LOGS}/controller.log"
-    logs+=("${LOGS}/controller.log")
-    [[ -x "${BUILD}/device/pgdemo-device" ]] || die "build first: cmake --build build"
-    # shellcheck disable=SC2086
-    PGHOST="${PGHOST_}" PGPORT="${PGPORT_}" PGDATABASE="${DB_}" \
-    PGUSER=demo_controller PGPASSWORD="${DEMO_CONTROLLER_DB_PASSWORD}" \
-        "${BUILD}/controller/pgdemo-controller" \
-        --device-bin "${BUILD}/device/pgdemo-device" \
-        --devices-dir "${PGDEMO_DEVICES_DIR:-${ROOT}/run/devices}" \
-        --max-devices "${PGDEMO_MAX_DEVICES:-16}" \
-        ${PGDEMO_CONTROLLER_ARGS:-} \
-        >> "${LOGS}/controller.log" 2>&1 &
-    pids+=("$!")
-    echo "[run-all] controller pid $! (log run/logs/controller.log)"
-}
-
-start_server() {
-    [[ -x "${BUILD}/server/pgdemo-server" ]] || die "build first: cmake --build build"
-    [[ -f "${CA_DIR}/ca.key" ]] || die "${CA_DIR}/ca.key not found; run scripts/db-init.sh first"
-    "${ROOT}/scripts/gen-jwt-keys.sh" >/dev/null
-    local -a tls_args=()
-    local port=8080 mode="plain HTTP"
-    if [[ "${SCHEME}" == https ]]; then
-        "${ROOT}/scripts/gen-tls-cert.sh" >/dev/null
-        tls_args=(--tls-key "${ROOT}/run/keys/tls.key" --tls-cert "${ROOT}/run/keys/tls.crt")
-        port=8443
-        mode="TLS 1.3, openssl-oqs.cnf"
-    fi
-    local addr="${PGDEMO_LISTEN_ADDR:-127.0.0.1}"
-    local -a panel_args=()
-    local webroot="${PGDEMO_WEBROOT:-${ROOT}/webroot}"
-    if [[ -f "${webroot}/index.html" ]]; then
-        panel_args=(--webroot "${webroot}")
-    else
-        echo "[run-all] WARN: panel no disponible: scripts/fetch-webroot.sh o pnpm build en frontend/" >&2
-    fi
-    : > "${LOGS}/server.log"
-    logs+=("${LOGS}/server.log")
-    # shellcheck disable=SC2086
-    PGHOST="${PGHOST_}" PGPORT="${PGPORT_}" PGDATABASE="${DB_}" \
-    PGUSER=demo_server PGPASSWORD="${DEMO_SERVER_DB_PASSWORD}" \
-        "${BUILD}/server/pgdemo-server" \
-        --listen-addr "${addr}" --port "${port}" \
-        --jwt-key "${ROOT}/run/keys/jwt.key" --jwt-cert "${ROOT}/run/keys/jwt.crt" \
-        --ca-key "${CA_DIR}/ca.key" --ca-cert "${CA_DIR}/ca.crt" \
-        "${tls_args[@]}" "${panel_args[@]}" \
-        ${PGDEMO_SERVER_ARGS:-} \
-        >> "${LOGS}/server.log" 2>&1 &
-    pids+=("$!")
-    echo "[run-all] server pid $! on ${SCHEME}://${addr}:${port} (${mode}; log run/logs/server.log)"
-}
-
-if [[ "${WHAT}" == controller || "${WHAT}" == all ]]; then start_controller; fi
-if [[ "${WHAT}" == server || "${WHAT}" == all ]]; then start_server; fi
-
-# Echo the logs to the console. Not in pids: its exit does not stop the demo.
-tail -n +1 -q -F "${logs[@]}" 2>/dev/null &
-tail_pid=$!
-
-echo "[run-all] Ctrl-C to stop"
-# Exit as soon as either process ends; the trap stops the other one.
-wait -n "${pids[@]}"
+args=(docker compose -f "${COMPOSE_FILE}" --env-file "${ENV_FILE}" up --build)
+if [[ "${WHAT}" != all ]]; then
+    args+=("${WHAT}")
+fi
+exec "${args[@]}"

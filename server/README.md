@@ -16,7 +16,7 @@ Sources:
 
 ## REST API
 
-Every route is TLS 1.3 on port 8443, or plain HTTP on port 8080 with `scripts/run-all.sh --http`. `client/pgdemo.sh` trusts `run/keys/tls.crt`.
+Every route is TLS 1.3 on port 8443. The operational stack publishes that port on `127.0.0.1:8080`. A server started without `--tls-key` serves plain HTTP on the port it was given. `client/pgdemo.sh` trusts the certificate in `PGDEMO_CA`.
 
 A path under `/api` needs `Authorization: Bearer <JWT>` except `POST /api/auth/login` and `GET /api/health`. The check is an allow-list in [`AuthInterceptor`](src/http/AuthInterceptor.hpp): a route added later is protected. The verified `sub` and `role` go into the request. The controller then checks the role, and the query runs under `SET LOCAL ROLE demo_admin` or `demo_normal`, so PostgreSQL checks it again.
 
@@ -93,7 +93,7 @@ oatpp-openssl only wraps the TCP socket. `oatpp::openssl::Config::createDefaultS
 
 ```mermaid
 flowchart LR
-    runAll["scripts/run-all.sh"] -->|"--tls-key --tls-cert"| server["pgdemo-server"]
+    runAll["docker/entrypoint.sh"] -->|"--tls-key --tls-cert"| server["pgdemo-server"]
     server -->|"OPENSSL_CONF, OPENSSL_MODULES"| cnf["build/server/openssl-oqs.cnf"]
     cnf --> providers["default + oqsprovider.so"]
     server --> oatppSsl["oatpp-openssl ConnectionProvider"]
@@ -103,4 +103,4 @@ flowchart LR
     providers --> sslCtx
 ```
 
-`scripts/run-all.sh --http` omits `--tls-key` and `--tls-cert`. The server then uses the plain TCP provider on port 8080 and never loads the OpenSSL config. The captures of both modes are in [../README.md](../README.md#network-captures).
+Starting the server without `--tls-key` and `--tls-cert` uses the plain TCP provider and never loads the OpenSSL config. The operational entrypoint always passes both. The captures of both modes are in [../README.md](../README.md#network-captures).

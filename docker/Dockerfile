@@ -1,4 +1,5 @@
-# One image for both processes; compose decides which one a container runs.
+# One image for the server and the controller. Compose decides which one a
+# container runs. entrypoint.sh execs that binary.
 #
 #   docker build -f docker/Dockerfile -t pgdemo .
 
@@ -39,7 +40,7 @@ FROM ubuntu:26.04
 ARG DEBIAN_FRONTEND=noninteractive
 # Runtime libraries of the -dev packages above (Ubuntu 26.04 names).
 # The runtime needs the ROS libraries the binaries were linked against, and
-# run-all.sh sources /opt/ros/lyrical/setup.bash so the rmw plugin is found.
+# entrypoint.sh sources /opt/ros/lyrical/setup.bash so the rmw plugin is found.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       ca-certificates curl gnupg \
@@ -68,9 +69,11 @@ COPY scripts scripts
 # The control panel export: README.md only in a fresh clone, so run-all.sh
 # serves the API alone until scripts/fetch-webroot.sh or pnpm build fills it.
 COPY webroot webroot
+COPY docker/entrypoint.sh entrypoint.sh
 # run/ca and run/devices are mount points of the ca-keys and device-keys
 # volumes; a new volume copies this ownership and mode.
 RUN mkdir -p run/ca run/devices \
  && chown -R pgdemo:pgdemo run \
- && chmod 700 run/ca run/devices
+ && chmod 700 run/ca run/devices \
+ && chmod 755 entrypoint.sh
 USER pgdemo

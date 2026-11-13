@@ -23,7 +23,7 @@ This document explains how two processes that never talk to each other run a rea
 
 Neither process knows the other's address, port or existence. Each owns its side of the contract: the server owns *desired* state and the certificate authority, and the controller owns *applied* state, the device processes and the data. The device processes are children of the controller (`fork` + `execv`) and talk only to it; they have no database login. The schema in [`sql/`](../sql) is the interface between them; [sql/README.md](../sql/README.md) describes every table, view, function and channel.
 
-The HTTP listener is TLS 1.3 on port 8443 (`scripts/run-all.sh --http` serves plain HTTP on 8080 instead). oatpp-openssl creates the context; [`server/openssl-oqs.cnf`](../server/openssl-oqs.cnf), loaded from beside the executable, activates OpenSSL's default provider and `oqsprovider`. Ordinary clients use `X25519MLKEM768`. liboqs groups in that file are accepted when the client offers them. The TLS certificate is not the JWT key.
+The HTTP listener is TLS 1.3 on port 8443. The operational stack publishes that port on `127.0.0.1:8080`. A server started without `--tls-key` serves plain HTTP. oatpp-openssl creates the context; [`server/openssl-oqs.cnf`](../server/openssl-oqs.cnf), loaded from beside the executable, activates OpenSSL's default provider and `oqsprovider`. Ordinary clients use `X25519MLKEM768`. liboqs groups in that file are accepted when the client offers them. The TLS certificate is not the JWT key.
 
 Each process holds query connections plus one listener connection:
 

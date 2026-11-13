@@ -15,7 +15,7 @@ Fill it in one of two ways:
 `VERSION` records the commit the panel was built from and when. The server
 logs it at start (`panel: N files from …`) and the Sistema tab shows it.
 
-`scripts/run-all.sh` (and the Docker image, which copies this directory)
-passes `--webroot` only when `index.html` is here; otherwise the server runs
-the API alone and says "panel no disponible". See
-[frontend/README.md](../frontend/README.md) for the panel itself.
+The operational image copies this directory. Its entrypoint passes `--webroot`
+only when `index.html` is here; otherwise the server runs the API alone and
+says "panel no disponible". See [frontend/README.md](../frontend/README.md)
+for the panel itself.

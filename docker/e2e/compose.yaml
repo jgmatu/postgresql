@@ -1,0 +1,11 @@
+# The throwaway stack. The project name prefixes every volume, so `down -v`
+# removes pgdemo-e2e_pgdata, pgdemo-e2e_demo-run, pgdemo-e2e_ca-keys and
+# pgdemo-e2e_device-keys and leaves the operational volumes alone.
+#
+# It cannot run beside docker/operational: both publish 127.0.0.1:8080 and
+# both use 172.28.10.0/24 and 172.28.20.0/24.
+
+name: pgdemo-e2e
+
+include:
+  - path: ../compose.yaml

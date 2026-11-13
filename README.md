@@ -67,10 +67,10 @@ Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design: sequence diagr
 | [`client/pgdemo.sh`](client/pgdemo.sh) | Command-line client: login, users, devices and certificates, PKI, telemetry, configuration, live monitor. |
 | [`frontend/`](frontend) | The control panel: Next.js 16 static export with Tailwind CSS v4 and Catalyst, a visualization panel for every role and an administration panel for admins. [frontend/README.md](frontend/README.md) covers its design, architecture and screens. |
 | [`webroot/`](webroot) | Where the built panel goes (`pnpm build` or `scripts/fetch-webroot.sh`) and what `pgdemo-server --webroot` serves; only its README is in git. |
-| [`scripts/`](scripts) | `db-init.sh`, `run-all.sh` (start the processes), `stop-all.sh` (stop them), `fetch-webroot.sh` (download the built panel), `capture.sh` (network captures), key and certificate generation, including the device CA (`gen-device-ca.sh`) and the factory root (`gen-factory.sh`). |
+| [`scripts/`](scripts) | `db-init.sh`, `run-all.sh` (start the operational compose project), `stop-all.sh` (stop it), `fetch-webroot.sh` (download the built panel), `capture.sh` (network captures), key and certificate generation, including the device CA (`gen-device-ca.sh`) and the factory root (`gen-factory.sh`). |
 | [`data/`](data) | Network captures of the client over HTTPS and over plain HTTP. |
 | [`patches/`](patches) | libpqxx 8.0.0 patch that adds a truly blocking `wait_notification()`. |
-| [`docker/`](docker) | Image and compose file with two isolated network zones. |
+| [`docker/`](docker) | Virtualization: one image, three containers, two compose projects. [docker/README.md](docker/README.md). |
 | [`tests/`](tests) | GoogleTest (auth, dispatcher, static files, database) and a Robot Framework end-to-end suite on docker compose, API and browser. |
 
 ## Quick start (Ubuntu 26.04)
@@ -96,29 +96,31 @@ sudo -u postgres createuser --superuser "$USER"     # once
 PGHOST=/var/run/postgresql scripts/db-init.sh       # add --reset to start over
 ```
 
-`db-init.sh` creates the roles and the `pgdemo` database, loads `sql/`, generates the device root CA in `run/ca/` (once) and registers it, queues the enrollment of the three seed devices, creates the API user `admin`, and writes generated passwords to `run/demo.env` (mode 0600, gitignored). A database created with an earlier schema needs `--reset`; it is not migrated. After a reset, also remove `run/devices/`: the device keys there belong to certificates the new database does not know. The two processes then connect over TCP to `127.0.0.1:5432` with those passwords (`scram-sha-256` in the default Ubuntu `pg_hba.conf`).
+`db-init.sh` creates the roles and the `pgdemo` database, loads `sql/`, generates the device root CA in `run/ca/` (once) and registers it, queues the enrollment of the three seed devices, creates the API user `admin`, and writes generated passwords to `run/demo.env` (mode 0600, gitignored). A database created with an earlier schema needs `--reset`; it is not migrated. After a reset, also remove `run/devices/`: the device keys there belong to certificates the new database does not know. Database tests connect over TCP to `127.0.0.1:5432` with those passwords (`scram-sha-256` in the default Ubuntu `pg_hba.conf`).
 
-Start both processes. Each one logs in with its own PostgreSQL role. The ports are fixed, one per scheme:
+Start the demo with the operational project. It runs PostgreSQL, the server and the controller as three containers. The server and the controller each log in with their own role. `init` runs once and exits: it loads the schema, creates the device CA and writes `run/demo.env` inside the volume.
 
 ```bash
-scripts/run-all.sh                 # HTTPS, TLS 1.3 only, on 127.0.0.1:8443 (default)
-scripts/run-all.sh --http          # plain HTTP on 127.0.0.1:8080
-scripts/run-all.sh server          # only the server (also: controller); combines with --http
-scripts/stop-all.sh                # stop the server, the controller and every device process
+cp docker/operational/.env.example docker/operational/.env   # set both passwords
+scripts/run-all.sh                 # postgres, server and controller
+scripts/run-all.sh server          # the API, plus the database and init
+scripts/run-all.sh controller      # the manager, plus the database and init
+scripts/stop-all.sh                # stop the project; volumes stay
 scripts/stop-all.sh server         # only the server (also: controller)
 ```
 
-Logs go to `run/logs/` and are echoed to the console; Ctrl-C stops both processes and every device process. `scripts/stop-all.sh` sends the same SIGTERM from another terminal. PostgreSQL keeps running. The first HTTPS start generates the self-signed certificate `run/keys/tls.crt`. On the first start with both processes the seed devices enroll: the controller starts their processes, they publish a CSR on `pgdemo/worker/security/csr`, the server signs it, and the devices appear a second later. Each device's key and certificate are in `run/devices/NAME/`. A second controller on the same machine exits because the first holds `run/devices/.controller.lock`. `PGDEMO_MAX_DEVICES` (default 16) bounds how many device processes run. `run-all.sh` sources `/opt/ros/lyrical/setup.bash` when it is installed.
+Compose publishes the server's HTTPS port 8443 on `127.0.0.1:8080`. Ctrl-C stops the containers that are attached. `scripts/stop-all.sh` sends the same stop from another terminal. The first start generates `run/keys/tls.crt` inside the server's volume. The controller then starts a process per seed device, inside its own container; each one publishes a CSR, the server signs it, and the device appears a second later. Keys live in the `device-keys` volume, not on the host. `PGDEMO_MAX_DEVICES` (default 16) bounds how many of those processes run. The host `build/` tree is for the tests; this stack builds its own image.
 
-In another terminal, the client talks to the same scheme. Without options it calls `https://127.0.0.1:8443` and trusts `run/keys/tls.crt`; `--http`, always the first argument, switches it to `http://127.0.0.1:8080`:
+In another terminal, point the client at the published port and at the certificate copied out of the server container:
 
 ```bash
-. run/demo.env
+mkdir -p run
+docker compose -f docker/operational/compose.yaml --env-file docker/operational/.env \
+    cp server:/app/run/keys/tls.crt run/docker-tls.crt
+export PGDEMO_URL=https://127.0.0.1:8080 PGDEMO_CA=run/docker-tls.crt
+. docker/operational/.env
 PGDEMO_PASSWORD="$DEMO_ADMIN_PASSWORD" client/pgdemo.sh login admin
 client/pgdemo.sh health
-# server started with --http:
-PGDEMO_PASSWORD="$DEMO_ADMIN_PASSWORD" client/pgdemo.sh --http login admin
-client/pgdemo.sh --http health
 
 client/pgdemo.sh devices                      # every device and its last sample
 client/pgdemo.sh monitor                      # live events, including the dummy3 GPS track
@@ -145,21 +147,13 @@ client/pgdemo.sh users list                   # 403: normal users cannot manage 
 
 Stop the controller and post a configuration: the API answers `202` with the request still `PENDING` in the queue. Start the controller again and it applies the request at start-up. The queue table, not the notification, is the source of truth.
 
-## Quick start (Docker)
+## Two compose projects
 
-```bash
-cp docker/.env.example docker/.env            # set both passwords
-docker compose -f docker/compose.yaml --env-file docker/.env up --build
-mkdir -p run && docker compose -f docker/compose.yaml --env-file docker/.env cp server:/app/run/keys/tls.crt run/docker-tls.crt
-export PGDEMO_URL=https://127.0.0.1:8080 PGDEMO_CA=run/docker-tls.crt
-. docker/.env && PGDEMO_PASSWORD="$DEMO_ADMIN_PASSWORD" client/pgdemo.sh login admin
-```
-
-Inside its container the server listens on HTTPS port 8443, like `scripts/run-all.sh`; compose publishes it on `127.0.0.1:8080` only. `PGDEMO_URL` and `PGDEMO_CA` point the client at that address and at the container's certificate. The server sits on `zone_a` (172.28.10.0/24). The controller sits on `zone_b` (172.28.20.0/24, `internal`, no outbound route), with its device processes in the same container. PostgreSQL is attached to both zones and is the only path between them. The end-to-end suite checks that the controller cannot open a TCP connection to the server. The CA key lives in the `ca-keys` volume, mounted only by `init` and `server`; the device keys live in `device-keys`, mounted only by `controller`.
+[docker/README.md](docker/README.md) is the layout: one image, PostgreSQL, the server and the controller, and the two zones. [`docker/operational`](docker/operational) is the project `scripts/run-all.sh` starts. [`docker/e2e`](docker/e2e) is the throwaway project the end-to-end suite uses. They cannot run at the same time.
 
 ## Control panel
 
-The server also serves a web control panel on the same origin as the API: `https://127.0.0.1:8443/` with `scripts/run-all.sh`, `http://127.0.0.1:8080/` with `--http`, and `https://127.0.0.1:8080/` from Docker. It opens on a login page; every user gets the visualization tabs (devices live over SSE, detail with chart and history, configuration, GPS map, PKI and CRL, events, system, and a read-only Histórico of samples, applied configuration, enrollments and revocations), and the `admin` user also gets an amber administration panel to enroll and delete devices, revoke, suspend and rotate certificates, change configurations and manage users.
+The server also serves a web control panel on the same origin as the API: `https://127.0.0.1:8080/` from the operational stack. It opens on a login page; every user gets the visualization tabs (devices live over SSE, detail with chart and history, configuration, GPS map, PKI and CRL, events, system, and a read-only Histórico of samples, applied configuration, enrollments and revocations), and the `admin` user also gets an amber administration panel to enroll and delete devices, revoke, suspend and rotate certificates, change configurations and manage users.
 
 ![Dispositivos](frontend/docs/screens/devices.png)
 
@@ -174,7 +168,7 @@ scripts/fetch-webroot.sh                     # the panel CI built and tested on 
 (cd frontend && pnpm install && pnpm build)  # or build it, with your copy of Catalyst
 ```
 
-`scripts/run-all.sh` passes `--webroot webroot` when `webroot/index.html` exists and logs `panel: N files from …`; otherwise it warns "panel no disponible" and the server runs the API alone. [frontend/README.md](frontend/README.md) covers development, the design, the role model and every screen.
+The image copies `webroot/`. The entrypoint passes `--webroot` when `index.html` is there and otherwise warns "panel no disponible", and the server runs the API alone. Fill `webroot/` before `scripts/run-all.sh`, because that command builds the image. [frontend/README.md](frontend/README.md) covers development, the design, the role model and every screen.
 
 ## TLS
 
@@ -203,14 +197,7 @@ tshark -r data/https.pcapng -o tls.keylog_file:data/https.keylog -Y http
 tshark -r data/http.pcapng -Y http
 ```
 
-Regenerate them with `scripts/capture.sh`. It needs `dumpcap`, so your user has to be in the `wireshark` group, and `tshark` (`sudo apt install tshark`). Run it against a server already started in the matching mode:
-
-```bash
-scripts/run-all.sh            # terminal 1
-scripts/capture.sh https      # terminal 2, then Ctrl-C in terminal 1
-scripts/run-all.sh --http     # terminal 1
-scripts/capture.sh http       # terminal 2
-```
+Regenerate them with `scripts/capture.sh`. It needs `dumpcap`, so your user has to be in the `wireshark` group, and `tshark` (`sudo apt install tshark`). `https` records a server on `127.0.0.1:8443` and `http` records plain HTTP on `127.0.0.1:8080`. The operational stack publishes HTTPS on `127.0.0.1:8080`, so it is not either of those listeners.
 
 ## HTTPS API
 

@@ -1,0 +1,8 @@
+# The stack that stays. Volumes survive `stop`. `down -v` is what removes them.
+#
+#   docker compose -f docker/operational/compose.yaml --env-file docker/operational/.env up --build
+
+name: pgdemo
+
+include:
+  - path: ../compose.yaml

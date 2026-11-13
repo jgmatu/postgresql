@@ -3,10 +3,11 @@
 #
 # Usage: scripts/capture.sh https|http
 #
-#   https   server from scripts/run-all.sh          (port 8443, TLS 1.3)
+#   https   a TLS 1.3 server on 127.0.0.1:8443
 #           writes data/https.pcapng, data/https.keylog, data/https-summary.txt
-#   http    server from scripts/run-all.sh --http   (port 8080, plain)
+#   http    a plain server on 127.0.0.1:8080
 #           writes data/http.pcapng, data/http-summary.txt
+# The operational stack publishes HTTPS on 127.0.0.1:8080, so it is neither.
 #
 # The captured calls log in as a throwaway user (capture / capture-demo), so the
 # files hold no real password. The admin calls that create and delete that user
@@ -41,7 +42,7 @@ command -v tshark >/dev/null || die "tshark not found (apt install tshark)"
 source "${ROOT}/run/demo.env"
 
 curl -sf --cacert "${CA}" -o /dev/null "${URL}/api/health" ||
-    die "no server on ${URL}; start scripts/run-all.sh$([[ ${MODE} == http ]] && echo ' --http')"
+    die "no server on ${URL}"
 
 PCAP="${DATA}/${MODE}.pcapng"
 KEYLOG="${DATA}/${MODE}.keylog"

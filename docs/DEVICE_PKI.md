@@ -305,7 +305,7 @@ client/pgdemo.sh pki crl | openssl crl -noout -text   # the superseded serial is
 
 `scripts/db-init.sh` runs [`scripts/gen-device-ca.sh`](../scripts/gen-device-ca.sh) when `run/ca/` has no CA: a P-384 key and a self-signed certificate with `basicConstraints=critical,CA:TRUE,pathlen:0` and `keyUsage=critical,keyCertSign,cRLSign`, valid ten years. It then inserts the certificate into `root_ca`. `PGDEMO_CA_DIR` moves the directory.
 
-`scripts/run-all.sh` passes `--ca-key run/ca/ca.key --ca-cert run/ca/ca.crt` to the server, which warns at start-up if that CA is not an active `root_ca`. The controller gets `--device-bin build/device/pgdemo-device --devices-dir run/devices --max-devices ${PGDEMO_MAX_DEVICES:-16}`.
+`docker/entrypoint.sh` passes `--ca-key /app/run/ca/ca.key --ca-cert /app/run/ca/ca.crt` to the server, which warns at start-up if that CA is not an active `root_ca`. The controller gets `--device-bin /app/build/device/pgdemo-device --devices-dir /app/run/devices --max-devices ${PGDEMO_MAX_DEVICES:-16}`.
 
 | Path | Contents |
 |---|---|

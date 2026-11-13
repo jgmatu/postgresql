@@ -16,7 +16,7 @@ A single-page app for the pgdemo API: a login screen, a **visualization panel** 
 | --- | --- |
 | Node.js 22 and pnpm 10 (`corepack enable` picks the version in `package.json`) | everything below |
 | Your copy of the Catalyst UI kit (Tailwind Plus licence) | `pnpm dev` and `pnpm build` |
-| The API running (`scripts/run-all.sh --http`) | `pnpm dev` |
+| The API running | `pnpm dev` |
 
 Catalyst is licensed, so its sources are **not** in this public repository. `pnpm dev` and `pnpm build` first run [`scripts/setup-catalyst.sh`](scripts/setup-catalyst.sh), which copies the kit's `typescript/*.tsx` into `src/components/catalyst/` (gitignored) and puts our [`catalyst-overrides/link.tsx`](catalyst-overrides/link.tsx) over the kit's version, so Catalyst links go through `next/link`. It reads the kit from `CATALYST_DIR`, or from `~/management-sensors/frontend/private/catalyst-ui-kit/typescript` by default.
 
@@ -26,13 +26,13 @@ pnpm install
 CATALYST_DIR=/path/to/catalyst-ui-kit/typescript pnpm dev    # http://localhost:3000
 ```
 
-`pnpm dev` proxies `/api/*` to `PGDEMO_API` (default `http://127.0.0.1:8080`, the API of `scripts/run-all.sh --http`), so the browser still sees one origin. Compression is off in development: gzip would buffer the SSE stream.
+`pnpm dev` proxies `/api/*` to `PGDEMO_API` (default `http://127.0.0.1:8080`), so the browser still sees one origin. The operational stack speaks HTTPS on that port, so point `PGDEMO_API` at `https://127.0.0.1:8080` and trust its certificate. Compression is off in development: gzip would buffer the SSE stream.
 
 ```bash
 pnpm build      # next build, then scripts/export-webroot.sh
 ```
 
-`next build` writes the static export to `out/`; `postbuild` ([`scripts/export-webroot.sh`](scripts/export-webroot.sh)) refuses an export with source maps or with the kit's module source text in it, copies it to `../webroot/` and writes `webroot/VERSION` (commit, `-dirty` if `frontend/` has changes, and build time). `scripts/run-all.sh` and the Docker image serve `webroot/` when it has an `index.html`:
+`next build` writes the static export to `out/`; `postbuild` ([`scripts/export-webroot.sh`](scripts/export-webroot.sh)) refuses an export with source maps or with the kit's module source text in it, copies it to `../webroot/` and writes `webroot/VERSION` (commit, `-dirty` if `frontend/` has changes, and build time). The operational image serves `webroot/` when it has an `index.html`:
 
 ```text
 [server] panel: 107 files from /…/webroot (1829 KiB), commit=cb2cc4118ce1 built_at=2026-11-09T22:01:25Z

@@ -3,8 +3,10 @@
 #
 # Usage: client/pgdemo.sh [--http] <command> [args]
 #
-#   (default)  https://127.0.0.1:8443, TLS 1.3   server started with scripts/run-all.sh
-#   --http     http://127.0.0.1:8080, plain     server started with scripts/run-all.sh --http
+#   (default)  https://127.0.0.1:8443, TLS 1.3
+#   --http     http://127.0.0.1:8080, plain
+# The operational stack publishes HTTPS on 127.0.0.1:8080. Point PGDEMO_URL and
+# PGDEMO_CA at it; see the repository README.
 #
 #   login [USER]                      password from $PGDEMO_PASSWORD or a prompt
 #   logout

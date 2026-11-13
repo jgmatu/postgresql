@@ -9,12 +9,11 @@
 # keys (device-keys) only by controller. Device traffic stays inside that
 # container: the children publish on the controller's ROS domain.
 #
-# Usage (from the repository root):
-#   cp docker/.env.example docker/.env      # then set real passwords
-#   docker compose -f docker/compose.yaml --env-file docker/.env up --build
-#   PGDEMO_PASSWORD=<DEMO_ADMIN_PASSWORD> client/pgdemo.sh login admin
-
-name: pgdemo
+# This file has no project name. docker/operational and docker/e2e include it
+# and each one names its own project, so their volumes stay apart. The subnets
+# and the published port are the same, so the two projects cannot run together.
+#
+# Usage is scripts/run-all.sh, which selects docker/operational.
 
 x-app: &app
   build:
@@ -27,7 +26,7 @@ services:
   postgres:
     image: postgis/postgis:18-3.7
     environment:
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in docker/.env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
     volumes:
       - pgdata:/var/lib/postgresql
     healthcheck:
@@ -54,7 +53,7 @@ services:
       PGPASSWORD: ${POSTGRES_PASSWORD}
       PGDEMO_PGHOST: postgres
       PGDEMO_PGPORT: "5432"
-      DEMO_ADMIN_PASSWORD: ${DEMO_ADMIN_PASSWORD:?set DEMO_ADMIN_PASSWORD in docker/.env}
+      DEMO_ADMIN_PASSWORD: ${DEMO_ADMIN_PASSWORD:?set DEMO_ADMIN_PASSWORD}
     depends_on:
       postgres:
         condition: service_healthy
@@ -63,7 +62,8 @@ services:
 
   server:
     <<: *app
-    command: ["scripts/run-all.sh", "server"]
+    entrypoint: ["/app/entrypoint.sh"]
+    command: ["server"]
     volumes:
       - demo-run:/app/run
       - ca-keys:/app/run/ca
@@ -81,7 +81,8 @@ services:
 
   controller:
     <<: *app
-    command: ["scripts/run-all.sh", "controller"]
+    entrypoint: ["/app/entrypoint.sh"]
+    command: ["controller"]
     volumes:
       - demo-run:/app/run
       - device-keys:/app/run/devices

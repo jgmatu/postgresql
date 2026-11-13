@@ -12,7 +12,7 @@ Library           LiveProcess.py
 *** Variables ***
 ${ROOT}               ${{ os.path.normpath(os.path.join(r'${CURDIR}', '..', '..', '..')) }}
 ${PROJECT}            pgdemo-e2e
-${COMPOSE_FILE}       ${ROOT}${/}docker${/}compose.yaml
+${COMPOSE_FILE}       ${ROOT}${/}docker${/}e2e${/}compose.yaml
 # Under the repository, not /tmp: a snap-packaged docker CLI cannot see the host /tmp.
 ${WORK}               ${ROOT}${/}run${/}e2e
 ${ENV_FILE}           ${WORK}${/}compose.env
@@ -79,10 +79,15 @@ Stop Services
     Compose    stop    @{services}
 
 Copy Service Logs
-    [Documentation]    ``run/logs`` lives in the ``demo-run`` volume shared by server and controller.
+    [Documentation]    The binary is the container process, so its log is ``docker compose logs``.
+    ...                That still works after ``compose stop``.
     [Arguments]    ${destination}
     Remove Directory    ${destination}    recursive=True
-    Compose    cp    server:/app/run/logs    ${destination}
+    Create Directory    ${destination}
+    ${server}=    Compose    logs    --no-color    server
+    Create File    ${destination}${/}server.log    ${server.stdout}${server.stderr}
+    ${controller}=    Compose    logs    --no-color    controller
+    Create File    ${destination}${/}controller.log    ${controller.stdout}${controller.stderr}
 
 Destroy Stack
     ${result}=    Run Compose    logs    --no-color

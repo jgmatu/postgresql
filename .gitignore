@@ -6,6 +6,7 @@ compile_commands.json
 # Runtime state: JWT keys, generated passwords, logs, pid files
 /run/
 /docker/.env
+/docker/operational/.env
 
 # Control panel: dependencies, Next build output, the licensed Catalyst kit
 # (copied in by frontend/scripts/setup-catalyst.sh), and the built panel, which
