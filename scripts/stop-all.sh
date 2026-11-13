@@ -27,6 +27,15 @@ if [[ ! -f "${ENV_FILE}" ]]; then
     printf '[stop-all] ERROR: %s not found; copy docker/operational/.env.example and set both passwords\n' "${ENV_FILE}" >&2
     exit 1
 fi
+# shellcheck disable=SC1090
+set -a
+source "${ENV_FILE}"
+set +a
+if [[ -z "${POSTGRES_PASSWORD:-}" || -z "${DEMO_ADMIN_PASSWORD:-}" ]]; then
+    printf '[stop-all] ERROR: %s must set POSTGRES_PASSWORD and DEMO_ADMIN_PASSWORD\n' "${ENV_FILE}" >&2
+    printf '[stop-all] copy docker/operational/.env.example. This file is not run/demo.env\n' >&2
+    exit 1
+fi
 
 args=(docker compose -f "${COMPOSE_FILE}" --env-file "${ENV_FILE}" stop)
 if [[ "${WHAT}" != all ]]; then
