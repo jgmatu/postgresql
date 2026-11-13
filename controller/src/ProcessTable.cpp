@@ -28,6 +28,11 @@ constexpr auto kHelloTimeout = 5s;
 /// A process online for this long resets the restart backoff.
 constexpr auto kStableAfter = 60s;
 
+bool launched(const ProcessTable::Slot& slot)
+{
+    return slot.pid != 0 || !slot.container.empty();
+}
+
 std::string describe_status(int status)
 {
     if (WIFEXITED(status)) return std::format("exit {}", WEXITSTATUS(status));
@@ -40,6 +45,7 @@ std::string describe_status(int status)
 ProcessTable::ProcessTable(db::DatabaseManager& db, TelemetryWriter& writer, FleetOptions opts, Downlink downlink)
     : db_(db), writer_(writer), opts_(std::move(opts)), downlink_(std::move(downlink))
 {
+    if (opts_.docker_spawn) docker_ = std::make_unique<DockerEngine>();
 }
 
 ProcessTable::~ProcessTable()
@@ -129,7 +135,7 @@ void ProcessTable::apply_enrollment(const db::Enrollment& e)
     s->failures = 0;
     log::info(kLog, std::format("{}: {} request {} from {}", e.name, e.kind, e.request_id, e.requested_by));
 
-    if (s->pid != 0)
+    if (launched(*s))
     {
         stop_process(*s, e.kind == "ENROLL" ? "re-enrolling" : "rotating key");
         return;
@@ -153,7 +159,7 @@ void ProcessTable::apply_device(const db::Device& d)
 
     if (!d.active())
     {
-        if ((s.pid != 0 || s.session) && s.running == Launch::Run) stop_process(s, "identity " + d.identity);
+        if ((launched(s) || s.session) && s.running == Launch::Run) stop_process(s, "identity " + d.identity);
         set_state(s, "DISABLED", "identity " + d.identity);
         return;
     }
@@ -163,7 +169,7 @@ void ProcessTable::apply_device(const db::Device& d)
         s.wanted = true;
         s.failures = 0;
     }
-    if (s.pid == 0) reconcile(s);
+    if (!launched(s)) reconcile(s);
 }
 
 void ProcessTable::remove_device(const std::string& name)
@@ -173,7 +179,7 @@ void ProcessTable::remove_device(const std::string& name)
     log::info(kLog, std::format("{}: device deleted", name));
     s->removed = true;
     s->wanted = false;
-    if (s->pid != 0 || s->session) stop_process(*s, "device deleted");
+    if (launched(*s) || s->session) stop_process(*s, "device deleted");
     else
     {
         forget(*s);
@@ -195,7 +201,7 @@ void ProcessTable::reconcile(Slot& slot)
         }
     }
     Slot* s = find(name);
-    if (s == nullptr || s->pid != 0 || s->session) return;
+    if (s == nullptr || launched(*s) || s->session) return;
     if (s->next == Launch::Run)
     {
         if (!s->device) return;
@@ -236,6 +242,65 @@ void ProcessTable::reconcile_all()
 
 void ProcessTable::start_process(Slot& s)
 {
+    const std::string request = s.next_request != 0 ? std::format(", request {}", s.next_request) : "";
+    if (opts_.docker_spawn)
+    {
+        try
+        {
+            if (!docker_) throw std::runtime_error("docker spawn is not configured");
+            const std::string volume = "pgdemo_puf_" + s.name;
+            const std::string container = "pgdemo-worker-" + s.name;
+            docker_->ensure_volume(volume);
+            std::vector<std::string> cmd{"device",
+                                         "--name",
+                                         s.name,
+                                         "--type",
+                                         s.type_id,
+                                         "--payload",
+                                         std::string(db::payload_name(s.payload)),
+                                         "--dir",
+                                         "/var/lib/pgdemo/puf/device",
+                                         "--puf-dir",
+                                         "/var/lib/pgdemo/puf"};
+            if (s.next != Launch::Run)
+            {
+                cmd.push_back(s.next == Launch::Enroll ? "--enroll" : "--rotate");
+                cmd.push_back(std::to_string(s.next_request));
+            }
+            std::vector<std::string> binds{volume + ":/var/lib/pgdemo/puf"};
+            if (!opts_.factory_addr.empty())
+            {
+                cmd.insert(cmd.end(), {"--factory", opts_.factory_addr, "--factory-root", "/run/factory-cert/root.crt"});
+                binds.push_back(opts_.factory_cert_volume + ":/run/factory-cert:ro");
+            }
+            if (!opts_.manager_cert.empty())
+            {
+                cmd.insert(cmd.end(), {"--manager-cert", "/run/manager.crt"});
+                binds.push_back(docker_->mountpoint(opts_.manager_volume) + "/manager.crt:/run/manager.crt:ro");
+            }
+            docker_->run(container, opts_.docker_image, cmd,
+                         {"ROS_LOG_DIR=/tmp/ros-log", "ROS_AUTOMATIC_DISCOVERY_RANGE=SUBNET",
+                          "ROS_STATIC_PEERS=" + opts_.docker_peer, "LD_LIBRARY_PATH=/app/lib"},
+                         binds, opts_.docker_network, opts_.docker_factory_network);
+            s.container = container;
+            s.pid = 0;
+        }
+        catch (const std::exception& e)
+        {
+            log::error(kLog, std::format("{}: cannot start container: {}", s.name, e.what()));
+            set_state(s, "OFFLINE", e.what());
+            schedule_restart(s, 30s);
+            return;
+        }
+        s.running = s.next;
+        s.running_request = s.next_request;
+        s.stopping = false;
+        s.hello_by = Clock::now() + 30s;
+        log::info(kLog, std::format("{}: container {} started ({}{})", s.name, s.container, launch_name(s.running), request));
+        set_state(s, "STARTING");
+        return;
+    }
+
     const fs::path dir = opts_.devices_dir / s.name;
     std::vector<std::string> argv{opts_.device_bin,
                                   "--name",
@@ -286,19 +351,36 @@ void ProcessTable::start_process(Slot& s)
     }
     pids_[pid] = s.name;
     s.pid = pid;
+    s.container.clear();
     s.running = s.next;
     s.running_request = s.next_request;
     s.stopping = false;
     s.hello_by = Clock::now() + kHelloTimeout;
-    log::info(kLog, std::format("{}: process {} started ({}{})", s.name, pid, launch_name(s.running),
-                                s.running_request != 0 ? std::format(", request {}", s.running_request) : ""));
+    log::info(kLog, std::format("{}: process {} started ({}{})", s.name, pid, launch_name(s.running), request));
     set_state(s, "STARTING");
 }
 
 void ProcessTable::stop_process(Slot& s, const std::string& reason)
 {
-    if (s.pid == 0 && !s.session) return;
+    if (!launched(s) && !s.session) return;
     if (s.session) s.session->send_bye(reason);
+    if (!s.container.empty())
+    {
+        s.stopping = true;
+        log::info(kLog, std::format("{}: stopping container {} ({})", s.name, s.container, reason));
+        if (docker_)
+        {
+            try
+            {
+                docker_->stop(s.container);
+            }
+            catch (const std::exception& e)
+            {
+                log::error(kLog, std::format("{}: cannot stop {}: {}", s.name, s.container, e.what()));
+            }
+        }
+        return;
+    }
     if (s.pid == 0)
     {
         log::info(kLog, std::format("{}: releasing node ({})", s.name, reason));
@@ -313,6 +395,32 @@ void ProcessTable::stop_process(Slot& s, const std::string& reason)
 
 void ProcessTable::reap()
 {
+    if (docker_)
+    {
+        std::vector<std::string> gone;
+        for (const auto& [name, slot] : slots_)
+        {
+            if (slot.container.empty()) continue;
+            try
+            {
+                if (!docker_->running(slot.container)) gone.push_back(name);
+            }
+            catch (const std::exception& e)
+            {
+                log::warn(kLog, std::format("{}: cannot inspect {}: {}", name, slot.container, e.what()));
+            }
+        }
+        for (const auto& name : gone)
+        {
+            Slot* s = find(name);
+            if (s == nullptr || s->container.empty()) continue;
+            const int code = docker_->exit_code(s->container);
+            const std::string how = std::format("exit {}", code);
+            (code == 0 || s->stopping ? log::info : log::warn)(
+                kLog, std::format("{}: container {} ended ({})", name, s->container, how));
+            note_stopped(*s, how, code == 0);
+        }
+    }
     for (;;)
     {
         int status = 0;
@@ -332,11 +440,22 @@ void ProcessTable::poll(Clock::time_point now, const std::function<void(const st
         if (shutting_down_) return;
         Slot* s = find(name);
         if (s == nullptr) continue;
-        if (s->pid != 0 && !s->session && s->hello_by && now >= *s->hello_by)
+        if (launched(*s) && !s->session && s->hello_by && now >= *s->hello_by)
         {
-            log::warn(kLog, name + ": no hello; killing process " + std::to_string(s->pid));
-            ::kill(s->pid, SIGKILL);
+            log::warn(kLog, name + ": no hello; stopping it");
             s->hello_by.reset();
+            if (!s->container.empty() && docker_)
+            {
+                try
+                {
+                    docker_->stop(s->container);
+                }
+                catch (const std::exception& e)
+                {
+                    log::error(kLog, name + ": cannot stop " + s->container + ": " + e.what());
+                }
+            }
+            else if (s->pid != 0) ::kill(s->pid, SIGKILL);
         }
         if (between) between(name);
         s = find(name);
@@ -352,13 +471,17 @@ void ProcessTable::poll(Clock::time_point now, const std::function<void(const st
 void ProcessTable::shutdown_children()
 {
     for (auto& [name, s] : slots_)
-        if (s.pid != 0 || s.session) stop_process(s, "controller stopping");
+        if (launched(s) || s.session) stop_process(s, "controller stopping");
 
     const auto deadline = Clock::now() + 5s;
-    while (!pids_.empty() && Clock::now() < deadline)
+    const auto pending = [&] {
+        return !pids_.empty() ||
+               std::ranges::any_of(slots_, [](const auto& kv) { return !kv.second.container.empty(); });
+    };
+    while (pending() && Clock::now() < deadline)
     {
         reap();
-        if (!pids_.empty()) std::this_thread::sleep_for(100ms);
+        if (pending()) std::this_thread::sleep_for(100ms);
     }
     for (const auto& [pid, name] : pids_)
     {
@@ -370,6 +493,7 @@ void ProcessTable::shutdown_children()
     for (auto& [name, s] : slots_)
     {
         s.pid = 0;
+        s.container.clear();
         if (s.session) s.session->close();
         s.session.reset();
     }
@@ -387,49 +511,55 @@ void ProcessTable::on_exit(pid_t pid, int status)
     const std::string how = describe_status(status);
     const bool clean = WIFEXITED(status) && WEXITSTATUS(status) == 0;
     (clean || s->stopping ? log::info : log::warn)(kLog, std::format("{}: process {} ended ({})", name, pid, how));
-    s->pid = 0;
-    s->hello_by.reset();
-    if (s->session)
-    {
-        s->session->close();
-        s->session.reset();
-    }
-    if (s->running != Launch::Run && s->running_request != 0)
-    {
-        fail_enrollment(s->running_request, "DEVICE_EXITED",
-                        std::format("device process ended ({}) before its certificate was delivered", how));
-        if (s->next_request == s->running_request)
-        {
-            s->next = Launch::Run;
-            s->next_request = 0;
-        }
-        s->running_request = 0;
-    }
-    const bool stable = s->online_since != Clock::time_point{} && Clock::now() - s->online_since > kStableAfter;
-    s->online_since = {};
+    note_stopped(*s, how, clean);
+}
 
-    if (s->removed || (!s->device && s->next == Launch::Run))
+void ProcessTable::note_stopped(Slot& s, const std::string& how, bool clean)
+{
+    s.pid = 0;
+    s.container.clear();
+    s.hello_by.reset();
+    if (s.session)
     {
-        forget(*s);
+        s.session->close();
+        s.session.reset();
+    }
+    if (s.running != Launch::Run && s.running_request != 0)
+    {
+        fail_enrollment(s.running_request, "DEVICE_EXITED",
+                        std::format("device process ended ({}) before its certificate was delivered", how));
+        if (s.next_request == s.running_request)
+        {
+            s.next = Launch::Run;
+            s.next_request = 0;
+        }
+        s.running_request = 0;
+    }
+    const bool stable = s.online_since != Clock::time_point{} && Clock::now() - s.online_since > kStableAfter;
+    s.online_since = {};
+
+    if (s.removed || (!s.device && s.next == Launch::Run))
+    {
+        forget(s);
         reconcile_all();
         return;
     }
     if (shutting_down_) return;
-    if (s->state != "AUTH_FAILED" && s->state != "DISABLED")
-        set_state(*s, "OFFLINE", clean ? std::nullopt : std::optional<std::string>(how));
+    if (s.state != "AUTH_FAILED" && s.state != "DISABLED")
+        set_state(s, "OFFLINE", clean ? std::nullopt : std::optional<std::string>(how));
     else
-        set_state(*s, s->state, s->last_error);
+        set_state(s, s.state, s.last_error);
 
     std::chrono::seconds delay{0};
-    if (!s->stopping && s->next == Launch::Run)
+    if (!s.stopping && s.next == Launch::Run)
     {
-        if (stable) s->failures = 0;
-        delay = std::chrono::seconds(1 << std::min(s->failures, 5));
+        if (stable) s.failures = 0;
+        delay = std::chrono::seconds(1 << std::min(s.failures, 5));
         delay = std::min(delay, std::chrono::seconds(30));
-        ++s->failures;
+        ++s.failures;
     }
-    s->stopping = false;
-    schedule_restart(*s, delay);
+    s.stopping = false;
+    schedule_restart(s, delay);
     reconcile_all();
 }
 
@@ -506,7 +636,7 @@ ProcessTable::Slot* ProcessTable::find_by_id(int device_id)
 std::size_t ProcessTable::running() const
 {
     return static_cast<std::size_t>(
-        std::ranges::count_if(slots_, [](const auto& kv) { return kv.second.pid != 0 || kv.second.session != nullptr; }));
+        std::ranges::count_if(slots_, [](const auto& kv) { return launched(kv.second) || kv.second.session != nullptr; }));
 }
 
 } // namespace pgdemo::controller

@@ -2,11 +2,11 @@
 
 A small, complete reference architecture in which **PostgreSQL is the only channel between two processes that never talk to each other**. Tables are the persistent queue and the source of truth; triggers and `LISTEN/NOTIFY` make the exchange reactive; roles and grants enforce the same authorization as the HTTP API.
 
-The demo models a small IoT fleet of simulated devices. A device is a row of `device`, not a table, and each one runs as its own `pgdemo-device` process, supervised by the controller. Enrolling one through the API needs no schema change and no restart. Three devices are enrolled at the first start: `dummy1` (sine), `dummy2` (sawtooth) and `dummy3` (a GPS track stored with PostGIS). It covers:
+The demo models a small IoT fleet of simulated devices. A device is a row of `device`, not a table, and each one runs as its own worker, supervised by the controller. Enrolling one through the API needs no schema change and no restart. Three devices are enrolled at the first start: `dummy1` (sine), `dummy2` (sawtooth) and `dummy3` (a GPS track stored with PostGIS). It covers:
 
 - **Reactive IPC across network zones.** The server (zone A) and the controller (zone B) share no socket, no broker and no addresses. Each one only knows the database.
-- **Device identity by certificate.** Every device is bound to an X.509 certificate (ECDSA P-384) signed by an internal root CA. The device process generates its key and a CSR, the server signs it, and the database records it through one `SECURITY DEFINER` function. A device is never without a certificate and may have had several; deleting its current certificate deletes it; revoking it (CRL) takes it out of service without deleting it. See [docs/DEVICE_PKI.md](docs/DEVICE_PKI.md). A second origin, [factory/](factory), signs the workers and the two SROS2 policy templates when its key files already exist. The manager is its own root and signs the CRL. Those identity certificates are ECDSA-SHA256. The worker's key is derived from a simulated PUF and stays P-384.
-- **Supervised device processes.** The controller is the manager. It starts each device, a worker, with `fork` + `execve`, and the child does not inherit `ROS_SECURITY_*`. The worker publishes `pgdemo/worker/` and subscribes to `pgdemo/manager/`. When the factory files are absent it proves its key with the signed challenge. When they exist, SROS2 is the admission and the manager publishes a CRL that each worker checks. A worker is restarted with a backoff when it dies. A node started on another host in the same ROS domain is admitted the same way. Workers do not talk to each other or to the database. `--max-devices` bounds the fleet.
+- **Device identity by certificate.** Every device is bound to an X.509 certificate (ECDSA P-384). The demo CA signs the CSR the worker publishes, the server records it through one `SECURITY DEFINER` function, and that path is the enrollment in [docs/DEVICE_PKI.md](docs/DEVICE_PKI.md). A device is never without a certificate and may have had several; deleting its current certificate deletes it; revoking it (CRL) takes it out of service without deleting it. A second origin, [factory/](factory), signs the workers and the two SROS2 policy templates when its key files already exist. The manager is its own root and signs the CRL. Those identity certificates are ECDSA-SHA256. On the operational stack the worker writes a simulated PUF once, 32 bytes in a volume only that container mounts, and derives its P-384 key there. The factory and the controller see the certificate.
+- **Supervised workers.** The controller is the manager. On the operational stack it creates one container per device, and the private volume that holds that worker's PUF, through the Docker Engine API. The end-to-end stack still starts the worker with `fork` + `execve`, and that child does not inherit `ROS_SECURITY_*`. The worker publishes `pgdemo/worker/` and subscribes to `pgdemo/manager/`. When the factory files are absent it proves its key with the signed challenge. When they exist, SROS2 is the admission and the manager publishes a CRL that each worker checks. A worker is restarted with a backoff when it dies. A node started on another host in the same ROS domain is admitted the same way. Workers do not talk to each other or to the database. `--max-devices` bounds the fleet.
 - **Channel multiplexing on one connection.** One channel per payload shape, `telemetry_scalar`, `telemetry_gps`, `telemetry_xy` and `telemetry_xyz`, plus `device_events`, three enrollment channels and three control-plane channels, arrive on a single `LISTEN` socket, whatever the number of devices. A telemetry notification names the table; the server reads the new rows from `telemetry_read_cursor`. Every SSE event carries the device, and clients can filter by it.
 - **PostGIS.** GPS devices send an origin, a radius and a bearing; `ST_Project` builds the point, and the same point is appended to the monthly telemetry.
 - **Desired vs applied configuration.** An admin posts a desired configuration. The worker accepts or rejects it; the controller records that answer. The HTTP request waits for the outcome through a request-id **Dispatcher**, so a concurrent, synchronous API sits on top of an asynchronous queue.
@@ -29,7 +29,9 @@ flowchart LR
     end
     subgraph zoneB["zone B"]
         controller["pgdemo-controller<br/>supervisor + queue worker"]
+        workers["worker × N<br/>(one container per device)"]
         devices["pgdemo-device × N<br/>(one process per device)"]
+        puf[("PUF<br/>(seed per worker)")]
     end
 
     client -- "HTTPS + Bearer JWT" --> server
@@ -39,6 +41,9 @@ flowchart LR
     enrollment -. "NOTIFY enrollment_csr" .-> server
     server -- "sign, issue / revoke / DELETE" --> registry
     registry -. "NOTIFY device_events" .-> controller
+    controller -- "creates" --> workers
+    workers -- "runs" --> devices
+    workers -- "private volume" --> puf
     devices <-- "ROS 2: pgdemo/worker, pgdemo/manager" --> controller
     server -- "INSERT desired" --> queue
     queue -. "NOTIFY config_requested" .-> controller
@@ -49,7 +54,7 @@ flowchart LR
     server -- "SSE /api/stream" --> client
 ```
 
-Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design: sequence diagrams, the listener lifecycle, the Dispatcher, partitioning and the privilege matrix. [docs/DEVICE_PKI.md](docs/DEVICE_PKI.md) covers device identity: the CA, enrollment, rotation, revocation and the controller's supervision of device processes.
+Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design: sequence diagrams, the listener lifecycle, the Dispatcher, partitioning and the privilege matrix. [docs/DEVICE_PKI.md](docs/DEVICE_PKI.md) covers device identity: the CA, enrollment, rotation, revocation and the controller's supervision of the workers.
 
 ## Components
 
@@ -61,23 +66,23 @@ Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design: sequence diagr
 | [`libs/pki`](libs/pki) | Device PKI on Botan 3: `CertificateAuthority` (sign CSRs and a presented self-signed certificate, build the CRL, sign the fixed SROS2 policy), `DeviceKey` (P-384 key, CSR, and the same key from a 32-byte seed), `CertVerifier` (chain, subject, CRL, and the factory pair), and the challenge-response proof. |
 | [`msgs/`](msgs) | ROS 2 interface contract between the manager and its workers: one struct per topic, under `pgdemo/manager/` and `pgdemo/worker/`. [msgs/README.md](msgs/README.md) lists every topic, its publisher and its fields. |
 | [`server/`](server) | `pgdemo-server`: the REST API, the control panel and TLS. [server/README.md](server/README.md) is the route table, the panel's MVC and HTTPS with `oqsprovider`. |
-| [`controller/`](controller) | `pgdemo-controller`, the manager: one worker per device (`fork` + `execve`, ROS 2 topics, challenge-response, restart with backoff), a sample queue per node, and the configuration queue. When the factory key and the manager key already exist, SROS2 is the admission and the manager publishes its CRL. [controller/README.md](controller/README.md) is the lifecycle. |
+| [`controller/`](controller) | `pgdemo-controller`, the manager: one worker per device. The operational stack creates a container and a private PUF volume through the Docker API; the end-to-end stack uses `fork` + `execve`. ROS 2 topics, challenge-response, restart with backoff, a sample queue per node, and the configuration queue. When the factory certificate and the manager key already exist, SROS2 is the admission and the manager publishes its CRL. [controller/README.md](controller/README.md) is the lifecycle. |
 | [`factory/`](factory) | `pgdemo-factory`: the simulation root. A script creates `run/factory/root.key` first; the process signs a self-signed certificate and the two SROS2 policy templates, and returns a certificate for the same public key. [factory/README.md](factory/README.md). |
-| [`device/`](device) | `pgdemo-device`: generates its key and CSR, or derives the same key from `devices.puf`, proves its identity to the controller (challenge, or SROS2 when the factory certificate chains) and streams samples from its generator. [device/README.md](device/README.md). |
+| [`device/`](device) | `pgdemo-device`: one worker. On the operational stack it keeps its PUF seed in the private volume and asks the factory to sign the self-signed certificate before opening the node. A forked worker derives the same key from `devices.puf` when that file is passed. It proves its identity to the controller (challenge, or SROS2 when the factory certificate chains) and streams samples from its generator. [device/README.md](device/README.md). |
 | [`client/pgdemo.sh`](client/pgdemo.sh) | Command-line client: login, users, devices and certificates, PKI, telemetry, configuration, live monitor. |
 | [`frontend/`](frontend) | The control panel: Next.js 16 static export with Tailwind CSS v4 and Catalyst, a visualization panel for every role and an administration panel for admins. [frontend/README.md](frontend/README.md) covers its design, architecture and screens. |
 | [`webroot/`](webroot) | Where the built panel goes (`pnpm build` or `scripts/fetch-webroot.sh`) and what `pgdemo-server --webroot` serves; only its README is in git. |
 | [`scripts/`](scripts) | `db-init.sh`, `run-all.sh` (start the operational compose project), `stop-all.sh` (stop it), `fetch-webroot.sh` (download the built panel), `capture.sh` (network captures), key and certificate generation, including the device CA (`gen-device-ca.sh`) and the factory root (`gen-factory.sh`). |
 | [`data/`](data) | Network captures of the client over HTTPS and over plain HTTP. |
 | [`patches/`](patches) | libpqxx 8.0.0 patch that adds a truly blocking `wait_notification()`. |
-| [`docker/`](docker) | Virtualization: one image, three containers, two compose projects. [docker/README.md](docker/README.md). |
+| [`docker/`](docker) | Virtualization: one image and two compose projects. The operational project runs PostgreSQL, the server, the controller and the factory; the controller then creates one worker container per device. [docker/README.md](docker/README.md). |
 | [`tests/`](tests) | GoogleTest (auth, dispatcher, static files, database) and a Robot Framework end-to-end suite on docker compose, API and browser. |
 
 ## Quick start (Ubuntu 26.04)
 
 ```bash
 sudo apt install build-essential cmake ninja-build git pkg-config patch \
-    libpq-dev libbotan-3-dev libboost-json-dev libssl-dev libgtest-dev libgmock-dev \
+    libpq-dev libbotan-3-dev libboost-dev libboost-json-dev libssl-dev libgtest-dev libgmock-dev \
     postgresql-18 postgresql-18-postgis-3 postgresql-client curl jq openssl
 
 # ROS 2 Lyrical, from http://packages.ros.org/ros2/ubuntu (resolute). The
@@ -98,18 +103,18 @@ PGHOST=/var/run/postgresql scripts/db-init.sh       # add --reset to start over
 
 `db-init.sh` creates the roles and the `pgdemo` database, loads `sql/`, generates the device root CA in `run/ca/` (once) and registers it, queues the enrollment of the three seed devices, creates the API user `admin`, and writes generated passwords to `run/demo.env` (mode 0600, gitignored). A database created with an earlier schema needs `--reset`; it is not migrated. After a reset, also remove `run/devices/`: the device keys there belong to certificates the new database does not know. Database tests connect over TCP to `127.0.0.1:5432` with those passwords (`scram-sha-256` in the default Ubuntu `pg_hba.conf`).
 
-Start the demo with the operational project. It runs PostgreSQL, the server and the controller as three containers. The server and the controller each log in with their own role. `init` runs once and exits: it loads the schema, creates the device CA and writes `run/demo.env` inside the volume.
+Start the demo with the operational project. It runs PostgreSQL, the server, the controller and the factory. The server and the controller each log in with their own role. `init` runs once and exits: it loads the schema, creates the device CA and writes `run/demo.env` inside the volume.
 
 ```bash
 cp docker/operational/.env.example docker/operational/.env   # set both passwords
-scripts/run-all.sh                 # postgres, server and controller
+scripts/run-all.sh                 # postgres, server, controller and factory
 scripts/run-all.sh server          # the API, plus the database and init
-scripts/run-all.sh controller      # the manager, plus the database and init
+scripts/run-all.sh controller      # the manager and the factory, plus the database and init
 scripts/stop-all.sh                # stop the project; volumes stay
 scripts/stop-all.sh server         # only the server (also: controller)
 ```
 
-Compose publishes the server's HTTPS port 8443 on `127.0.0.1:8080`. Ctrl-C stops the containers that are attached. `scripts/stop-all.sh` sends the same stop from another terminal. The first start generates `run/keys/tls.crt` inside the server's volume. The controller then starts a process per seed device, inside its own container; each one publishes a CSR, the server signs it, and the device appears a second later. Keys live in the `device-keys` volume, not on the host. `PGDEMO_MAX_DEVICES` (default 16) bounds how many of those processes run. The host `build/` tree is for the tests; this stack builds its own image.
+Compose publishes the server's HTTPS port 8443 on `127.0.0.1:8080`. Ctrl-C stops the containers that are attached. `scripts/stop-all.sh` sends the same stop from another terminal. The first start generates `run/keys/tls.crt` inside the server's volume. The controller then creates one worker container per seed device. The worker writes its PUF seed in a volume only that container mounts, the factory signs its certificate, and the worker publishes the CSR the server signs. `device-keys` holds the controller lock. `PGDEMO_MAX_DEVICES` (default 16) bounds how many workers run. The host `build/` tree is for the tests; this stack builds its own image.
 
 In another terminal, point the client at the published port and at the certificate copied out of the server container:
 
@@ -134,7 +139,7 @@ client/pgdemo.sh monitor telemetry_scalar,device,config sensor-a &   # SSE for o
 client/pgdemo.sh devices add sensor-a sine    # admin; 201 once its certificate is issued
 client/pgdemo.sh data sensor-a                # last sample, identity, process and config sync state
 client/pgdemo.sh devices certs sensor-a       # every certificate it has had
-client/pgdemo.sh devices revoke sensor-a certificateHold   # suspended: the process stops
+client/pgdemo.sh devices revoke sensor-a certificateHold   # suspended: the worker stops
 client/pgdemo.sh devices unrevoke sensor-a    # back in service
 client/pgdemo.sh devices rotate sensor-a      # new key and certificate, the old one superseded
 client/pgdemo.sh pki crl | openssl crl -noout -text        # the signed CRL
@@ -149,7 +154,7 @@ Stop the controller and post a configuration: the API answers `202` with the req
 
 ## Two compose projects
 
-[docker/README.md](docker/README.md) is the layout: one image, PostgreSQL, the server and the controller, and the two zones. [`docker/operational`](docker/operational) is the project `scripts/run-all.sh` starts. [`docker/e2e`](docker/e2e) is the throwaway project the end-to-end suite uses. They cannot run at the same time.
+[docker/README.md](docker/README.md) is the layout: one image and two compose projects. [`docker/operational`](docker/operational) is the project `scripts/run-all.sh` starts. It runs PostgreSQL, the server, the controller and the factory, and the controller creates one worker container per device, with that worker's PUF volume. [`docker/e2e`](docker/e2e) is the throwaway project the end-to-end suite uses. It has no factory, and its workers are processes the controller forks. The two projects cannot run at the same time.
 
 ## Control panel
 
@@ -255,10 +260,9 @@ This is a demonstration of database architecture, not a product:
 - **Self-signed TLS.** The API is TLS 1.3 and binds to loopback by default. `run/keys/tls.crt` is the trust anchor; replace it before exposing the port.
 - **No reconnect.** If the listener connection drops, each process exits with status 1 so that a supervisor (compose `restart: unless-stopped`, systemd) restarts it. Queued work is not lost, because it lives in tables.
 - **Small payloads.** NOTIFY payloads are limited to 8000 bytes, and these stay well below that.
-- **One notification per history insert, one process per device.** A batch commits one `INSERT` and the statement trigger notifies once. Right for a handful of devices; [sql/README.md](sql/README.md#scaling-notes) explains what a real fleet would change.
+- **One notification per history insert, one worker per device.** A batch commits one `INSERT` and the statement trigger notifies once. Right for a handful of devices; [sql/README.md](sql/README.md#scaling-notes) explains what a real fleet would change.
 - **A root CA online.** The server signs device certificates with the root key itself, and the CRL is checked from the database rather than by OCSP. A real PKI keeps the root offline and issues from an intermediate.
 
 ## Licence
 
 MIT, see [LICENSE](LICENSE). The libpqxx patch follows the libpqxx BSD 3-Clause licence; see [patches/README.md](patches/README.md).
-# postgresql

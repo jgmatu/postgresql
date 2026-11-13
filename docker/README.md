@@ -46,7 +46,7 @@ flowchart LR
     controllerF --> factory
 ```
 
-`zone_b` and `zone_factory` are `internal: true`. The controller has no route to `zone_a`. The factory is not on `zone_a` or `zone_b`, and its port is not published, so the server and the host cannot open it. The process binds `0.0.0.0` inside that one network. Device traffic stays inside the controller container: the children publish on its ROS domain and ask the factory at `172.28.30.10:9443`. The host publishes one port, bound to loopback: `127.0.0.1:8080` forwards to the server's 8443. The end-to-end suite checks that the controller cannot open a TCP connection to the server and that it can open one to PostgreSQL on `172.28.20.10:5432`. The end-to-end project has no `zone_factory`.
+`zone_b` and `zone_factory` are `internal: true`. The controller has no route to `zone_a`. The factory is not on `zone_a` or `zone_b`, and its port is not published, so the server and the host cannot open it. The process binds `0.0.0.0` inside that one network. When `PGDEMO_DOCKER_SPAWN` is set, each worker is its own container on `zone_b` and `zone_factory`. It publishes on the ROS domain and asks the factory at `172.28.30.10:9443`. The bridge does not carry DDS multicast, so the worker lists the controller (`172.28.20.20`) as a static peer. The end-to-end project does not set that variable: its workers stay children of the controller. The host publishes one port, bound to loopback: `127.0.0.1:8080` forwards to the server's 8443. The end-to-end suite checks that the controller cannot open a TCP connection to the server and that it can open one to PostgreSQL on `172.28.20.10:5432`. The end-to-end project has no `zone_factory`.
 
 ## Volumes
 
@@ -94,6 +94,21 @@ flowchart LR
 | `factory-key` | `factory` | `root.key`. Nothing else mounts it |
 | `factory-cert` | `factory` writes it, `controller` reads it | `root.crt` only |
 | `manager-keys` | `controller` | the manager's own key and self-signed root |
+
+A worker container is not in the compose file. The controller creates it when an enrollment arrives, through the Docker Engine API on `/var/run/docker.sock`. Only the controller service mounts that socket. If the create fails with permission denied, set `DOCKER_GID` to the group of the socket (`stat -c %g /var/run/docker.sock`) and start again. The controller does not change the socket's owner.
+
+Each worker gets a volume `pgdemo_puf_<name>`, mounted only in that container at `/var/lib/pgdemo/puf`. The factory and the controller do not mount it. The seed file in that directory is written once by the worker. Stopping or recreating the container leaves the volume. The container also mounts the factory certificate and `manager.crt`, both read only. It does not receive `manager.key`.
+
+```mermaid
+flowchart LR
+  controller[controller]
+  worker[pgdemo-worker]
+  sock[("docker.sock")]
+  puf[("pgdemo_puf_name")]
+  controller -->|"/var/run/docker.sock"| sock
+  controller -->|"creates"| worker
+  worker -->|"/var/lib/pgdemo/puf"| puf
+```
 
 ## Operational stack
 

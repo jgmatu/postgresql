@@ -69,17 +69,20 @@ The node name replaces `.` and `-` in the device name with `_`.
 
 ## Simulated PUF
 
-`devices.puf` is one file, mode 0600, shared by the workers. The controller's default path is `run/devices/devices.puf`. A line is a `device_id` and 32 bytes of seed in hexadecimal. Writers take an exclusive lock, so several processes can append. A `device_id` with no line yet gets a seed, and that line is kept. The same `device_id` on the next start reads that line.
+A worker started as a container (`--puf-dir`) keeps a single seed file, `seed`, mode 0600, in that directory. The operational mount is `/var/lib/pgdemo/puf`, so the file is `/var/lib/pgdemo/puf/seed`. The first start writes 32 random bytes. A later start reads them. The factory and the controller do not mount the volume and do not learn the seed or the private key. What they receive is the certificate.
 
-`DeviceKey::from_seed` expands the seed with HKDF-SHA384, info `pgdemo/worker-key/v1`, to 64 bytes. The integer modulo `n - 1`, plus one, is the secp384r1 scalar, so the same seed is the same P-384 key. The ECDSA nonce stays random. The seed and the private key stay on the worker. What travels is a self-signed certificate.
+`devices.puf` remains the table used when the controller forks a worker and passes `--device-id` and `--puf`. The controller's default path is `run/devices/devices.puf`. A line is a `device_id` and 32 bytes of seed in hexadecimal. Writers take an exclusive lock. A `device_id` with no line yet gets a seed, and that line is kept. The end-to-end stack uses this path. It has no factory and no per-worker volume.
+
+`DeviceKey::from_seed` expands the seed with HKDF-SHA384, info `pgdemo/worker-key/v1`, to 64 bytes. The integer modulo `n - 1`, plus one, is the secp384r1 scalar, so the same seed is the same P-384 key. The ECDSA nonce stays random.
 
 Before the ROS node exists, and only when the flags are set:
 
-1. `--device-id` and `--puf`, and no `key.pem`: derive the key and save it, mode 0600. A `key.pem` already on disk is left alone, so a device enrolled with a CSR keeps that key.
-2. `--factory`, a key, and no `cert.pem`: send the self-signed certificate and store the one the factory returns.
-3. `--manager-cert` and `--factory-root`, and a `cert.pem` that chains to the factory root under this device's name: write the SROS2 enclave and export `ROS_SECURITY_*` before the node is created. `--manager-cert` must be the manager's own root: self-signed, `CA:TRUE`, CN `pgdemo-manager`, ECDSA-SHA256. `identity_ca.cert.pem` is the factory root followed by that root. `permissions_ca.cert.pem` is the factory root. A certificate from the demo CA does not chain. SROS2 stays off and the challenge continues, and a manager that already enforces SROS2 does not see that worker. If the factory is down while signing the governance and permissions, SROS2 stays off and the process continues.
+1. `--puf-dir`, and no `key.pem`: create or read `seed`, derive the key and save it, mode 0600. A `key.pem` already on disk is left alone.
+2. Otherwise `--device-id` and `--puf`, and no `key.pem`: derive the key from that table. A `key.pem` already on disk is left alone, so a device enrolled with a CSR keeps that key.
+3. `--factory`, a key, and no `cert.pem`: send the self-signed certificate and store the one the factory returns. The seed does not travel.
+4. `--manager-cert` and `--factory-root`, and a `cert.pem` that chains to the factory root under this device's name: write the SROS2 enclave and export `ROS_SECURITY_*` before the node is created. `--manager-cert` must be the manager's own root: self-signed, `CA:TRUE`, CN `pgdemo-manager`, ECDSA-SHA256. `identity_ca.cert.pem` is the factory root followed by that root. `permissions_ca.cert.pem` is the factory root. A certificate from the demo CA does not chain. SROS2 stays off and the challenge continues, and a manager that already enforces SROS2 does not see that worker. If the factory is down while signing the governance and permissions, SROS2 stays off and the process continues.
 
-The controller adds `--device-id` and `--puf` on a `Run` of a device that already has a row. `--factory`, `--factory-root` and `--manager-cert` go on every launch while the origin is up. An enrollment still generates its key with the CSR path. The child does not inherit the manager's `ROS_SECURITY_*`; it writes its own enclave.
+The controller adds `--device-id` and `--puf` on a forked `Run` of a device that already has a row. A container launch passes `--puf-dir` instead, including enrollments, so the key exists before the node. `--factory`, `--factory-root` and `--manager-cert` go on every launch while the origin is up. The signed PEM is published on `hello` so the controller can register it without reading the worker's volume. An enrollment still publishes the CSR afterwards, which is how the demo CA path completes. A forked child does not inherit the manager's `ROS_SECURITY_*`; it writes its own enclave. A container does the same inside its own filesystem.
 
 Once the node is up, `pgdemo/manager/security/crl` carries the list the manager signs. The message has no device name. The worker checks the signature with `--manager-cert`. Its own serial on that list exits `1`.
 

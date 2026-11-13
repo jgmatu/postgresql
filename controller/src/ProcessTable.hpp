@@ -14,8 +14,11 @@
 #include <db/DatabaseManager.hpp>
 #include <pgdemo_msgs/msg/hello.hpp>
 
+#include "DockerEngine.hpp"
 #include "Session.hpp"
 #include "TelemetryWriter.hpp"
+
+#include <memory>
 
 namespace pgdemo::controller {
 
@@ -34,6 +37,13 @@ struct FleetOptions
     std::string factory_fingerprint;                 ///< fingerprint of the factory root, for registration
     std::filesystem::path manager_cert;              ///< public manager certificate passed to workers
     std::string manager_key;                         ///< manager private key; empty skips the CRL publication
+    bool docker_spawn{false};                        ///< create a container per worker instead of forking
+    std::string docker_image{"pgdemo:latest"};
+    std::string docker_network{"pgdemo_zone_b"};
+    std::string docker_factory_network{"pgdemo_zone_factory"};
+    std::string docker_peer{"172.28.20.20"};         ///< controller address workers use for DDS discovery
+    std::string factory_cert_volume{"pgdemo_factory-cert"};
+    std::string manager_volume{"pgdemo_manager-keys"};
 };
 
 /// How a device process is started.
@@ -95,6 +105,7 @@ public:
         std::int64_t next_request{0}; ///< enrollment for `next` != Run
 
         pid_t pid{0};                     ///< running process, or 0
+        std::string container;            ///< engine container name, when docker_spawn started it
         Launch running{Launch::Run};      ///< how it was started
         std::int64_t running_request{0};  ///< its enrollment, until decided
         std::shared_ptr<Session> session; ///< its connection, once accepted
@@ -168,12 +179,14 @@ public:
 private:
     void start_process(Slot& slot);
     void on_exit(pid_t pid, int status);
+    void note_stopped(Slot& slot, const std::string& how, bool clean);
     void schedule_restart(Slot& slot, std::chrono::seconds delay);
     void db_write(std::string what, std::function<void()> fn);
 
     db::DatabaseManager& db_;
     TelemetryWriter& writer_;
     FleetOptions opts_;
+    std::unique_ptr<DockerEngine> docker_;
     Downlink downlink_;
     std::function<void(pgdemo_msgs::msg::Hello)> admit_;
     std::map<std::string, Slot> slots_;

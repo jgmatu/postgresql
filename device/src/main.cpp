@@ -43,6 +43,8 @@
 #include <sys/stat.h>
 
 #include <algorithm>
+#include <array>
+#include <cstdint>
 #include <chrono>
 #include <csignal>
 #include <filesystem>
@@ -82,6 +84,7 @@ void usage(std::ostream& out)
            "  --rotate    same, replacing the current key once the new certificate arrives\n"
            "  --device-id id stored in devices.puf; a missing id is created and reused\n"
            "  --puf       path of devices.puf\n"
+           "  --puf-dir   directory of this worker's seed file; created once and kept\n"
            "  --factory   HOST:PORT of the factory, used when cert.pem is absent\n"
            "  --factory-root  factory root certificate\n"
            "  --manager-cert  manager certificate used to verify its CRL\n";
@@ -97,6 +100,7 @@ struct Options
     std::int64_t request_id = 0;
     std::optional<std::int64_t> device_id;
     fs::path puf;
+    fs::path puf_dir;
     std::string factory;
     fs::path factory_root;
     fs::path manager_cert;
@@ -132,6 +136,7 @@ Options parse_args(int argc, char** argv)
         }
         else if (arg == "--device-id") o.device_id = std::stoll(value);
         else if (arg == "--puf") o.puf = value;
+        else if (arg == "--puf-dir") o.puf_dir = value;
         else if (arg == "--factory") o.factory = value;
         else if (arg == "--factory-root") o.factory_root = value;
         else if (arg == "--manager-cert") o.manager_cert = value;
@@ -176,13 +181,52 @@ std::pair<std::string, std::uint16_t> split_endpoint(const std::string& endpoint
     return {endpoint.substr(0, colon), static_cast<std::uint16_t>(std::stoi(endpoint.substr(colon + 1)))};
 }
 
-/// Derive the key from devices.puf when this worker has no key yet, and ask the
-/// factory for a certificate when cert.pem is absent. An existing key.pem stays.
+/// A private seed file stands in for the PUF. The first start writes it; later
+/// starts read the same bytes. The factory and the controller never see it.
+void ensure_seed(const fs::path& dir)
+{
+    fs::create_directories(dir);
+    ::chmod(dir.c_str(), 0700);
+    const fs::path seed_path = dir / "seed";
+    if (fs::is_regular_file(seed_path)) return;
+    const auto bytes = pki::random_bytes(32);
+    {
+        const fs::path tmp = seed_path.string() + ".tmp";
+        std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+        if (!out) throw std::runtime_error("cannot write " + tmp.string());
+        out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+        if (!out) throw std::runtime_error("cannot write " + tmp.string());
+    }
+    fs::rename(seed_path.string() + ".tmp", seed_path);
+    ::chmod(seed_path.c_str(), 0600);
+    log::info("device", "created the PUF seed");
+}
+
+std::array<std::uint8_t, 32> read_seed(const fs::path& path)
+{
+    std::ifstream in(path, std::ios::binary);
+    if (!in) throw std::runtime_error("cannot read " + path.string());
+    std::array<std::uint8_t, 32> seed{};
+    in.read(reinterpret_cast<char*>(seed.data()), static_cast<std::streamsize>(seed.size()));
+    if (in.gcount() != static_cast<std::streamsize>(seed.size()))
+        throw std::runtime_error("PUF seed is not 32 bytes");
+    return seed;
+}
+
+/// Derive the key from the private seed, or from devices.puf, when this worker
+/// has no key yet, and ask the factory for a certificate when cert.pem is absent.
+/// An existing key.pem stays.
 void prepare_identity(const Options& opts)
 {
     const fs::path key_path = opts.dir / "key.pem";
     const fs::path cert_path = opts.dir / "cert.pem";
-    if (opts.device_id && !opts.puf.empty() && !fs::exists(key_path))
+    if (!opts.puf_dir.empty() && !fs::exists(key_path))
+    {
+        ensure_seed(opts.puf_dir);
+        pki::DeviceKey::from_seed(read_seed(opts.puf_dir / "seed")).save(key_path.string());
+        log::info("device", opts.name + ": derived the key from its PUF seed");
+    }
+    else if (opts.device_id && !opts.puf.empty() && !fs::exists(key_path))
     {
         const auto seed = pki::PufTable(opts.puf).seed_for(*opts.device_id);
         pki::DeviceKey::from_seed(seed).save(key_path.string());
@@ -371,6 +415,7 @@ private:
         hello.device = opts_.name;
         hello.mode = mode_code(opts_.mode);
         hello.request_id = opts_.request_id;
+        if (fs::is_regular_file(cert_path())) hello.certificate = read_file(cert_path());
         hello_->publish(hello);
         // The CSR topic is volatile. Repeat the same request until the
         // certificate arrives, the way hello is repeated, so a subscriber that

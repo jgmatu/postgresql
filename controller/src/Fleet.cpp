@@ -270,16 +270,13 @@ void Fleet::shutdown()
     if (stop_) stop_();
 }
 
-bool Fleet::factory_listed(const std::string& name)
+bool Fleet::factory_listed(const std::string& name, const std::string& pem)
 {
     const auto& opts = table_.options();
-    if (opts.factory_root.empty() || opts.factory_fingerprint.empty()) return false;
-    const auto path = opts.devices_dir / name / "cert.pem";
-    if (!std::filesystem::is_regular_file(path)) return false;
+    if (pem.empty() || opts.factory_root.empty() || opts.factory_fingerprint.empty()) return false;
     try
     {
         const auto root = read_file(opts.factory_root);
-        const auto pem = read_file(path);
         const auto info = pki::CertVerifier({root}).verify(pem, name, {});
         if (!db_.register_factory_worker(info.subject_cn, opts.factory_fingerprint, info.serial, info.fingerprint,
                                          pki::format_time(info.not_before), pki::format_time(info.not_after), info.pem))
@@ -322,7 +319,7 @@ void Fleet::publish_crl()
 void Fleet::on_hello(pgdemo_msgs::msg::Hello hello)
 {
     if (table_.shutting_down()) return;
-    if (factory_listed(hello.device))
+    if (factory_listed(hello.device, hello.certificate))
     {
         table_.send_bye(hello.device, "revoked");
         return;

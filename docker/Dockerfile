@@ -10,7 +10,7 @@ ARG DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       build-essential cmake ninja-build git ca-certificates curl gnupg patch pkg-config \
-      libpq-dev libbotan-3-dev libboost-json-dev libssl-dev \
+      libpq-dev libbotan-3-dev libboost-dev libboost-json-dev libssl-dev \
  && curl -fsSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key \
       | gpg --dearmor -o /usr/share/keyrings/ros-archive-keyring.gpg \
  && . /etc/os-release \

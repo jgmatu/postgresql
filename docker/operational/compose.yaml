@@ -41,9 +41,19 @@ services:
       - device-keys:/app/run/devices
       - factory-cert:/app/run/factory-cert:ro
       - manager-keys:/app/run/controller
+      - /var/run/docker.sock:/var/run/docker.sock
+    group_add:
+      - "${DOCKER_GID:-999}"
     environment:
       PGDEMO_MAX_DEVICES: ${PGDEMO_MAX_DEVICES:-16}
       PGDEMO_FACTORY: 172.28.30.10:9443
+      PGDEMO_DOCKER_SPAWN: "1"
+      PGDEMO_DOCKER_IMAGE: pgdemo:latest
+      PGDEMO_DOCKER_NETWORK: pgdemo_zone_b
+      PGDEMO_DOCKER_FACTORY_NETWORK: pgdemo_zone_factory
+      PGDEMO_DOCKER_PEER: 172.28.20.20
+      PGDEMO_FACTORY_CERT_VOLUME: pgdemo_factory-cert
+      PGDEMO_MANAGER_VOLUME: pgdemo_manager-keys
     depends_on:
       init:
         condition: service_completed_successfully

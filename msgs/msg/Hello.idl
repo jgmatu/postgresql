@@ -9,6 +9,7 @@ module pgdemo_msgs {
       string device;
       octet mode;
       int64 request_id;
+      string certificate;
     };
   };
 };

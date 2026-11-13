@@ -1,6 +1,7 @@
 // pgdemo-controller: zone B process.
 //
-// Supervises one pgdemo-device worker per device (fork + execv). Each worker
+// Supervises one pgdemo-device worker per device. With PGDEMO_DOCKER_SPAWN it
+// is a container and a private volume; otherwise it is fork + execv. Each worker
 // publishes pgdemo/worker and subscribes to pgdemo/manager, and proves its
 // identity with its X.509 certificate. The controller is the only manager: it
 // writes samples to the data plane and applies desired configuration from the
@@ -134,6 +135,19 @@ int main(int argc, char** argv)
     try
     {
         opt = parse(argc, argv);
+        if (const char* spawn = std::getenv("PGDEMO_DOCKER_SPAWN"); spawn != nullptr && spawn[0] != '\0' && spawn[0] != '0')
+        {
+            opt.fleet.docker_spawn = true;
+            auto take = [](const char* name, std::string& dest) {
+                if (const char* value = std::getenv(name); value != nullptr && value[0] != '\0') dest = value;
+            };
+            take("PGDEMO_DOCKER_IMAGE", opt.fleet.docker_image);
+            take("PGDEMO_DOCKER_NETWORK", opt.fleet.docker_network);
+            take("PGDEMO_DOCKER_FACTORY_NETWORK", opt.fleet.docker_factory_network);
+            take("PGDEMO_DOCKER_PEER", opt.fleet.docker_peer);
+            take("PGDEMO_FACTORY_CERT_VOLUME", opt.fleet.factory_cert_volume);
+            take("PGDEMO_MANAGER_VOLUME", opt.fleet.manager_volume);
+        }
     }
     catch (const std::exception& e)
     {

@@ -114,7 +114,7 @@ private:
     std::chrono::steady_clock::time_point next_crl_{};
 
     /// Register a factory-signed worker certificate. Returns true when its serial is revoked.
-    bool factory_listed(const std::string& name);
+    bool factory_listed(const std::string& name, const std::string& pem);
     void publish_crl();
 };
 

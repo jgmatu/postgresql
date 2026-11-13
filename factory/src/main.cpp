@@ -8,8 +8,9 @@
 // 127.0.0.1. --listen opens another address; the container uses that on a
 // network the server is not attached to.
 
+#include "AsioServer.hpp"
+
 #include <pki/CertificateAuthority.hpp>
-#include <pki/FactoryChannel.hpp>
 
 #include <log/Log.hpp>
 
@@ -100,7 +101,7 @@ int main(int argc, char** argv)
         std::signal(SIGINT, on_signal);
         std::signal(SIGTERM, on_signal);
         log::info(kLog, "signing on " + opt.listen + ":" + std::to_string(opt.port) + " (" + ca.fingerprint() + ")");
-        pki::serve_factory(opt.port, ca, g_stop, nullptr, opt.listen);
+        pgdemo::factory::serve_factory_asio(opt.port, ca, g_stop, opt.listen);
         return 0;
     }
     catch (const std::exception& e)

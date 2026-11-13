@@ -37,7 +37,7 @@ The reply is a line `OK`, the PEM, and a line `.`. A refusal is one line `ERR` a
 
 Two more requests sign a fixed document, not a certificate. `SIGN governance` and `SIGN permissions NAME` carry the XML and end with a line `.`. The body must be exactly the governance template, or the permissions template whose subject is `CN=NAME`. Anything else is refused. The reply is `OK`, the PKCS#7 detached SMIME that SROS2 stores as `governance.p7s` or `permissions.p7s`, and a line `.`. `permissions_ca.cert.pem` is this `root.crt`. `identity_ca.cert.pem` is this root followed by the manager root. `root.key` is not copied into the keystore.
 
-The listener is `127.0.0.1`, so a controller in another zone does not gain a route to the key. A controller that cannot connect logs the failure and continues with the enrollment that already runs.
+The listener is `127.0.0.1`, so a controller in another zone does not gain a route to the key. A controller that cannot connect logs the failure and continues with the enrollment that already runs. The binary accepts each connection on its own coroutine, so one signature does not hold the next worker. The requests are the same ones above. There is no request that carries a seed: the factory only receives the self-signed certificate. The blocking server used by the tests is unchanged.
 
 ```mermaid
 sequenceDiagram

@@ -108,54 +108,14 @@ int connect_to(const std::string& host, std::uint16_t port)
     return fd;
 }
 
-void reply_signed(int client, const CertificateAuthority& ca, std::string_view document)
-{
-    std::string smime = ca.sign_document(document);
-    if (smime.empty() || smime.back() != '\n') smime.push_back('\n');
-    write_all(client, "OK\n" + smime + ".\n");
-}
-
 void serve_one(int client, const CertificateAuthority& ca)
 {
     deadlines(client);
     std::string pending;
     const std::string head = next_line(client, pending);
-    if (head == "SIGN governance")
-    {
-        const std::string document = read_pem(client, pending);
-        if (document != governance_document()) throw PkiError("CERT_SUBJECT", "governance document is not the template");
-        reply_signed(client, ca, document);
-        return;
-    }
-    constexpr std::string_view kPermissions = "SIGN permissions ";
-    if (head.starts_with(kPermissions))
-    {
-        const std::string cn = head.substr(kPermissions.size());
-        const std::string document = read_pem(client, pending);
-        if (document != permissions_document(cn))
-            throw PkiError("CERT_SUBJECT", "permissions document is not the template");
-        reply_signed(client, ca, document);
-        return;
-    }
-    const auto role_at = head.find(' ');
-    const auto cn_at = role_at == std::string::npos ? std::string::npos : head.find(' ', role_at + 1);
-    if (head.starts_with("SIGN ") && role_at != std::string::npos && cn_at != std::string::npos)
-    {
-        const auto role = std::string_view(head).substr(role_at + 1, cn_at - role_at - 1);
-        const auto cn = std::string_view(head).substr(cn_at + 1);
-        const auto use = role == "manager" ? CertificateAuthority::PresentedUse::Manager
-                                            : CertificateAuthority::PresentedUse::Worker;
-        if (role != "worker" && role != "manager")
-        {
-            write_all(client, "ERR role must be worker or manager\n");
-            return;
-        }
-        const std::string presented = read_pem(client, pending);
-        const auto issued = ca.sign_presented(presented, cn, use);
-        write_all(client, "OK\n" + issued.pem + ".\n");
-        return;
-    }
-    write_all(client, "ERR expected SIGN worker|manager name, SIGN governance, or SIGN permissions name\n");
+    const bool has_body = head == "SIGN governance" || head.starts_with("SIGN ");
+    const std::string body = has_body ? read_pem(client, pending) : std::string{};
+    write_all(client, answer_factory(ca, head, body));
 }
 
 } // namespace
@@ -208,6 +168,40 @@ std::string request_signature(const std::string& host, std::uint16_t port, std::
         ::close(fd);
         throw;
     }
+}
+
+std::string answer_factory(const CertificateAuthority& ca, std::string_view head, std::string_view body)
+{
+    auto signed_reply = [&](std::string_view document) {
+        std::string smime = ca.sign_document(document);
+        if (smime.empty() || smime.back() != '\n') smime.push_back('\n');
+        return "OK\n" + smime + ".\n";
+    };
+    if (head == "SIGN governance")
+    {
+        if (body != governance_document()) throw PkiError("CERT_SUBJECT", "governance document is not the template");
+        return signed_reply(body);
+    }
+    constexpr std::string_view kPermissions = "SIGN permissions ";
+    if (head.starts_with(kPermissions))
+    {
+        const std::string cn(head.substr(kPermissions.size()));
+        if (body != permissions_document(cn)) throw PkiError("CERT_SUBJECT", "permissions document is not the template");
+        return signed_reply(body);
+    }
+    const auto role_at = head.find(' ');
+    const auto cn_at = role_at == std::string_view::npos ? std::string_view::npos : head.find(' ', role_at + 1);
+    if (head.starts_with("SIGN ") && role_at != std::string_view::npos && cn_at != std::string_view::npos)
+    {
+        const auto role = head.substr(role_at + 1, cn_at - role_at - 1);
+        const auto cn = head.substr(cn_at + 1);
+        if (role != "worker" && role != "manager") return "ERR role must be worker or manager\n";
+        const auto use = role == "manager" ? CertificateAuthority::PresentedUse::Manager
+                                            : CertificateAuthority::PresentedUse::Worker;
+        const auto issued = ca.sign_presented(std::string(body), std::string(cn), use);
+        return "OK\n" + issued.pem + ".\n";
+    }
+    return "ERR expected SIGN worker|manager name, SIGN governance, or SIGN permissions name\n";
 }
 
 void serve_factory(std::uint16_t port, const CertificateAuthority& ca, const std::atomic<bool>& stop,

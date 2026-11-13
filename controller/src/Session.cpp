@@ -93,6 +93,7 @@ void finish(ProcessTable& table, const std::string& name, const std::shared_ptr<
         if (s->state == "ONLINE" || s->state == "STARTING") table.set_state(*s, "OFFLINE");
         // A child without its session has nothing to do. A remote node got bye above.
         if (s->pid != 0 && s->pid == session->opened_pid) ::kill(session->opened_pid, SIGTERM);
+        else if (!s->container.empty()) table.stop_process(*s, "session ended");
     }
     session->close();
 }
@@ -249,13 +250,14 @@ void Session::admit(SessionDeps& deps, pgdemo_msgs::msg::Hello hello)
         table.send_bye(name, "not managed");
         return;
     }
-    const Launch expect = s->pid != 0 ? s->running : s->next;
+    const bool ours = s->pid != 0 || !s->container.empty();
+    const Launch expect = ours ? s->running : s->next;
     if (mode != launch_mode(expect))
     {
         table.send_bye(name, "unexpected mode");
         return;
     }
-    if (s->pid == 0 && table.running() >= table.options().max_devices)
+    if (!ours && table.running() >= table.options().max_devices)
     {
         const std::string why = std::format("--max-devices {} reached", table.options().max_devices);
         if (s->next != Launch::Run)

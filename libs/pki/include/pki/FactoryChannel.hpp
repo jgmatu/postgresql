@@ -47,4 +47,13 @@ class CertificateAuthority;
 void serve_factory(std::uint16_t port, const CertificateAuthority& ca, const std::atomic<bool>& stop,
                    std::atomic<std::uint16_t>* bound = nullptr, std::string_view listen_addr = "127.0.0.1");
 
+/**
+ * @brief Reply to one SIGN request.
+ *
+ * `head` is the first line without the newline. `body` is the document that
+ * followed it, without the terminating dot line. The reply is `OK` plus the
+ * signed material, or an `ERR` line.
+ */
+[[nodiscard]] std::string answer_factory(const CertificateAuthority& ca, std::string_view head, std::string_view body);
+
 } // namespace pgdemo::pki

@@ -7,6 +7,7 @@ add_executable(pgdemo-controller
     src/TelemetryWriter.cpp
     src/Spawn.cpp
     src/Origin.cpp
+    src/DockerEngine.cpp
 )
 find_package(rclcpp REQUIRED)
 

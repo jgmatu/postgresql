@@ -2,7 +2,7 @@
 # Run one pgdemo process in the foreground. Compose is the supervisor.
 # Tini is pid 1 and this script execs the binary, so SIGTERM reaches it.
 #
-# Usage: entrypoint.sh server|controller|factory
+# Usage: entrypoint.sh server|controller|factory|device
 set -euo pipefail
 
 if [[ -f /opt/ros/lyrical/setup.bash ]]; then
@@ -27,6 +27,19 @@ if [[ "${1:-}" == factory ]]; then
         --key /app/run/factory/root.key \
         --cert /app/run/factory/root.crt \
         --listen 0.0.0.0 --port 9443
+fi
+
+# A worker has no database. The controller starts this as root so the private
+# volume can be given to pgdemo, then the process drops to that user.
+if [[ "${1:-}" == device ]]; then
+    shift
+    mkdir -p /var/lib/pgdemo/puf
+    if [[ "$(id -u)" -eq 0 ]]; then
+        chown pgdemo:pgdemo /var/lib/pgdemo/puf
+        chmod 700 /var/lib/pgdemo/puf
+        exec runuser -u pgdemo -- /app/build/device/pgdemo-device "$@"
+    fi
+    exec /app/build/device/pgdemo-device "$@"
 fi
 
 ENV_FILE=/app/run/demo.env
@@ -63,6 +76,9 @@ case "${1:-}" in
     controller)
         export PGUSER=demo_controller
         export PGPASSWORD="${DEMO_CONTROLLER_DB_PASSWORD}"
+        if [[ "${PGDEMO_DOCKER_SPAWN:-}" == 1 ]]; then
+            export ROS_AUTOMATIC_DISCOVERY_RANGE=SUBNET
+        fi
         factory_args=()
         if [[ -f /app/run/factory-cert/root.crt ]]; then
             /app/controller/scripts/gen-manager-key.sh /app/run/controller
