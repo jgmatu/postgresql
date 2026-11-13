@@ -30,7 +30,9 @@ mkdir -p "${DIR}"
 chmod 700 "${DIR}"
 umask 077
 openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-384 -out "${KEY}"
-openssl req -new -x509 -key "${KEY}" -sha384 -days 3650 \
+# SHA-256, not SHA-384: DDS-Security's PKI-DH plugin accepts ecdsa-with-SHA256 only.
+# The key stays P-384.
+openssl req -new -x509 -key "${KEY}" -sha256 -days 3650 \
     -subj "/O=pgdemo/CN=pgdemo factory root CA" \
     -addext "basicConstraints=critical,CA:TRUE,pathlen:0" \
     -addext "keyUsage=critical,keyCertSign,cRLSign" \

@@ -1,12 +1,21 @@
 #include "Fleet.hpp"
 
+#include <pki/CertVerifier.hpp>
+#include <pki/Certificate.hpp>
+#include <pki/DeviceKey.hpp>
+
 #include <log/Log.hpp>
 
 #include <csignal>
 #include <unistd.h>
 
+#include <filesystem>
 #include <format>
+#include <string_view>
+#include <fstream>
 #include <set>
+#include <span>
+#include <sstream>
 #include <utility>
 #include <vector>
 
@@ -22,6 +31,21 @@ constexpr std::string_view kLog = "fleet";
 constexpr auto kStuckAfter = 30s;
 constexpr auto kHeartbeatEvery = 10s;
 constexpr auto kMaintenanceEvery = 30s;
+constexpr auto kCrlEvery = 1s;
+
+std::string read_file(const std::filesystem::path& path)
+{
+    std::ifstream in(path);
+    if (!in) throw std::runtime_error("cannot read " + path.string());
+    std::stringstream ss;
+    ss << in.rdbuf();
+    return ss.str();
+}
+
+std::span<const std::uint8_t> bytes_of(std::string_view text)
+{
+    return {reinterpret_cast<const std::uint8_t*>(text.data()), text.size()};
+}
 
 std::optional<std::string> field_string(const boost::json::object& o, std::string_view key)
 {
@@ -120,6 +144,11 @@ void Fleet::tick()
     {
         next_maintenance_ = now + kMaintenanceEvery;
         maintain();
+    }
+    if (now >= next_crl_)
+    {
+        next_crl_ = now + kCrlEvery;
+        publish_crl();
     }
 }
 
@@ -241,9 +270,63 @@ void Fleet::shutdown()
     if (stop_) stop_();
 }
 
+bool Fleet::factory_listed(const std::string& name)
+{
+    const auto& opts = table_.options();
+    if (opts.factory_root.empty() || opts.factory_fingerprint.empty()) return false;
+    const auto path = opts.devices_dir / name / "cert.pem";
+    if (!std::filesystem::is_regular_file(path)) return false;
+    try
+    {
+        const auto root = read_file(opts.factory_root);
+        const auto pem = read_file(path);
+        const auto info = pki::CertVerifier({root}).verify(pem, name, {});
+        if (!db_.register_factory_worker(info.subject_cn, opts.factory_fingerprint, info.serial, info.fingerprint,
+                                         pki::format_time(info.not_before), pki::format_time(info.not_after), info.pem))
+            log::info(kLog, name + " authenticated; no device row to attach the certificate");
+        return db_.load_manager_revoked_serials().contains(info.serial);
+    }
+    catch (const pki::PkiError& e)
+    {
+        if (e.code == "CERT_CHAIN" || e.code == "CERT_SUBJECT") return false;
+        log::warn(kLog, name + ": " + e.what());
+        return false;
+    }
+}
+
+void Fleet::publish_crl()
+{
+    const auto& opts = table_.options();
+    if (opts.manager_key.empty() || !table_.downlink().crl) return;
+    try
+    {
+        const auto payload = pki::manager_crl_payload(db_.load_manager_revoked_serials());
+        auto stored = db_.load_manager_crl();
+        if (!stored || stored->payload != payload)
+        {
+            const auto signature = pki::to_hex(pki::DeviceKey::load(opts.manager_key).sign(bytes_of(payload)));
+            db_.replace_manager_crl(payload, signature);
+            stored = db::DatabaseManager::ManagerCrlRecord{payload, signature};
+        }
+        pgdemo_msgs::msg::Crl message;
+        message.payload = stored->payload;
+        message.signature = stored->signature_hex;
+        table_.downlink().crl(std::move(message));
+    }
+    catch (const std::exception& e)
+    {
+        log::warn(kLog, std::string("manager CRL: ") + e.what());
+    }
+}
+
 void Fleet::on_hello(pgdemo_msgs::msg::Hello hello)
 {
     if (table_.shutting_down()) return;
+    if (factory_listed(hello.device))
+    {
+        table_.send_bye(hello.device, "revoked");
+        return;
+    }
     auto deps = this->deps();
     Session::admit(deps, std::move(hello));
 }

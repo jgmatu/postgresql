@@ -243,11 +243,20 @@ export interface OriginCert {
   current?: boolean;
 }
 
-/** `GET /api/pki/origin`: factory root, manager certificate and factory-issued workers. */
+/** The manager-signed revocation list from `GET /api/pki/origin`. */
+export interface OriginCrl {
+  payload: string;
+  signature: string;
+  signed_at: string;
+  serials: string[];
+}
+
+/** `GET /api/pki/origin`: factory root, manager certificate, factory-issued workers and the manager CRL. */
 export interface PkiOrigin {
   factory: OriginCert | null;
   manager: OriginCert | null;
   workers: OriginCert[];
+  crl: OriginCrl | null;
 }
 
 export interface ConfigHistoryRow {

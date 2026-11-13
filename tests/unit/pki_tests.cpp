@@ -11,6 +11,7 @@
 #include <pki/FactoryChannel.hpp>
 #include <pki/Handshake.hpp>
 #include <pki/PufTable.hpp>
+#include <pki/SecurityPolicy.hpp>
 
 #include <botan/auto_rng.h>
 #include <botan/data_src.h>
@@ -397,6 +398,42 @@ TEST_F(PkiTest, HandshakeAuthenticatesTheWorkerAndHonoursTheCrl)
               }),
               "CERT_CHAIN");
     rejected_root.join();
+}
+
+TEST_F(PkiTest, FactorySignsOnlyThePolicyTemplate)
+{
+    std::atomic<bool> stop{false};
+    std::atomic<std::uint16_t> bound{0};
+    std::thread server([&] { serve_factory(0, *ca_, stop, &bound); });
+    for (int i = 0; i < 200 && bound.load() == 0; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    ASSERT_NE(bound.load(), 0);
+
+    const auto governance = request_signed_document("127.0.0.1", bound.load(), "governance", "", governance_document());
+    EXPECT_NE(governance.find("allow_unauthenticated_participants"), std::string::npos);
+    EXPECT_NE(governance.find("multipart/signed"), std::string::npos);
+    auto tampered = governance_document();
+    const auto at = tampered.find(">false<");
+    ASSERT_NE(at, std::string::npos);
+    tampered.replace(at, 7, ">true<");
+    EXPECT_THROW(
+        [&] {
+            const auto ignored = request_signed_document("127.0.0.1", bound.load(), "governance", "", tampered);
+            static_cast<void>(ignored);
+        }(),
+        std::runtime_error);
+
+    const auto permissions =
+        request_signed_document("127.0.0.1", bound.load(), "permissions", "sensor-a", permissions_document("sensor-a"));
+    EXPECT_NE(permissions.find("CN=sensor-a"), std::string::npos);
+    EXPECT_THROW(
+        [] {
+            const auto ignored = permissions_document("not a name");
+            static_cast<void>(ignored);
+        }(),
+        std::invalid_argument);
+
+    stop.store(true);
+    server.join();
 }
 
 } // namespace

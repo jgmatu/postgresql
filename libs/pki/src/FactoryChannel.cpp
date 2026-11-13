@@ -1,6 +1,7 @@
 #include <pki/FactoryChannel.hpp>
 
 #include <pki/CertificateAuthority.hpp>
+#include <pki/SecurityPolicy.hpp>
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -107,11 +108,35 @@ int connect_to(const std::string& host, std::uint16_t port)
     return fd;
 }
 
+void reply_signed(int client, const CertificateAuthority& ca, std::string_view document)
+{
+    std::string smime = ca.sign_document(document);
+    if (smime.empty() || smime.back() != '\n') smime.push_back('\n');
+    write_all(client, "OK\n" + smime + ".\n");
+}
+
 void serve_one(int client, const CertificateAuthority& ca)
 {
     deadlines(client);
     std::string pending;
     const std::string head = next_line(client, pending);
+    if (head == "SIGN governance")
+    {
+        const std::string document = read_pem(client, pending);
+        if (document != governance_document()) throw PkiError("CERT_SUBJECT", "governance document is not the template");
+        reply_signed(client, ca, document);
+        return;
+    }
+    constexpr std::string_view kPermissions = "SIGN permissions ";
+    if (head.starts_with(kPermissions))
+    {
+        const std::string cn = head.substr(kPermissions.size());
+        const std::string document = read_pem(client, pending);
+        if (document != permissions_document(cn))
+            throw PkiError("CERT_SUBJECT", "permissions document is not the template");
+        reply_signed(client, ca, document);
+        return;
+    }
     const auto role_at = head.find(' ');
     const auto cn_at = role_at == std::string::npos ? std::string::npos : head.find(' ', role_at + 1);
     if (head.starts_with("SIGN ") && role_at != std::string::npos && cn_at != std::string::npos)
@@ -130,10 +155,36 @@ void serve_one(int client, const CertificateAuthority& ca)
         write_all(client, "OK\n" + issued.pem + ".\n");
         return;
     }
-    write_all(client, "ERR expected SIGN worker|manager name\n");
+    write_all(client, "ERR expected SIGN worker|manager name, SIGN governance, or SIGN permissions name\n");
 }
 
 } // namespace
+
+std::string request_signed_document(const std::string& host, std::uint16_t port, std::string_view kind,
+                                      std::string_view cn, std::string_view document)
+{
+    const int fd = connect_to(host, port);
+    try
+    {
+        std::string body(document);
+        if (body.empty() || body.back() != '\n') body.push_back('\n');
+        std::string head = "SIGN " + std::string(kind);
+        if (kind == "permissions") head += " " + std::string(cn);
+        write_all(fd, head + "\n" + body + ".\n");
+        std::string pending;
+        const std::string status = next_line(fd, pending);
+        if (status.starts_with("ERR")) throw std::runtime_error("factory: " + status);
+        if (status != "OK") throw std::runtime_error("factory: unexpected reply");
+        const std::string smime = read_pem(fd, pending);
+        ::close(fd);
+        return smime;
+    }
+    catch (...)
+    {
+        ::close(fd);
+        throw;
+    }
+}
 
 std::string request_signature(const std::string& host, std::uint16_t port, std::string_view role, std::string_view cn,
                               std::string_view presented_pem)

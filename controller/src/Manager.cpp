@@ -36,6 +36,7 @@ Manager::Manager(int argc, char** argv)
     rejected_ = node_->create_publisher<msg::Rejected>(topics::kRejected, qos);
     challenge_ = node_->create_publisher<msg::Challenge>(topics::kChallenge, qos);
     config_ = node_->create_publisher<msg::Config>(topics::kConfig, qos);
+    crl_ = node_->create_publisher<msg::Crl>(topics::kCrl, qos);
 }
 
 Manager::~Manager()
@@ -51,6 +52,7 @@ Downlink Manager::downlink() const
     out.rejected = [pub = rejected_](pgdemo_msgs::msg::Rejected m) { pub->publish(m); };
     out.challenge = [pub = challenge_](pgdemo_msgs::msg::Challenge m) { pub->publish(m); };
     out.config = [pub = config_](pgdemo_msgs::msg::Config m) { pub->publish(m); };
+    out.crl = [pub = crl_](pgdemo_msgs::msg::Crl m) { pub->publish(m); };
     return out;
 }
 

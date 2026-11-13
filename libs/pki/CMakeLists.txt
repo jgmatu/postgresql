@@ -8,6 +8,7 @@ add_library(pgdemo_pki STATIC
     src/PufTable.cpp
     src/Handshake.cpp
     src/FactoryChannel.cpp
+    src/SecurityPolicy.cpp
 )
 add_library(pgdemo::pki ALIAS pgdemo_pki)
 

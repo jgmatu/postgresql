@@ -413,11 +413,17 @@ AS $$
 BEGIN
     INSERT INTO public.root_ca (name, subject, fingerprint_sha256, cert_pem, not_before, not_after)
     VALUES ('factory', p_subject, p_fingerprint, p_cert_pem, p_not_before, p_not_after)
-    ON CONFLICT (name) DO NOTHING;
+    ON CONFLICT (name) DO UPDATE
+        SET subject = EXCLUDED.subject,
+            fingerprint_sha256 = EXCLUDED.fingerprint_sha256,
+            cert_pem = EXCLUDED.cert_pem,
+            not_before = EXCLUDED.not_before,
+            not_after = EXCLUDED.not_after
+        WHERE root_ca.fingerprint_sha256 IS DISTINCT FROM EXCLUDED.fingerprint_sha256;
 END
 $$;
 
--- The factory-signed manager certificate. A second call keeps the first row.
+-- The factory-signed manager certificate. A later call replaces the single row.
 CREATE OR REPLACE FUNCTION register_manager_certificate(
     p_ca_fingerprint text,
     p_serial         text,
@@ -434,14 +440,18 @@ AS $$
 DECLARE
     v_ca int;
 BEGIN
-    IF EXISTS (SELECT 1 FROM public.manager_certificate) THEN
-        RETURN;
-    END IF;
     SELECT r.ca_id INTO v_ca FROM public.root_ca r
     WHERE r.name = 'factory' AND r.fingerprint_sha256 = p_ca_fingerprint AND r.is_active;
     IF NOT FOUND THEN
         RAISE EXCEPTION 'factory root % is not registered', p_ca_fingerprint
             USING ERRCODE = 'no_data_found';
+    END IF;
+    IF EXISTS (SELECT 1 FROM public.manager_certificate) THEN
+        UPDATE public.manager_certificate
+           SET ca_id = v_ca, serial = p_serial, fingerprint_sha256 = p_fingerprint,
+               subject_cn = p_subject_cn, not_before = p_not_before, not_after = p_not_after,
+               cert_pem = p_cert_pem, issued_at = clock_timestamp();
+        RETURN;
     END IF;
     INSERT INTO public.manager_certificate
         (ca_id, serial, fingerprint_sha256, subject_cn, not_before, not_after, cert_pem)

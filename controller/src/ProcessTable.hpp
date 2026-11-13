@@ -31,7 +31,9 @@ struct FleetOptions
     std::filesystem::path puf_file;                  ///< devices.puf; empty leaves worker keys alone
     std::filesystem::path factory_root;              ///< factory root certificate passed to workers
     std::string factory_addr;                        ///< host:port of pgdemo-factory; empty skips signing
-    std::string manager_tls;                         ///< host:port of the mutual handshake; empty skips it
+    std::string factory_fingerprint;                 ///< fingerprint of the factory root, for registration
+    std::filesystem::path manager_cert;              ///< public manager certificate passed to workers
+    std::string manager_key;                         ///< manager private key; empty skips the CRL publication
 };
 
 /// How a device process is started.

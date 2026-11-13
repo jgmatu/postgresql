@@ -19,6 +19,8 @@ inline constexpr const char* kCertificate = "pgdemo/manager/security/certificate
 inline constexpr const char* kRejected = "pgdemo/manager/security/rejected";
 /// Manager to worker. Fresh nonce for the proof.
 inline constexpr const char* kChallenge = "pgdemo/manager/security/challenge";
+/// Manager to every worker. The manager-signed revocation list. No `device` field.
+inline constexpr const char* kCrl = "pgdemo/manager/security/crl";
 /// Worker to manager. Certificate and signature of the nonce.
 inline constexpr const char* kProof = "pgdemo/worker/security/proof";
 

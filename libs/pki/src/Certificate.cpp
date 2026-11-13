@@ -75,6 +75,20 @@ std::vector<std::uint8_t> proof_message(std::span<const std::uint8_t> nonce, std
     return m;
 }
 
+bool signed_with_sha256(std::string_view pem)
+{
+    try
+    {
+        Botan::DataSource_Memory src(pem);
+        Botan::X509_Certificate cert(src);
+        return cert.signature_algorithm().oid().to_string() == "1.2.840.10045.4.3.2";
+    }
+    catch (const std::exception&)
+    {
+        return false;
+    }
+}
+
 CertInfo inspect_certificate(std::string_view pem)
 {
     try

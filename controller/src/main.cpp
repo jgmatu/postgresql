@@ -28,8 +28,6 @@
 #include <thread>
 #include <unistd.h>
 
-#include <pki/Handshake.hpp>
-
 #include <db/DatabaseManager.hpp>
 #include <log/Log.hpp>
 
@@ -160,9 +158,7 @@ int main(int argc, char** argv)
         // One connection per device queue, plus one for session and enrollment writes.
         db::DatabaseManager db(opt.conninfo, "pgdemo-controller", opt.fleet.max_devices + 1);
         db.connect();
-        std::unique_ptr<pki::HandshakeListener> origin_listener;
-        std::jthread origin_thread;
-        controller::start_origin(db, opt.fleet, opt.origin, origin_listener, origin_thread);
+        controller::start_origin(db, opt.fleet, opt.origin);
         for (const auto p : db::kAllPayloads)
             for (const auto& name : db.ensure_history_partitions(p)) log::info(kLog, "created partition " + name);
 

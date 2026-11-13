@@ -1,0 +1,9 @@
+module pgdemo_msgs {
+  module msg {
+    // The manager's revocation list. Every worker verifies it; there is no device field.
+    struct Crl {
+      string payload;
+      string signature;
+    };
+  };
+};

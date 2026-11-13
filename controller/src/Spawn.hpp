@@ -8,7 +8,7 @@
 namespace pgdemo::controller {
 
 /**
- * @brief `fork()` + `execv(argv[0], argv)`.
+ * @brief `fork()` + `execve(argv[0], argv)`. The child does not inherit `ROS_SECURITY_*`.
  *
  * The argument vector is built before forking. Between fork and exec the child
  * only calls async-signal-safe functions: it restores default dispositions and

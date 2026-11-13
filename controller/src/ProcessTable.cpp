@@ -263,10 +263,10 @@ void ProcessTable::start_process(Slot& s)
         argv.push_back("--factory");
         argv.push_back(opts_.factory_addr);
     }
-    if (!opts_.manager_tls.empty() && !opts_.factory_root.empty())
+    if (!opts_.manager_cert.empty() && !opts_.factory_root.empty())
     {
-        argv.push_back("--manager-tls");
-        argv.push_back(opts_.manager_tls);
+        argv.push_back("--manager-cert");
+        argv.push_back(opts_.manager_cert.string());
         argv.push_back("--factory-root");
         argv.push_back(opts_.factory_root.string());
     }

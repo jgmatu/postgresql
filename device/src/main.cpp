@@ -13,8 +13,8 @@
 #include <pki/Certificate.hpp>
 #include <pki/DeviceKey.hpp>
 #include <pki/FactoryChannel.hpp>
-#include <pki/Handshake.hpp>
 #include <pki/PufTable.hpp>
+#include <pki/SecurityPolicy.hpp>
 
 #include <log/Log.hpp>
 #include <pgdemo/Topics.hpp>
@@ -23,6 +23,7 @@
 #include <pgdemo_msgs/msg/certificate.hpp>
 #include <pgdemo_msgs/msg/challenge.hpp>
 #include <pgdemo_msgs/msg/config.hpp>
+#include <pgdemo_msgs/msg/crl.hpp>
 #include <pgdemo_msgs/msg/config_applied.hpp>
 #include <pgdemo_msgs/msg/csr.hpp>
 #include <pgdemo_msgs/msg/error.hpp>
@@ -36,6 +37,8 @@
 #include <pgdemo_msgs/msg/xyz_sample.hpp>
 
 #include <rclcpp/rclcpp.hpp>
+
+#include <span>
 
 #include <sys/stat.h>
 
@@ -81,7 +84,7 @@ void usage(std::ostream& out)
            "  --puf       path of devices.puf\n"
            "  --factory   HOST:PORT of the factory, used when cert.pem is absent\n"
            "  --factory-root  factory root certificate\n"
-           "  --manager-tls   HOST:PORT of the mutual handshake\n";
+           "  --manager-cert  manager certificate used to verify its CRL\n";
 }
 
 struct Options
@@ -96,7 +99,8 @@ struct Options
     fs::path puf;
     std::string factory;
     fs::path factory_root;
-    std::string manager_tls;
+    fs::path manager_cert;
+    bool manager_cert_ok = false;
 };
 
 struct UsageError : std::runtime_error
@@ -130,7 +134,7 @@ Options parse_args(int argc, char** argv)
         else if (arg == "--puf") o.puf = value;
         else if (arg == "--factory") o.factory = value;
         else if (arg == "--factory-root") o.factory_root = value;
-        else if (arg == "--manager-tls") o.manager_tls = value;
+        else if (arg == "--manager-cert") o.manager_cert = value;
         else throw UsageError(std::format("unknown option {}", arg));
     }
     if (o.name.empty() || o.type.empty() || o.dir.empty())
@@ -172,11 +176,9 @@ std::pair<std::string, std::uint16_t> split_endpoint(const std::string& endpoint
     return {endpoint.substr(0, colon), static_cast<std::uint16_t>(std::stoi(endpoint.substr(colon + 1)))};
 }
 
-/// Derive the key from devices.puf when this worker has no key yet, ask the
-/// factory for a certificate, and finish the mutual handshake when the stored
-/// certificate was issued by that root. A certificate from the demo CA keeps
-/// the enrollment that already runs.
-void prepare_origin(const Options& opts)
+/// Derive the key from devices.puf when this worker has no key yet, and ask the
+/// factory for a certificate when cert.pem is absent. An existing key.pem stays.
+void prepare_identity(const Options& opts)
 {
     const fs::path key_path = opts.dir / "key.pem";
     const fs::path cert_path = opts.dir / "cert.pem";
@@ -194,25 +196,65 @@ void prepare_origin(const Options& opts)
         write_file(cert_path, pem);
         log::info("device", opts.name + ": factory signed the certificate");
     }
-    if (opts.manager_tls.empty() || opts.factory_root.empty() || !fs::exists(key_path) || !fs::exists(cert_path)) return;
+}
+
+std::string node_name_for(std::string name);
+
+/// Write the SROS2 enclave and export ROS_SECURITY_* when the stored certificate
+/// chains to the factory root. A certificate from the demo CA leaves security off.
+void arm_security(Options& opts)
+{
+    pki::clear_ros_security();
+    const fs::path key_path = opts.dir / "key.pem";
+    const fs::path cert_path = opts.dir / "cert.pem";
+    if (opts.factory.empty() || opts.factory_root.empty() || opts.manager_cert.empty() || !fs::exists(key_path) ||
+        !fs::exists(cert_path))
+        return;
     const auto root = read_file(opts.factory_root);
     const auto cert = read_file(cert_path);
+    const auto manager = read_file(opts.manager_cert);
+    pki::CertVerifier anchors({root});
     try
     {
-        pki::CertVerifier({root}).verify(cert, opts.name, {});
+        anchors.verify_as(manager, pki::kManagerCommonName, {}, pki::CertVerifier::CertUse::Server);
+        opts.manager_cert_ok = true;
+    }
+    catch (const pki::PkiError& e)
+    {
+        if (e.code != "CERT_CHAIN" && e.code != "CERT_SUBJECT") throw;
+        log::info("device", opts.name + ": manager certificate is not from the factory root");
+    }
+    try
+    {
+        anchors.verify(cert, opts.name, {});
     }
     catch (const pki::PkiError& e)
     {
         if (e.code == "CERT_CHAIN" || e.code == "CERT_SUBJECT")
         {
-            log::info("device", opts.name + ": certificate is not from the factory root");
+            log::info("device", opts.name + ": certificate is not from the factory root; SROS2 stays off");
             return;
         }
         throw;
     }
-    const auto [host, port] = split_endpoint(opts.manager_tls);
-    pki::handshake_connect(host, port, read_file(key_path), cert, root, pki::kManagerCommonName);
-    log::info("device", opts.name + ": mutual handshake with the manager");
+    try
+    {
+        const auto [host, port] = split_endpoint(opts.factory);
+        const auto governance = pki::request_signed_document(host, port, "governance", "", pki::governance_document());
+        const auto permissions =
+            pki::request_signed_document(host, port, "permissions", opts.name, pki::permissions_document(opts.name));
+        const auto keystore = fs::absolute(opts.dir.parent_path().parent_path() / "keystore");
+        const auto enclave = "/" + node_name_for(opts.name);
+        pki::write_enclave(pki::enclave_directory(keystore, enclave), read_file(key_path), cert, root, governance,
+                           permissions);
+        pki::enable_ros_security(keystore, enclave);
+        log::info("device", opts.name + ": SROS2 enclave " + pki::enclave_directory(keystore, enclave).string());
+    }
+    catch (const std::exception& e)
+    {
+        pki::clear_ros_security();
+        log::warn("device", opts.name + ": SROS2 stays off: " + e.what());
+    }
 }
 
 /// Node name from a device name. ROS names allow letters, digits and underscore.
@@ -252,7 +294,7 @@ public:
     {
         fs::create_directories(opts_.dir);
         ::chmod(opts_.dir.c_str(), 0700);
-        prepare_origin(opts_);
+        if (fs::is_regular_file(cert_path())) own_serial_ = pki::inspect_certificate(read_file(cert_path())).serial;
 
         const auto qos = rclcpp::QoS(rclcpp::KeepLast(16)).reliable();
         const auto hello_qos = rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local();
@@ -276,6 +318,8 @@ public:
             topics::kChallenge, qos, [this](msg::Challenge::ConstSharedPtr m) { on_challenge(*m); });
         config_ = create_subscription<msg::Config>(
             topics::kConfig, qos, [this](msg::Config::ConstSharedPtr m) { on_config(*m); });
+        if (opts_.manager_cert_ok)
+            crl_ = create_subscription<msg::Crl>(topics::kCrl, qos, [this](msg::Crl::ConstSharedPtr m) { on_crl(*m); });
 
         if (opts_.mode != "run") phase_ = Phase::Cert;
         hello_timer_ = create_wall_timer(1s, [this] { announce(); });
@@ -415,6 +459,29 @@ private:
         });
     }
 
+    void on_crl(const msg::Crl& msg)
+    {
+        try
+        {
+            const auto manager = read_file(opts_.manager_cert);
+            const auto signature = pki::from_hex(msg.signature);
+            const auto bytes = std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t*>(msg.payload.data()),
+                                                             msg.payload.size());
+            if (!pki::CertVerifier::verify_signature(manager, bytes, signature))
+            {
+                log::warn(tag(), "manager CRL signature does not match the manager certificate");
+                return;
+            }
+            const auto serials = pki::manager_crl_serials(msg.payload);
+            if (!own_serial_.empty() && serials.contains(own_serial_))
+                fail(kFailed, "certificate is on the manager CRL");
+        }
+        catch (const std::exception& e)
+        {
+            log::warn(tag(), std::string("manager CRL: ") + e.what());
+        }
+    }
+
     void on_bye(const msg::Bye& msg)
     {
         if (phase_ == Phase::Done || !mine(msg.device)) return;
@@ -508,6 +575,7 @@ private:
     Options opts_;
     int& exit_code_;
     SampleStream stream_;
+    std::string own_serial_;
     Phase phase_{Phase::Announce};
     bool csr_sent_{false};
     std::unique_ptr<pki::DeviceKey> next_key_;
@@ -526,6 +594,7 @@ private:
     rclcpp::Subscription<msg::Certificate>::SharedPtr certificate_;
     rclcpp::Subscription<msg::Challenge>::SharedPtr challenge_;
     rclcpp::Subscription<msg::Config>::SharedPtr config_;
+    rclcpp::Subscription<msg::Crl>::SharedPtr crl_;
     rclcpp::TimerBase::SharedPtr hello_timer_;
     rclcpp::TimerBase::SharedPtr sample_timer_;
 };
@@ -547,6 +616,19 @@ int run_main(int argc, char** argv)
     }
 
     std::signal(SIGPIPE, SIG_IGN);
+    try
+    {
+        fs::create_directories(opts.dir);
+        ::chmod(opts.dir.c_str(), 0700);
+        prepare_identity(opts);
+        arm_security(opts);
+    }
+    catch (const std::exception& e)
+    {
+        pki::clear_ros_security();
+        log::error("device", e.what());
+        return kFailed;
+    }
     rclcpp::InitOptions init;
     init.shutdown_on_signal = true;
     rclcpp::init(argc, argv, init);

@@ -1518,7 +1518,12 @@ boost::json::value DatabaseManager::fetch_origin(DbRole role)
                      "             c.not_before, c.not_after, c.cert_pem, (c.cert_id = d.cert_id) AS current"
                      "      FROM device_certificate c"
                      "      JOIN root_ca r ON r.ca_id = c.ca_id AND r.name = 'factory'"
-                     "      JOIN device d ON d.device_id = c.device_id) w)"
+                     "      JOIN device d ON d.device_id = c.device_id) w),"
+                     "  'crl', (SELECT json_build_object("
+                     "      'payload', s.payload, 'signature', s.signature, 'signed_at', s.signed_at,"
+                     "      'serials', COALESCE((SELECT json_agg(r.serial ORDER BY r.serial)"
+                     "                           FROM manager_revocation r), '[]'::json))"
+                     "    FROM manager_crl_signature s)"
                      ")::text")
                 .one_field());
     });

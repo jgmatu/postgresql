@@ -13,6 +13,7 @@ set(PGDEMO_IDL
     msg/Certificate.idl
     msg/Rejected.idl
     msg/Challenge.idl
+    msg/Crl.idl
     msg/Proof.idl
     msg/Config.idl
     msg/ConfigApplied.idl

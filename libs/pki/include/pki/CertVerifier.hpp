@@ -82,6 +82,12 @@ private:
 std::string manager_crl_payload(const std::set<std::string>& serials);
 
 /**
+ * @brief Serials in a canonical manager CRL payload.
+ * @throws PkiError `CERT_CHAIN` when the text is not that form
+ */
+std::set<std::string> manager_crl_serials(std::string_view payload);
+
+/**
  * @brief Both certificates were signed by `root_pem`, the worker CN matches,
  * and the manager's signature over `crl_payload` does not list the worker.
  *

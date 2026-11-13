@@ -1,11 +1,7 @@
 #pragma once
 
 #include <cstdint>
-#include <memory>
 #include <string>
-#include <thread>
-
-#include <pki/Handshake.hpp>
 
 #include "ProcessTable.hpp"
 
@@ -25,13 +21,13 @@ struct OriginFiles
 };
 
 /**
- * @brief First-time manager certificate, its CRL, and the mutual handshake.
+ * @brief First-time manager certificate, its CRL, and the SROS2 enclave.
  *
  * When the key or the factory certificate is missing, this returns without
- * changing `fleet`. When the factory process is down on the first start, the
- * root row may be registered and the handshake stays off.
+ * changing `fleet` and without setting `ROS_SECURITY_*`. When the factory
+ * process is down, the root row may be registered and security stays off.
+ * Call it before the manager node is created: DDS reads the enclave at init.
  */
-void start_origin(db::DatabaseManager& db, FleetOptions& fleet, const OriginFiles& files,
-                  std::unique_ptr<pki::HandshakeListener>& listener, std::jthread& thread);
+void start_origin(db::DatabaseManager& db, FleetOptions& fleet, const OriginFiles& files);
 
 } // namespace pgdemo::controller

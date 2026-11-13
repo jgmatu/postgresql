@@ -8,6 +8,7 @@
 #include <pgdemo_msgs/msg/certificate.hpp>
 #include <pgdemo_msgs/msg/challenge.hpp>
 #include <pgdemo_msgs/msg/config.hpp>
+#include <pgdemo_msgs/msg/crl.hpp>
 #include <pgdemo_msgs/msg/rejected.hpp>
 
 #include <rclcpp/rclcpp.hpp>
@@ -55,6 +56,7 @@ private:
     rclcpp::Publisher<pgdemo_msgs::msg::Rejected>::SharedPtr rejected_;
     rclcpp::Publisher<pgdemo_msgs::msg::Challenge>::SharedPtr challenge_;
     rclcpp::Publisher<pgdemo_msgs::msg::Config>::SharedPtr config_;
+    rclcpp::Publisher<pgdemo_msgs::msg::Crl>::SharedPtr crl_;
     std::vector<rclcpp::SubscriptionBase::SharedPtr> subscriptions_;
     rclcpp::TimerBase::SharedPtr tick_;
     SignalState* signals_{nullptr};

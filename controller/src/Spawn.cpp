@@ -5,7 +5,12 @@
 
 #include <cerrno>
 #include <csignal>
+#include <string>
+#include <string_view>
 #include <system_error>
+#include <vector>
+
+extern char** environ;
 
 namespace pgdemo::controller {
 
@@ -15,6 +20,16 @@ pid_t spawn_process(const std::vector<std::string>& args)
     argv.reserve(args.size() + 1);
     for (const auto& a : args) argv.push_back(const_cast<char*>(a.c_str()));
     argv.push_back(nullptr);
+
+    // Built before the fork. The child drops the manager's security environment
+    // and exports its own enclave after it has written the files.
+    std::vector<std::string> kept;
+    for (char** env = environ; env != nullptr && *env != nullptr; ++env)
+        if (!std::string_view(*env).starts_with("ROS_SECURITY_")) kept.emplace_back(*env);
+    std::vector<char*> envp;
+    envp.reserve(kept.size() + 1);
+    for (auto& line : kept) envp.push_back(line.data());
+    envp.push_back(nullptr);
 
     const pid_t parent = ::getpid();
     const pid_t pid = ::fork();
@@ -33,7 +48,7 @@ pid_t spawn_process(const std::vector<std::string>& args)
     ::prctl(PR_SET_PDEATHSIG, SIGTERM);
     if (::getppid() != parent) ::_exit(127);
     ::close_range(3, ~0U, 0);
-    ::execv(argv[0], argv.data());
+    ::execve(argv[0], argv.data(), envp.data());
     ::_exit(127);
 }
 

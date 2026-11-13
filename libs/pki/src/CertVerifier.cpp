@@ -66,20 +66,13 @@ std::string manager_crl_payload(const std::set<std::string>& serials)
     return out;
 }
 
-void verify_factory_pair(std::string_view worker_pem, std::string_view manager_pem, std::string_view root_pem,
-                         std::string_view worker_cn, std::string_view crl_payload,
-                         std::span<const std::uint8_t> crl_signature)
+std::set<std::string> manager_crl_serials(std::string_view payload)
 {
     constexpr std::string_view kHeader = "pgdemo-manager-crl-v1\n";
-    if (!crl_payload.starts_with(kHeader))
+    if (!payload.starts_with(kHeader))
         throw PkiError("CERT_CHAIN", "the manager CRL payload is not the expected form");
-    const auto payload = std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t*>(crl_payload.data()),
-                                                       crl_payload.size());
-    if (!CertVerifier::verify_signature(manager_pem, payload, crl_signature))
-        throw PkiError("CERT_CHAIN", "the manager CRL signature does not match the manager certificate");
-
     std::set<std::string> revoked;
-    std::string_view rest = crl_payload.substr(kHeader.size());
+    std::string_view rest = payload.substr(kHeader.size());
     while (!rest.empty())
     {
         const auto cut = rest.find('\n');
@@ -88,9 +81,20 @@ void verify_factory_pair(std::string_view worker_pem, std::string_view manager_p
         if (cut == std::string_view::npos) break;
         rest.remove_prefix(cut + 1);
     }
-    const std::string canonical = manager_crl_payload(revoked);
-    if (canonical != crl_payload)
+    if (manager_crl_payload(revoked) != payload)
         throw PkiError("CERT_CHAIN", "the manager CRL payload is not the canonical serial list");
+    return revoked;
+}
+
+void verify_factory_pair(std::string_view worker_pem, std::string_view manager_pem, std::string_view root_pem,
+                         std::string_view worker_cn, std::string_view crl_payload,
+                         std::span<const std::uint8_t> crl_signature)
+{
+    const auto revoked = manager_crl_serials(crl_payload);
+    const auto payload = std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t*>(crl_payload.data()),
+                                                       crl_payload.size());
+    if (!CertVerifier::verify_signature(manager_pem, payload, crl_signature))
+        throw PkiError("CERT_CHAIN", "the manager CRL signature does not match the manager certificate");
 
     CertVerifier anchors({std::string(root_pem)});
     anchors.verify_as(worker_pem, worker_cn, revoked, CertVerifier::CertUse::Client);

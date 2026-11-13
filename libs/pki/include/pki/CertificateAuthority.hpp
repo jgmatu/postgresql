@@ -80,7 +80,9 @@ public:
      *
      * The presented certificate must be self-signed by an ECDSA P-384 key
      * (proof of possession), carry `CN=expected_cn`, and must not be a CA.
-     * The issued certificate replaces it; `sign_csr` is unchanged.
+     * The issued certificate replaces it. Its key stays P-384 and the signature
+     * algorithm is ECDSA-SHA256, which is what DDS-Security loads. `sign_csr`
+     * stays ECDSA-SHA384.
      *
      * @param cert_pem    self-signed certificate, PEM
      * @param expected_cn name the certificate is for
@@ -91,6 +93,14 @@ public:
      */
     CertInfo sign_presented(std::string_view cert_pem, std::string_view expected_cn, PresentedUse use,
                             std::chrono::seconds validity = std::chrono::days(365)) const;
+
+    /**
+     * @brief PKCS#7 detached SMIME of `document`, the form SROS2 stores in `*.p7s`.
+     *
+     * The signature uses this CA key. The caller checks that `document` is the
+     * governance or permissions template before asking.
+     */
+    [[nodiscard]] std::string sign_document(std::string_view document) const;
 
     /**
      * @brief A signed X.509 CRL listing `revoked`.

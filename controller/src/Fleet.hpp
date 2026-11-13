@@ -111,6 +111,11 @@ private:
     std::chrono::steady_clock::time_point next_heartbeat_{};
     std::chrono::steady_clock::time_point next_maintenance_{};
     std::chrono::steady_clock::time_point next_partitions_{};
+    std::chrono::steady_clock::time_point next_crl_{};
+
+    /// Register a factory-signed worker certificate. Returns true when its serial is revoked.
+    bool factory_listed(const std::string& name);
+    void publish_crl();
 };
 
 } // namespace pgdemo::controller

@@ -25,8 +25,8 @@ function download(name: string, text: string) {
 
 type OriginView = "workers" | "manager" | "factory";
 
-function OriginTable({ rows }: { rows: OriginCert[] }) {
-  if (rows.length === 0) return <Empty>No hay certificado en esta vista.</Empty>;
+function OriginTable({ rows, empty }: { rows: OriginCert[]; empty: string }) {
+  if (rows.length === 0) return <Empty>{empty}</Empty>;
   return (
     <Table dense data-testid="origin-table">
       <TableHead>
@@ -102,12 +102,14 @@ export default function PkiPage() {
 
   const reloadCa = ca.reload;
   const reloadEnrollments = enrollments.reload;
+  const reloadOrigin = origin.reload;
   const onEvent = useCallback(() => {
     reloadCa();
     reloadEnrollments();
+    reloadOrigin();
     // A CRL on screen is fetched again, freshly signed, when a revocation changes.
     if (crlShown.current) void fetchCrl();
-  }, [reloadCa, reloadEnrollments, fetchCrl]);
+  }, [reloadCa, reloadEnrollments, reloadOrigin, fetchCrl]);
   const stream = useStream({ channels: ["enrollment", "device"] }, onEvent);
 
   const data = ca.data;
@@ -117,12 +119,12 @@ export default function PkiPage() {
     <>
       <PageHeading
         title="PKI de dispositivos"
-        description="CA raíz con la que el servidor firma las CSR de los dispositivos, certificados revocados y solicitudes de alta y rotación."
+        description="La fábrica firma las identidades que SROS2 presenta al manager. El servidor sigue firmando las CSR de la demo, y el manager firma la lista que cada worker verifica."
         testId="page-pki"
         actions={<LiveIndicator {...stream} />}
       />
       <Section
-        title="Certificados de la fábrica"
+        title="Círculo de confianza"
         testId="section-origin"
         actions={
           <div className="flex gap-2" data-testid="origin-switch">
@@ -146,23 +148,63 @@ export default function PkiPage() {
           </div>
         }
       >
+        <p className="mb-4 text-sm text-zinc-600">
+          El worker deriva su clave del PUF y la fábrica firma el certificado. SROS2 lo presenta al manager, que tiene esa
+          raíz. El manager firma la lista de revocación y cada worker la comprueba con el certificado del manager.
+        </p>
         <ErrorCallout error={origin.error} />
         {origin.error ? null : !origin.data ? (
           <Loading />
         ) : (
-          <OriginTable
-            rows={
-              originView === "workers"
-                ? origin.data.workers
-                : originView === "manager"
-                  ? origin.data.manager
-                    ? [origin.data.manager]
-                    : []
-                  : origin.data.factory
-                    ? [origin.data.factory]
-                    : []
-            }
-          />
+          <>
+            <OriginTable
+              empty={
+                originView === "workers"
+                  ? "Ningún worker tiene todavía un certificado firmado por la fábrica."
+                  : originView === "manager"
+                    ? "El manager aún no tiene certificado firmado por la fábrica."
+                    : "No hay raíz de fábrica registrada."
+              }
+              rows={
+                originView === "workers"
+                  ? origin.data.workers
+                  : originView === "manager"
+                    ? origin.data.manager
+                      ? [origin.data.manager]
+                      : []
+                    : origin.data.factory
+                      ? [origin.data.factory]
+                      : []
+              }
+            />
+            <div className="mt-6" data-testid="origin-crl">
+              <h3 className="mb-2 text-sm font-medium text-zinc-950">Lista firmada por el manager</h3>
+              {!origin.data.crl ? (
+                <Empty>El manager aún no ha firmado su lista.</Empty>
+              ) : origin.data.crl.serials.length === 0 ? (
+                <Empty>La lista firmada no contiene ningún serial.</Empty>
+              ) : (
+                <Table dense>
+                  <TableHead>
+                    <TableRow>
+                      <TableHeader>Serie</TableHeader>
+                      <TableHeader>Firmada</TableHeader>
+                    </TableRow>
+                  </TableHead>
+                  <TableBody>
+                    {origin.data.crl.serials.map((serial) => (
+                      <TableRow key={serial} data-testid={`origin-crl-row-${serial}`}>
+                        <TableCell>
+                          <Mono>{shortHex(serial, 8)}</Mono>
+                        </TableCell>
+                        <TableCell className="tabular-nums">{fmtDateTime(origin.data?.crl?.signed_at)}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              )}
+            </div>
+          </>
         )}
       </Section>
       <div className="mt-6">

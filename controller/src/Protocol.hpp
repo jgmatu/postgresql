@@ -8,6 +8,7 @@
 #include <pgdemo_msgs/msg/certificate.hpp>
 #include <pgdemo_msgs/msg/challenge.hpp>
 #include <pgdemo_msgs/msg/config.hpp>
+#include <pgdemo_msgs/msg/crl.hpp>
 #include <pgdemo_msgs/msg/config_applied.hpp>
 #include <pgdemo_msgs/msg/csr.hpp>
 #include <pgdemo_msgs/msg/error.hpp>
@@ -40,6 +41,8 @@ struct Downlink
     std::function<void(pgdemo_msgs::msg::Challenge)> challenge;
     /// Forward a desired configuration. The worker answers on `config/applied`.
     std::function<void(pgdemo_msgs::msg::Config)> config;
+    /// Republish the manager revocation list. Empty when that origin is off.
+    std::function<void(pgdemo_msgs::msg::Crl)> crl;
 };
 
 /// The `device` field of any uplink message.

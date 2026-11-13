@@ -42,6 +42,15 @@ struct CertInfo
  */
 CertInfo inspect_certificate(std::string_view pem);
 
+/**
+ * @brief Whether `pem` is signed with ECDSA-SHA256.
+ *
+ * DDS-Security's built-in authentication accepts that algorithm and rejects
+ * ECDSA-SHA384. The key curve is a separate question. A certificate that does
+ * not parse returns false.
+ */
+bool signed_with_sha256(std::string_view pem);
+
 /// Lower-case hex of `bytes`.
 std::string to_hex(std::span<const std::uint8_t> bytes);
 
