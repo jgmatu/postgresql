@@ -162,6 +162,10 @@ The server also serves a web control panel on the same origin as the API: `https
 
 ![Dispositivos](frontend/docs/screens/devices.png)
 
+![PKI](frontend/docs/screens/pki.png)
+
+The PKI tab opens with one card for the factory, one for the manager and one for each worker. The capture below is the end-to-end stack, which has no factory, so those cards are empty; the demo CA, its CRL and the enrollment requests follow. On the operational stack the cards carry the subject, the serial, the fingerprint and the validity.
+
 | | |
 |---|---|
 | ![Device detail](frontend/docs/screens/device-detail.png) | ![Administration: identity](frontend/docs/screens/admin-identity-rotated.png) |

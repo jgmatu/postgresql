@@ -179,7 +179,7 @@ Routes end in `/` because the export writes `devices/index.html`; the server als
 
 ### Components
 
-Catalyst provides the primitives: layout, navbar, sidebar (mobile), dropdown, table, dialog, fieldset, input, select, switch, checkbox, badge, button, description list, auth layout. Our own components sit on top: `PanelShell` and `AdminShell` (session, role, navigation), `badges.tsx` (one badge per API state set, Spanish label, raw value in `data-state`), `ui.tsx` (headings, callouts, stats, the live indicator), `ConfirmDialog` and `Outcome`. The scalar, GPS and `xy` charts are plain SVG in `charts.tsx`: a line chart with round-number ticks, sparklines, a square scatter cloud, and a map in metres around the device origin (40.4168, −3.7038) with the track and the current fix. An `xyz` device uses [`point-cloud.tsx`](src/components/point-cloud.tsx): React Three Fiber draws each sample as one instanced sphere, the same blue, lit inside the canvas. `@react-three/drei` `OrbitControls` moves the camera on a sphere around the origin. The readout is the radius `r`, the azimuth `θ` around Y and the polar angle `φ` from +Y. The libraries are bundled; the CSP stays `'self'`. No map tiles, no web fonts.
+Catalyst provides the primitives: layout, navbar, sidebar (mobile), dropdown, table, dialog, fieldset, input, select, switch, checkbox, badge, button, description list, auth layout. Our own components sit on top: `PanelShell` and `AdminShell` (session, role, navigation), `badges.tsx` (one badge per API state set, Spanish label, raw value in `data-state`), `ui.tsx` (headings, callouts, stats, the live indicator), `ConfirmDialog` and `Outcome`. The scalar, GPS and `xy` charts are plain SVG in `charts.tsx`: a line chart with round-number ticks, sparklines, a square scatter cloud, and a map in metres around the device origin (40.4168, −3.7038) with the track and the current fix. An `xyz` device uses [`point-cloud.tsx`](src/components/point-cloud.tsx): React Three Fiber draws each sample as one instanced sphere, the same blue, lit inside the canvas. `@react-three/drei` `OrbitControls` moves the camera on a sphere around the origin. The readout is the radius `r`, the azimuth `θ` around Y and the polar angle `φ` from +Y. The libraries are bundled; the CSP stays `'self'`. No map tiles, no web fonts. The trust circle on PKI uses Motion (`motion/react`) so each entity's certificate — factory, manager and every worker — fades in with its fields.
 
 ### `data-testid`
 
@@ -187,7 +187,7 @@ Every element a test needs has a `data-testid` (`nav-devices`, `nav-admin`, `dev
 
 ## Screens
 
-Captured at 1440x900 (see [Tests](#tests)). The UI suites produce them against the Docker stack. The 3D cloud is the exception: `cloud` is enrolled by an admin, so that capture comes from a browser check.
+Captured at 1440x900 (see [Tests](#tests)). The UI suites produce them against the Docker stack. The PKI capture is the whole page, so the trust-circle cards stay in frame above the demo CA. The 3D cloud is the exception: `cloud` is enrolled by an admin, so that capture comes from a browser check.
 
 ### Login
 
@@ -231,7 +231,7 @@ Mapa: the last 120 fixes of each GPS device (`/history`, then `telemetry_gps`), 
 
 ![PKI](docs/screens/pki.png)
 
-PKI: the trust circle first (`GET /api/pki/origin`), a switch among the factory-issued worker certificates, the manager certificate and the factory root, then the list the manager signs. Below that, the demo CA and the fingerprint it signs with (`GET /api/pki/ca`), its CRL (`GET /api/pki/crl`, shown or downloaded as PEM), and the enrollment requests. The `device` and `enrollment` stream reloads the origin.
+PKI: the trust circle first (`GET /api/pki/origin`). The factory root, the manager certificate and each worker certificate are cards; Motion reveals the subject, serial, fingerprint and validity, and a new certificate replaces its card. Then the list the manager signs. Below that, the demo CA and the fingerprint it signs with (`GET /api/pki/ca`), its CRL (`GET /api/pki/crl`, shown or downloaded as PEM), and the enrollment requests. The `device` and `enrollment` stream reloads the origin. This capture is the end-to-end stack, which has no factory, so the three entities are empty and the demo CA is what the page shows underneath.
 
 ![Eventos](docs/screens/events.png)
 

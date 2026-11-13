@@ -94,7 +94,7 @@ PKI shows the CA, the CRL and the enrollments
     Click    data-testid=crl-show
     Get Text    data-testid=crl-pem    starts    -----BEGIN X509 CRL-----
     Count Should Be    data-testid=enrollments-table >> tbody tr    >    0
-    Capture Screen    pki
+    Capture Screen    pki    full_page=${True}
 
 The CRL downloads as a PEM file
     ${download}=    Promise To Wait For Download
@@ -145,7 +145,7 @@ Sistema reports health, PostgreSQL and the session
 Histórico reads dummy1 samples for the session role
     Go To Tab    history
     Get Text    data-testid=page-history    contains    demo_normal
-    Wait For Elements State    data-testid=history-device >> option[value="dummy1"]    visible
+    Wait For Elements State    data-testid=history-device    visible
     Select Options By    data-testid=history-device    value    dummy1
     Wait For Elements State    data-testid=sample-history-table    visible
     Get Text    data-testid=sample-partition >> nth=0    matches    ^telemetry_scalar_y

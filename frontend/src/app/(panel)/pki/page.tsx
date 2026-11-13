@@ -5,11 +5,12 @@ import { Button } from "@/components/catalyst/button";
 import { Link } from "@/components/catalyst/link";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/catalyst/table";
 import { EnrollmentBadge, RevocationBadge } from "@/components/badges";
+import { OriginCircle } from "@/components/origin-certs";
 import { Callout, Empty, ErrorCallout, LiveIndicator, Loading, Mono, PageHeading, Section, Stat } from "@/components/ui";
 import { apiText } from "@/lib/api";
 import { fmtDateTime, shortHex } from "@/lib/format";
 import { useApi, useStream } from "@/lib/hooks";
-import type { Enrollment, OriginCert, PkiCa, PkiOrigin } from "@/lib/types";
+import type { Enrollment, PkiCa, PkiOrigin } from "@/lib/types";
 import { ArrowDownTrayIcon, DocumentTextIcon } from "@heroicons/react/16/solid";
 import { useCallback, useEffect, useRef, useState } from "react";
 
@@ -23,59 +24,9 @@ function download(name: string, text: string) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-type OriginView = "workers" | "manager" | "factory";
-
-function OriginTable({ rows, empty }: { rows: OriginCert[]; empty: string }) {
-  if (rows.length === 0) return <Empty>{empty}</Empty>;
-  return (
-    <Table dense data-testid="origin-table">
-      <TableHead>
-        <TableRow>
-          <TableHeader>Nombre</TableHeader>
-          <TableHeader>Serie</TableHeader>
-          <TableHeader>Huella SHA-256</TableHeader>
-          <TableHeader>Validez</TableHeader>
-          <TableHeader />
-        </TableRow>
-      </TableHead>
-      <TableBody>
-        {rows.map((row) => {
-          const label = row.device ?? row.subject_cn ?? row.name ?? row.subject ?? "—";
-          return (
-            <TableRow key={row.fingerprint} data-testid={`origin-row-${row.fingerprint}`}>
-              <TableCell className="font-medium">
-                {label}
-                {row.current && (
-                  <Badge color="sky" className="ml-1">
-                    vigente
-                  </Badge>
-                )}
-              </TableCell>
-              <TableCell>{row.serial ? <Mono>{shortHex(row.serial, 8)}</Mono> : "—"}</TableCell>
-              <TableCell title={row.fingerprint}>
-                <Mono>{shortHex(row.fingerprint, 10)}</Mono>
-              </TableCell>
-              <TableCell className="tabular-nums">
-                {fmtDateTime(row.not_before)} → {fmtDateTime(row.not_after)}
-              </TableCell>
-              <TableCell>
-                <Button plain onClick={() => download(`${label}.pem`, row.cert_pem.endsWith("\n") ? row.cert_pem : `${row.cert_pem}\n`)}>
-                  <ArrowDownTrayIcon />
-                  PEM
-                </Button>
-              </TableCell>
-            </TableRow>
-          );
-        })}
-      </TableBody>
-    </Table>
-  );
-}
-
 export default function PkiPage() {
   const ca = useApi<PkiCa>("/api/pki/ca");
   const origin = useApi<PkiOrigin>("/api/pki/origin");
-  const [originView, setOriginView] = useState<OriginView>("workers");
   const enrollments = useApi<Enrollment[]>("/api/enrollments?limit=50");
   const [crl, setCrl] = useState<string | null>(null);
   const [crlError, setCrlError] = useState<unknown>(null);
@@ -126,27 +77,6 @@ export default function PkiPage() {
       <Section
         title="Círculo de confianza"
         testId="section-origin"
-        actions={
-          <div className="flex gap-2" data-testid="origin-switch">
-            {(
-              [
-                ["workers", "Workers"],
-                ["manager", "Manager"],
-                ["factory", "Fábrica"],
-              ] as const
-            ).map(([id, label]) =>
-              originView === id ? (
-                <Button key={id} onClick={() => setOriginView(id)} data-testid={`origin-${id}`}>
-                  {label}
-                </Button>
-              ) : (
-                <Button key={id} outline onClick={() => setOriginView(id)} data-testid={`origin-${id}`}>
-                  {label}
-                </Button>
-              ),
-            )}
-          </div>
-        }
       >
         <p className="mb-4 text-sm text-zinc-600">
           El worker deriva su clave del PUF y la fábrica firma el certificado. SROS2 lo presenta al manager, que tiene esa
@@ -157,26 +87,7 @@ export default function PkiPage() {
           <Loading />
         ) : (
           <>
-            <OriginTable
-              empty={
-                originView === "workers"
-                  ? "Ningún worker tiene todavía un certificado firmado por la fábrica."
-                  : originView === "manager"
-                    ? "El manager aún no tiene certificado firmado por la fábrica."
-                    : "No hay raíz de fábrica registrada."
-              }
-              rows={
-                originView === "workers"
-                  ? origin.data.workers
-                  : originView === "manager"
-                    ? origin.data.manager
-                      ? [origin.data.manager]
-                      : []
-                    : origin.data.factory
-                      ? [origin.data.factory]
-                      : []
-              }
-            />
+            <OriginCircle origin={origin.data} />
             <div className="mt-6" data-testid="origin-crl">
               <h3 className="mb-2 text-sm font-medium text-zinc-950">Lista firmada por el manager</h3>
               {!origin.data.crl ? (
