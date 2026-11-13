@@ -30,12 +30,15 @@ Manager::Manager(int argc, char** argv)
     rclcpp::init(argc, argv, ros_init);
     node_ = std::make_shared<rclcpp::Node>("pgdemo_controller");
     const auto qos = rclcpp::QoS(rclcpp::KeepLast(16)).reliable();
+    // One drain publishes every pending configuration. KeepLast(16) drops the
+    // ones the worker has not taken, so a burst of 25 never all land.
+    const auto config_qos = rclcpp::QoS(rclcpp::KeepLast(64)).reliable();
     namespace msg = pgdemo_msgs::msg;
     bye_ = node_->create_publisher<msg::Bye>(topics::kBye, qos);
     certificate_ = node_->create_publisher<msg::Certificate>(topics::kCertificate, qos);
     rejected_ = node_->create_publisher<msg::Rejected>(topics::kRejected, qos);
     challenge_ = node_->create_publisher<msg::Challenge>(topics::kChallenge, qos);
-    config_ = node_->create_publisher<msg::Config>(topics::kConfig, qos);
+    config_ = node_->create_publisher<msg::Config>(topics::kConfig, config_qos);
     crl_ = node_->create_publisher<msg::Crl>(topics::kCrl, qos);
 }
 
@@ -60,6 +63,7 @@ void Manager::subscribe(Fleet& fleet)
 {
     fleet_ = &fleet;
     const auto qos = rclcpp::QoS(rclcpp::KeepLast(16)).reliable();
+    const auto config_qos = rclcpp::QoS(rclcpp::KeepLast(64)).reliable();
     const auto hello_qos = rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local();
     namespace msg = pgdemo_msgs::msg;
     using topics::kConfigApplied;
@@ -83,7 +87,7 @@ void Manager::subscribe(Fleet& fleet)
     subscriptions_.push_back(node_->create_subscription<msg::Proof>(
         kProof, qos, [&fleet](msg::Proof::ConstSharedPtr m) { fleet.on_uplink(*m); }));
     subscriptions_.push_back(node_->create_subscription<msg::ConfigApplied>(
-        kConfigApplied, qos, [&fleet](msg::ConfigApplied::ConstSharedPtr m) { fleet.on_uplink(*m); }));
+        kConfigApplied, config_qos, [&fleet](msg::ConfigApplied::ConstSharedPtr m) { fleet.on_uplink(*m); }));
     subscriptions_.push_back(node_->create_subscription<msg::ScalarSample>(
         kScalar, qos, [&fleet](msg::ScalarSample::ConstSharedPtr m) { fleet.on_uplink(*m); }));
     subscriptions_.push_back(node_->create_subscription<msg::GpsSample>(

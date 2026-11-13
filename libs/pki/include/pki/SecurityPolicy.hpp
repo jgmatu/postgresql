@@ -9,8 +9,11 @@ namespace pgdemo::pki {
 /**
  * @brief The governance document every enclave shares.
  *
- * Authentication is required and RTPS traffic is signed. The domain range is
- * the whole DDS space, not only domain 0. The factory signs this exact text.
+ * Authentication is required. Discovery, liveliness, the RTPS message and the
+ * submessage metadata are signed. The payload is not signed on its own:
+ * Fast-DDS 3.6.2 cannot check a GMAC-only serialized payload, and the signed
+ * submessage already covers those bytes. The domain range is the whole DDS
+ * space, not only domain 0. The factory signs this exact text.
  */
 [[nodiscard]] std::string governance_document();
 

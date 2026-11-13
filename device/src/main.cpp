@@ -213,18 +213,33 @@ std::array<std::uint8_t, 32> read_seed(const fs::path& path)
     return seed;
 }
 
-/// Derive the key from the private seed, or from devices.puf, when this worker
-/// has no key yet, and ask the factory for a certificate when cert.pem is absent.
-/// An existing key.pem stays.
+/// Derive the factory key from the private seed when this worker has none, and
+/// ask the factory for a certificate when `factory.crt` is absent. Those two
+/// files stay put when the demo CA enrollment replaces `key.pem` and `cert.pem`.
+/// A forked worker without `--puf-dir` still uses `key.pem` and `cert.pem`.
 void prepare_identity(const Options& opts)
 {
     const fs::path key_path = opts.dir / "key.pem";
     const fs::path cert_path = opts.dir / "cert.pem";
-    if (!opts.puf_dir.empty() && !fs::exists(key_path))
+    if (!opts.puf_dir.empty())
     {
-        ensure_seed(opts.puf_dir);
-        pki::DeviceKey::from_seed(read_seed(opts.puf_dir / "seed")).save(key_path.string());
-        log::info("device", opts.name + ": derived the key from its PUF seed");
+        const fs::path factory_key = opts.dir / "factory.key";
+        const fs::path factory_crt = opts.dir / "factory.crt";
+        if (!fs::exists(factory_key))
+        {
+            ensure_seed(opts.puf_dir);
+            pki::DeviceKey::from_seed(read_seed(opts.puf_dir / "seed")).save(factory_key.string());
+            log::info("device", opts.name + ": derived the factory key from its PUF seed");
+        }
+        if (!opts.factory.empty() && fs::exists(factory_key) && !fs::exists(factory_crt))
+        {
+            const auto [host, port] = split_endpoint(opts.factory);
+            auto key = pki::DeviceKey::load(factory_key.string());
+            const auto pem =
+                pki::request_signature(host, port, "worker", opts.name, key.self_signed_pem(opts.name));
+            write_file(factory_crt, pem);
+            log::info("device", opts.name + ": factory signed the certificate");
+        }
     }
     else if (opts.device_id && !opts.puf.empty() && !fs::exists(key_path))
     {
@@ -232,7 +247,7 @@ void prepare_identity(const Options& opts)
         pki::DeviceKey::from_seed(seed).save(key_path.string());
         log::info("device", opts.name + ": derived the key from devices.puf");
     }
-    if (!opts.factory.empty() && fs::exists(key_path) && !fs::exists(cert_path))
+    if (opts.puf_dir.empty() && !opts.factory.empty() && fs::exists(key_path) && !fs::exists(cert_path))
     {
         const auto [host, port] = split_endpoint(opts.factory);
         auto key = pki::DeviceKey::load(key_path.string());
@@ -244,14 +259,21 @@ void prepare_identity(const Options& opts)
 
 std::string node_name_for(std::string name);
 
-/// Write the SROS2 enclave and export ROS_SECURITY_* when the stored certificate
-/// chains to the factory root and the manager certificate is its own root. A
-/// certificate from the demo CA leaves security off.
+/// Write the SROS2 enclave and export ROS_SECURITY_* when a certificate chains
+/// to the factory root and the manager certificate is its own root. A container
+/// keeps that pair in `factory.key` and `factory.crt`, so the demo CA enrollment
+/// can replace `key.pem` without leaving the secured graph. A certificate from
+/// the demo CA, with no factory pair, leaves security off.
 void arm_security(Options& opts)
 {
     pki::clear_ros_security();
-    const fs::path key_path = opts.dir / "key.pem";
-    const fs::path cert_path = opts.dir / "cert.pem";
+    fs::path key_path = opts.dir / "key.pem";
+    fs::path cert_path = opts.dir / "cert.pem";
+    if (fs::exists(opts.dir / "factory.key") && fs::exists(opts.dir / "factory.crt"))
+    {
+        key_path = opts.dir / "factory.key";
+        cert_path = opts.dir / "factory.crt";
+    }
     if (opts.factory.empty() || opts.factory_root.empty() || opts.manager_cert.empty() || !fs::exists(key_path) ||
         !fs::exists(cert_path))
         return;
@@ -313,6 +335,26 @@ unsigned char mode_code(std::string_view mode)
     return msg::Hello::RUN;
 }
 
+std::string sample_line(const msg::ScalarSample& m)
+{
+    return std::format("sample seq {} value {:.6g}", m.seq, m.value);
+}
+
+std::string sample_line(const msg::GpsSample& m)
+{
+    return std::format("sample seq {} radius_m {:.6g} bearing_rad {:.6g}", m.seq, m.radius_m, m.bearing_rad);
+}
+
+std::string sample_line(const msg::XySample& m)
+{
+    return std::format("sample seq {} x {:.6g} y {:.6g}", m.seq, m.x, m.y);
+}
+
+std::string sample_line(const msg::XyzSample& m)
+{
+    return std::format("sample seq {} x {:.6g} y {:.6g} z {:.6g}", m.seq, m.x, m.y, m.z);
+}
+
 /// Where the handshake is. `Announce` repeats `hello` until `challenge`.
 enum class Phase { Announce, Cert, Challenge, Config, Run, Done };
 
@@ -335,9 +377,11 @@ public:
     {
         fs::create_directories(opts_.dir);
         ::chmod(opts_.dir.c_str(), 0700);
-        if (fs::is_regular_file(cert_path())) own_serial_ = pki::inspect_certificate(read_file(cert_path())).serial;
+        const fs::path identity = fs::is_regular_file(factory_cert_path()) ? factory_cert_path() : cert_path();
+        if (fs::is_regular_file(identity)) own_serial_ = pki::inspect_certificate(read_file(identity)).serial;
 
         const auto qos = rclcpp::QoS(rclcpp::KeepLast(16)).reliable();
+        const auto config_qos = rclcpp::QoS(rclcpp::KeepLast(64)).reliable();
         const auto hello_qos = rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local();
         hello_ = create_publisher<msg::Hello>(topics::kHello, hello_qos);
         heartbeat_ = create_publisher<msg::Heartbeat>(topics::kHeartbeat, qos);
@@ -348,7 +392,7 @@ public:
         gps_ = create_publisher<msg::GpsSample>(topics::kGps, qos);
         xy_ = create_publisher<msg::XySample>(topics::kXy, qos);
         xyz_ = create_publisher<msg::XyzSample>(topics::kXyz, qos);
-        applied_ = create_publisher<msg::ConfigApplied>(topics::kConfigApplied, qos);
+        applied_ = create_publisher<msg::ConfigApplied>(topics::kConfigApplied, config_qos);
 
         bye_ = create_subscription<msg::Bye>(topics::kBye, qos, [this](msg::Bye::ConstSharedPtr m) { on_bye(*m); });
         rejected_ = create_subscription<msg::Rejected>(
@@ -358,7 +402,7 @@ public:
         challenge_ = create_subscription<msg::Challenge>(
             topics::kChallenge, qos, [this](msg::Challenge::ConstSharedPtr m) { on_challenge(*m); });
         config_ = create_subscription<msg::Config>(
-            topics::kConfig, qos, [this](msg::Config::ConstSharedPtr m) { on_config(*m); });
+            topics::kConfig, config_qos, [this](msg::Config::ConstSharedPtr m) { on_config(*m); });
         if (opts_.manager_cert_ok)
             crl_ = create_subscription<msg::Crl>(topics::kCrl, qos, [this](msg::Crl::ConstSharedPtr m) { on_crl(*m); });
 
@@ -370,6 +414,7 @@ public:
 private:
     [[nodiscard]] fs::path key_path() const { return opts_.dir / "key.pem"; }
     [[nodiscard]] fs::path cert_path() const { return opts_.dir / "cert.pem"; }
+    [[nodiscard]] fs::path factory_cert_path() const { return opts_.dir / "factory.crt"; }
     [[nodiscard]] std::string tag() const { return "device " + opts_.name; }
     [[nodiscard]] bool mine(const std::string& device) const { return device == opts_.name; }
 
@@ -379,10 +424,26 @@ private:
             [this](auto& m) {
                 m.device = opts_.name;
                 using T = std::decay_t<decltype(m)>;
-                if constexpr (std::is_same_v<T, msg::ScalarSample>) scalar_->publish(m);
-                else if constexpr (std::is_same_v<T, msg::GpsSample>) gps_->publish(m);
-                else if constexpr (std::is_same_v<T, msg::XySample>) xy_->publish(m);
-                else if constexpr (std::is_same_v<T, msg::XyzSample>) xyz_->publish(m);
+                if constexpr (std::is_same_v<T, msg::ScalarSample>)
+                {
+                    scalar_->publish(m);
+                    trace_sample(m);
+                }
+                else if constexpr (std::is_same_v<T, msg::GpsSample>)
+                {
+                    gps_->publish(m);
+                    trace_sample(m);
+                }
+                else if constexpr (std::is_same_v<T, msg::XySample>)
+                {
+                    xy_->publish(m);
+                    trace_sample(m);
+                }
+                else if constexpr (std::is_same_v<T, msg::XyzSample>)
+                {
+                    xyz_->publish(m);
+                    trace_sample(m);
+                }
                 else heartbeat_->publish(m);
             },
             msg);
@@ -395,6 +456,21 @@ private:
         err.code = code;
         err.detail = detail;
         error_->publish(err);
+    }
+
+    /// One sample line about every 2 s. The counter counts samples, and
+    /// `rate_ms` says how much time each one represents.
+    template <typename Sample>
+    void trace_sample(const Sample& sample)
+    {
+        const int rate = std::max(stream_.rate_ms(), 1);
+        if (samples_since_trace_ != 0 && samples_since_trace_ * rate < 2000)
+        {
+            ++samples_since_trace_;
+            return;
+        }
+        samples_since_trace_ = 1;
+        log::info(tag(), sample_line(sample));
     }
 
     void fail(int code, const std::string& what)
@@ -415,8 +491,14 @@ private:
         hello.device = opts_.name;
         hello.mode = mode_code(opts_.mode);
         hello.request_id = opts_.request_id;
-        if (fs::is_regular_file(cert_path())) hello.certificate = read_file(cert_path());
+        const fs::path presented = fs::is_regular_file(factory_cert_path()) ? factory_cert_path() : cert_path();
+        if (fs::is_regular_file(presented)) hello.certificate = read_file(presented);
         hello_->publish(hello);
+        if (!hello_traced_)
+        {
+            hello_traced_ = true;
+            log::info(tag(), std::format("handshake: hello {} request {}", opts_.mode, opts_.request_id));
+        }
         // The CSR topic is volatile. Repeat the same request until the
         // certificate arrives, the way hello is repeated, so a subscriber that
         // matches late still receives it.
@@ -439,7 +521,7 @@ private:
             if (!csr_sent_)
             {
                 csr_sent_ = true;
-                log::info(tag(), std::format("{}: CSR sent for request {}", opts_.mode, opts_.request_id));
+                log::info(tag(), std::format("handshake: CSR sent for request {}", opts_.request_id));
             }
         }
         catch (const std::exception& e)
@@ -461,7 +543,7 @@ private:
         fs::rename(opts_.dir / "key.next.pem", key_path());
         fs::rename(opts_.dir / "cert.next.pem", cert_path());
         next_key_.reset();
-        log::info(tag(), std::format("certificate stored (serial {})", pki::inspect_certificate(cert).serial));
+        log::info(tag(), std::format("handshake: certificate stored (serial {})", pki::inspect_certificate(cert).serial));
     }
 
     void prove(const msg::Challenge& challenge)
@@ -564,7 +646,9 @@ private:
         if ((phase_ != Phase::Announce && phase_ != Phase::Challenge) || !mine(msg.device)) return;
         try
         {
+            log::info(tag(), "handshake: challenge");
             prove(msg);
+            log::info(tag(), "handshake: proof sent");
         }
         catch (const Refused& e)
         {
@@ -598,11 +682,12 @@ private:
         }
         const bool first = phase_ == Phase::Config;
         stream_.on_config(msg);
+        samples_since_trace_ = 0;
         publish_applied(msg, true, {}, {});
         if (first)
         {
             phase_ = Phase::Run;
-            log::info(tag(), std::format("online (device_id {}, rate_ms {}, amplitude {}, active {})",
+            log::info(tag(), std::format("handshake: online (device_id {}, rate_ms {}, amplitude {}, active {})",
                                          stream_.device_id(), stream_.rate_ms(), stream_.amplitude(), stream_.active()));
             // The first sample follows at once: the previous wait was the handshake.
             stream_.tick(std::chrono::steady_clock::now());
@@ -620,6 +705,8 @@ private:
     std::string own_serial_;
     Phase phase_{Phase::Announce};
     bool csr_sent_{false};
+    bool hello_traced_{false};
+    int samples_since_trace_{0};
     std::unique_ptr<pki::DeviceKey> next_key_;
     rclcpp::Publisher<msg::Hello>::SharedPtr hello_;
     rclcpp::Publisher<msg::Heartbeat>::SharedPtr heartbeat_;

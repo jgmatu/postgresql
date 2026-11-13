@@ -146,6 +146,16 @@ void DockerEngine::run(const std::string& name, const std::string& image, const 
     spec["Entrypoint"] = boost::json::array{"/app/entrypoint.sh"};
     spec["Cmd"] = std::move(cmd_json);
     spec["Env"] = std::move(env_json);
+    // The operational project is `pgdemo`. These labels put the worker in the
+    // same `docker compose logs` stream as server-1 and controller-1.
+    boost::json::object labels;
+    labels["com.docker.compose.project"] = "pgdemo";
+    labels["com.docker.compose.service"] = "worker";
+    labels["com.docker.compose.oneoff"] = "False";
+    constexpr std::string_view kWorkerPrefix = "pgdemo-worker-";
+    if (name.starts_with(kWorkerPrefix))
+        labels["com.docker.compose.container-number"] = name.substr(kWorkerPrefix.size());
+    spec["Labels"] = std::move(labels);
     boost::json::object host;
     host["Init"] = true;
     host["Binds"] = std::move(binds_json);

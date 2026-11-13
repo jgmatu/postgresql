@@ -34,7 +34,7 @@ constexpr std::string_view kGovernance = R"(<?xml version="1.0" encoding="UTF-8"
 <enable_read_access_control>true</enable_read_access_control>
 <enable_write_access_control>true</enable_write_access_control>
 <metadata_protection_kind>SIGN</metadata_protection_kind>
-<data_protection_kind>SIGN</data_protection_kind>
+<data_protection_kind>NONE</data_protection_kind>
 </topic_rule>
 </topic_access_rules>
 </domain_rule>

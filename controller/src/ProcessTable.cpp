@@ -160,7 +160,7 @@ void ProcessTable::apply_device(const db::Device& d)
     if (!d.active())
     {
         if ((launched(s) || s.session) && s.running == Launch::Run) stop_process(s, "identity " + d.identity);
-        set_state(s, "DISABLED", "identity " + d.identity);
+        set_state(s, "DISABLED", "identity " + d.identity, 0);
         return;
     }
     // ACTIVE again, or with a new certificate: give it another chance.
@@ -597,9 +597,10 @@ void ProcessTable::fail_enrollment(std::int64_t request_id, std::string code, st
     });
 }
 
-void ProcessTable::set_state(Slot& s, std::string state, std::optional<std::string> error)
+void ProcessTable::set_state(Slot& s, std::string state, std::optional<std::string> error,
+                             std::optional<int> reported_pid)
 {
-    const int pid = s.pid;
+    const int pid = reported_pid.value_or(s.pid);
     if (s.state == state && s.last_error == error && s.state_pid == pid) return;
     s.state = state;
     s.last_error = error;

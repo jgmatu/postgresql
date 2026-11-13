@@ -3,11 +3,12 @@ Documentation     The control panel in Chromium, through Robot Framework Browser
 ...
 ...               Elements are found by ``data-testid``; states (badges, outcomes) are read from
 ...               ``data-state``, which holds the API value rather than its Spanish label. Getters
-...               with an assertion retry until the library timeout, so live updates need no sleeps.
+...               with an assertion retry for ``retry_assertions_for`` (15 s), so a live update
+...               that takes longer than the library's 1 s default still passes.
 ...
 ...               ``--variable UI_SCREENSHOTS:frontend/docs/screens`` also copies every capture
 ...               there (relative paths are from the repository root); frontend/README.md uses them.
-Library           Browser    timeout=15s    auto_closing_level=SUITE
+Library           Browser    timeout=15s    retry_assertions_for=15s    auto_closing_level=SUITE
 Library           OperatingSystem
 Resource          stack.resource
 

@@ -42,6 +42,13 @@ std::string_view phase_wait(Phase phase) noexcept
     return "the proof";
 }
 
+/// A repeated CSR, a heartbeat or a sample can arrive while the certificate is
+/// issued. They are not the proof.
+bool awaits_proof(const Uplink& msg)
+{
+    return std::holds_alternative<pgdemo_msgs::msg::Proof>(msg) || std::holds_alternative<pgdemo_msgs::msg::Error>(msg);
+}
+
 /// The device proved nothing, or the wrong thing. It stays down until its identity changes.
 struct AuthFailure : std::runtime_error
 {
@@ -334,7 +341,14 @@ void Session::handle(SessionDeps& deps, Uplink msg)
         {
         case Phase::WaitCsr: on_wait_csr(deps, *live, msg); break;
         case Phase::WaitCert: queue_inbox(*session, std::move(msg)); break;
-        case Phase::WaitProof: on_proof(deps, *live, msg); break;
+        case Phase::WaitProof:
+            if (!awaits_proof(msg))
+            {
+                log::info(kLog, name + ": still waiting for the proof");
+                break;
+            }
+            on_proof(deps, *live, msg);
+            break;
         case Phase::Online:
             session->last_frame = Clock::now();
             on_online(deps, *live, msg);
@@ -426,6 +440,11 @@ void begin_auth(SessionDeps& deps, ProcessTable::Slot& slot)
     if (raw_nonce.size() != 32) throw AuthFailure("BAD_PROOF", "nonce is not 32 bytes");
     std::copy(raw_nonce.begin(), raw_nonce.end(), session->nonce.begin());
     session->send_challenge(session->nonce);
+    while (!session->inbox.empty() && !awaits_proof(session->inbox.front()))
+    {
+        log::info(kLog, slot.name + ": ignoring a message queued before the challenge");
+        session->inbox.pop_front();
+    }
     if (!session->inbox.empty())
     {
         auto msg = std::move(session->inbox.front());

@@ -164,7 +164,11 @@ public:
 
     void forget(Slot& slot);
     void fail_enrollment(std::int64_t request_id, std::string code, std::string detail);
-    void set_state(Slot& slot, std::string state, std::optional<std::string> error = std::nullopt);
+    /// `reported_pid`, when set, is the pid stored with the session. The live
+    /// pid stays on the slot so the process can still be reaped. A suspension
+    /// passes 0: the row must not advertise a process that is being stopped.
+    void set_state(Slot& slot, std::string state, std::optional<std::string> error = std::nullopt,
+                   std::optional<int> reported_pid = std::nullopt);
     /// Publish `bye` when there is no session yet.
     void send_bye(const std::string& device, const std::string& reason);
 
