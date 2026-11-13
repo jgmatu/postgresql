@@ -586,10 +586,12 @@ public:
     /// PEM of the manager root, or empty when the row does not exist yet.
     std::optional<std::string> load_manager_certificate_pem();
 
-    /// Store the manager's own root. A later call replaces the single row.
-    void register_manager_certificate(const std::string& serial, const std::string& fingerprint,
-                                      const std::string& subject_cn, const std::string& not_before,
-                                      const std::string& not_after, const std::string& pem);
+    /// Store the manager's own root and the factory root it uses to legitimize workers.
+    /// A later call replaces the single row. The fingerprint selects the factory row; it is not the issuer.
+    void register_manager_certificate(const std::string& factory_fingerprint, const std::string& serial,
+                                      const std::string& fingerprint, const std::string& subject_cn,
+                                      const std::string& not_before, const std::string& not_after,
+                                      const std::string& pem);
 
     /// Replace the manager's signature over its revocation list.
     void replace_manager_crl(const std::string& payload, const std::string& signature_hex);

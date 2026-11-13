@@ -74,7 +74,7 @@ void start_origin(db::DatabaseManager& db, FleetOptions& fleet, const OriginFile
         const auto stored = db.manager_certificate_present() ? db.load_manager_certificate_pem() : std::nullopt;
         if (!stored || *stored != info.pem)
         {
-            db.register_manager_certificate(info.serial, info.fingerprint, info.subject_cn,
+            db.register_manager_certificate(root.fingerprint, info.serial, info.fingerprint, info.subject_cn,
                                             pki::format_time(info.not_before), pki::format_time(info.not_after),
                                             info.pem);
             log::info(kLog, "manager root registered");

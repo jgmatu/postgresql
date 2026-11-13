@@ -1436,14 +1436,15 @@ std::optional<std::string> DatabaseManager::load_manager_certificate_pem()
     return res[0][0].as<std::string>();
 }
 
-void DatabaseManager::register_manager_certificate(const std::string& serial, const std::string& fingerprint,
-                                                   const std::string& subject_cn, const std::string& not_before,
-                                                   const std::string& not_after, const std::string& pem)
+void DatabaseManager::register_manager_certificate(const std::string& factory_fingerprint, const std::string& serial,
+                                                   const std::string& fingerprint, const std::string& subject_cn,
+                                                   const std::string& not_before, const std::string& not_after,
+                                                   const std::string& pem)
 {
     auto lease = pool_.acquire();
     pqxx::work txn(lease.get());
-    txn.exec("SELECT register_manager_certificate($1, $2, $3, $4::timestamptz, $5::timestamptz, $6)",
-             pqxx::params{serial, fingerprint, subject_cn, not_before, not_after, pem});
+    txn.exec("SELECT register_manager_certificate($1, $2, $3, $4, $5::timestamptz, $6::timestamptz, $7)",
+             pqxx::params{factory_fingerprint, serial, fingerprint, subject_cn, not_before, not_after, pem});
     txn.commit();
 }
 

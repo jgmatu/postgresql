@@ -15,9 +15,9 @@ holds it in a file and signs CSRs; only public material is stored here.
                       at that root.
   crl                 revoked certificates of the CA that issued them. The
                       manager's own list is manager_revocation, not this table.
-  manager_certificate the manager's own root. It signs the CRL and does not
-                      reference root_ca. The factory root is the other certificate
-                      the manager keeps.
+  manager_certificate the manager's own root. It signs the CRL. factory_ca_id
+                      points at the factory row of root_ca: the root the manager
+                      keeps in order to legitimize workers. It is not the issuer.
   manager_revocation  workers the manager has revoked. No foreign key to
                       device_certificate: the row outlives the certificate.
   manager_crl_signature  the manager's signature over that list
@@ -371,6 +371,7 @@ REVOKE ALL ON FUNCTION reject_enrollment(bigint, text, text) FROM PUBLIC;
 
 CREATE TABLE IF NOT EXISTS manager_certificate (
     cert_id             INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    factory_ca_id       INT NOT NULL REFERENCES root_ca (ca_id) ON DELETE RESTRICT,
     serial              TEXT NOT NULL CHECK (serial ~ '^[0-9a-f]{1,40}$'),
     fingerprint_sha256  TEXT NOT NULL UNIQUE CHECK (fingerprint_sha256 ~ '^[0-9a-f]{64}$'),
     subject_cn          TEXT NOT NULL,
@@ -382,9 +383,26 @@ CREATE TABLE IF NOT EXISTS manager_certificate (
 );
 
 -- A database created while this certificate still hung off root_ca drops that link.
+-- factory_ca_id is the factory root the manager holds, not the issuer of this row.
 ALTER TABLE manager_certificate DROP CONSTRAINT IF EXISTS manager_certificate_ca_id_fkey;
 ALTER TABLE manager_certificate DROP CONSTRAINT IF EXISTS manager_certificate_ca_id_serial_key;
 ALTER TABLE manager_certificate DROP COLUMN IF EXISTS ca_id;
+ALTER TABLE manager_certificate
+    ADD COLUMN IF NOT EXISTS factory_ca_id INT REFERENCES root_ca (ca_id) ON DELETE RESTRICT;
+UPDATE manager_certificate AS m
+   SET factory_ca_id = r.ca_id
+  FROM root_ca AS r
+ WHERE m.factory_ca_id IS NULL
+   AND r.name = 'factory';
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM public.manager_certificate WHERE factory_ca_id IS NULL) THEN
+        RAISE EXCEPTION 'manager_certificate has no factory root to legitimize workers'
+            USING ERRCODE = 'no_data_found';
+    END IF;
+END
+$$;
+ALTER TABLE manager_certificate ALTER COLUMN factory_ca_id SET NOT NULL;
 
 CREATE UNIQUE INDEX IF NOT EXISTS manager_certificate_singleton ON manager_certificate ((TRUE));
 
@@ -428,32 +446,43 @@ BEGIN
 END
 $$;
 
--- The manager's own root. A later call replaces the single row.
-DROP FUNCTION IF EXISTS register_manager_certificate(text, text, text, text, timestamptz, timestamptz, text);
+-- The manager's own root, plus the factory root it uses to legitimize workers.
+-- A later call replaces the single row. The factory fingerprint selects that root;
+-- it does not mean the factory issued this certificate.
+DROP FUNCTION IF EXISTS register_manager_certificate(text, text, text, timestamptz, timestamptz, text);
 
 CREATE OR REPLACE FUNCTION register_manager_certificate(
-    p_serial         text,
-    p_fingerprint    text,
-    p_subject_cn     text,
-    p_not_before     timestamptz,
-    p_not_after      timestamptz,
-    p_cert_pem       text
+    p_factory_fingerprint text,
+    p_serial              text,
+    p_fingerprint         text,
+    p_subject_cn          text,
+    p_not_before          timestamptz,
+    p_not_after           timestamptz,
+    p_cert_pem            text
 ) RETURNS void
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog, public
 AS $$
+DECLARE
+    v_ca int;
 BEGIN
+    SELECT r.ca_id INTO v_ca FROM public.root_ca r
+    WHERE r.name = 'factory' AND r.fingerprint_sha256 = p_factory_fingerprint AND r.is_active;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'factory root % is not registered', p_factory_fingerprint
+            USING ERRCODE = 'no_data_found';
+    END IF;
     IF EXISTS (SELECT 1 FROM public.manager_certificate) THEN
         UPDATE public.manager_certificate
-           SET serial = p_serial, fingerprint_sha256 = p_fingerprint,
+           SET factory_ca_id = v_ca, serial = p_serial, fingerprint_sha256 = p_fingerprint,
                subject_cn = p_subject_cn, not_before = p_not_before, not_after = p_not_after,
                cert_pem = p_cert_pem, issued_at = clock_timestamp();
         RETURN;
     END IF;
     INSERT INTO public.manager_certificate
-        (serial, fingerprint_sha256, subject_cn, not_before, not_after, cert_pem)
-    VALUES (p_serial, p_fingerprint, p_subject_cn, p_not_before, p_not_after, p_cert_pem);
+        (factory_ca_id, serial, fingerprint_sha256, subject_cn, not_before, not_after, cert_pem)
+    VALUES (v_ca, p_serial, p_fingerprint, p_subject_cn, p_not_before, p_not_after, p_cert_pem);
 END
 $$;
 
@@ -539,7 +568,7 @@ END
 $$;
 
 REVOKE ALL ON FUNCTION register_factory_root(text, text, text, timestamptz, timestamptz) FROM PUBLIC;
-REVOKE ALL ON FUNCTION register_manager_certificate(text, text, text, timestamptz, timestamptz, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION register_manager_certificate(text, text, text, text, timestamptz, timestamptz, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION replace_manager_crl(text, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION add_manager_revocation(text, text, text, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION register_factory_worker(text, text, text, text, timestamptz, timestamptz, text) FROM PUBLIC;

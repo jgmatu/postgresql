@@ -61,7 +61,7 @@ Only the public material is stored. [libs/db](../libs/db) is the writer.
 | What | Where |
 |---|---|
 | Factory root | One `root_ca` row named `factory`, the PEM of `root.crt`. The server registers it at startup when `--factory-cert` exists. The controller registers it when it starts this origin. |
-| Manager | One row of `manager_certificate`, the self-signed root beside `manager.key`. It has no `ca_id`. This process does not issue it. |
+| Manager | One row of `manager_certificate`, the self-signed root beside `manager.key`. `factory_ca_id` points at this factory root, which the manager holds to legitimize workers. This process does not issue the manager certificate. |
 | Worker | A row of `device_certificate` whose `ca_id` is the factory, written when the controller reads a `cert.pem` that chains to this root. `device.cert_id` stays on the certificate the enrollment already marked current. |
 | Manager revocation | `manager_revocation` and `manager_crl_signature`. The manager signs the list with its own key. This process does not sign it, and it is not the `crl` table. |
 
