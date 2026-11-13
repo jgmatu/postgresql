@@ -20,6 +20,7 @@ The operational project is the one that stays. It runs four containers. PostgreS
 | `server` | `pgdemo-server` on HTTPS port 8443 | yes, `restart: unless-stopped` |
 | `controller` | `pgdemo-controller` and one device process per enrolled device | yes, `restart: unless-stopped` |
 | `factory` | `pgdemo-factory`, operational project only | yes, `restart: unless-stopped` |
+| `worker` | declared so Compose follows the containers the controller creates; `scale: 0`, no container of its own | no |
 
 [`entrypoint.sh`](entrypoint.sh) is the command of `server`, `controller` and `factory`. The server and the controller read `run/demo.env`. The server generates the JWT key and the TLS certificate. The factory generates its root and copies only `root.crt` out. Each one then `exec`s its binary. Tini is pid 1 (`init: true`) and forwards the signal to that process. `init` does not use the entrypoint: its command is `scripts/db-init.sh`.
 
@@ -95,7 +96,7 @@ flowchart LR
 | `factory-cert` | `factory` writes it, `controller` reads it | `root.crt` only |
 | `manager-keys` | `controller` | the manager's own key and self-signed root |
 
-A worker container is not in the compose file. The controller creates it when an enrollment arrives, through the Docker Engine API on `/var/run/docker.sock`. Only the controller service mounts that socket. If the create fails with permission denied, set `DOCKER_GID` to the group of the socket (`stat -c %g /var/run/docker.sock`) and start again. The controller does not change the socket's owner.
+The operational file declares `worker` with `scale: 0` and `network_mode: none`. Compose does not create a container for it. The controller creates one when an enrollment arrives, through the Docker Engine API on `/var/run/docker.sock`. Only the controller service mounts that socket. If the create fails with permission denied, set `DOCKER_GID` to the group of the socket (`stat -c %g /var/run/docker.sock`) and start again. The controller does not change the socket's owner. The container is named `pgdemo-worker-<name>` and labelled as service `worker` of project `pgdemo`, with `container-number` equal to the device name. It carries no `com.docker.compose.config-hash`, so Compose does not adopt it and the next `up` does not remove it. An attached `docker compose up`, or `docker compose logs -f` started before that container starts, prints each new line as `worker-<name>` in the next colour of Compose's palette. `docker compose logs` without `--follow`, and a follow attached while the worker is already running, do not show it. Restarting the stack, or recreating the worker, shows the lines that begin after the follow is attached.
 
 Each worker gets a volume `pgdemo_puf_<name>`, mounted only in that container at `/var/lib/pgdemo/puf`. The factory and the controller do not mount it. The seed file in that directory is written once by the worker. Stopping or recreating the container leaves the volume. The container also mounts the factory certificate and `manager.crt`, both read only. It does not receive `manager.key`.
 

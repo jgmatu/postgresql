@@ -60,6 +60,18 @@ services:
       factory:
         condition: service_healthy
 
+  # Declared so an attached `up` and `logs -f` follow the containers the
+  # controller creates. scale 0 and the absence of a config-hash keep Compose
+  # from creating a container or from adopting the running workers.
+  # network_mode none adds no network. The entrypoint exits if Compose ever
+  # does create one, so it cannot become a device.
+  worker:
+    image: pgdemo:latest
+    scale: 0
+    network_mode: none
+    restart: "no"
+    entrypoint: ["true"]
+
 volumes:
   pgdata:
     name: pgdemo_pgdata

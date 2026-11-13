@@ -49,6 +49,27 @@ std::string unchunk(std::string_view raw)
     return out;
 }
 
+int dial(const std::string& socket)
+{
+    const int fd = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (fd < 0) throw std::runtime_error(std::string("docker: cannot open a socket: ") + std::strerror(errno));
+    sockaddr_un addr{};
+    addr.sun_family = AF_UNIX;
+    if (socket.size() >= sizeof addr.sun_path)
+    {
+        ::close(fd);
+        throw std::runtime_error("docker: socket path is too long");
+    }
+    std::char_traits<char>::copy(addr.sun_path, socket.c_str(), socket.size() + 1);
+    if (::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof addr) != 0)
+    {
+        const int err = errno;
+        ::close(fd);
+        throw std::runtime_error(std::string("docker: cannot connect to ") + socket + ": " + std::strerror(err));
+    }
+    return fd;
+}
+
 std::string recv_all(int fd)
 {
     std::string out;
@@ -74,19 +95,12 @@ DockerEngine::DockerEngine(std::string socket) : socket_(std::move(socket)) {}
 
 DockerEngine::Reply DockerEngine::request(const std::string& method, const std::string& path, const std::string& body) const
 {
-    const int raw_fd = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
-    if (raw_fd < 0) throw std::runtime_error(std::string("docker: cannot open a socket: ") + std::strerror(errno));
+    const int raw_fd = dial(socket_);
     const struct Guard
     {
         int fd;
         ~Guard() { ::close(fd); }
     } guard{raw_fd};
-    sockaddr_un addr{};
-    addr.sun_family = AF_UNIX;
-    if (socket_.size() >= sizeof addr.sun_path) throw std::runtime_error("docker: socket path is too long");
-    std::char_traits<char>::copy(addr.sun_path, socket_.c_str(), socket_.size() + 1);
-    if (::connect(guard.fd, reinterpret_cast<sockaddr*>(&addr), sizeof addr) != 0)
-        throw std::runtime_error(std::string("docker: cannot connect to ") + socket_ + ": " + std::strerror(errno));
     std::string head = method + " " + path + " HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n";
     if (!body.empty())
         head += "Content-Type: application/json\r\nContent-Length: " + std::to_string(body.size()) + "\r\n";
@@ -146,8 +160,10 @@ void DockerEngine::run(const std::string& name, const std::string& image, const 
     spec["Entrypoint"] = boost::json::array{"/app/entrypoint.sh"};
     spec["Cmd"] = std::move(cmd_json);
     spec["Env"] = std::move(env_json);
-    // The operational project is `pgdemo`. These labels put the worker in the
-    // same `docker compose logs` stream as server-1 and controller-1.
+    // Service `worker` is declared at scale 0. These containers carry no
+    // config-hash, so Compose follows a start without creating or removing
+    // them. container-number is the device name: `pgdemo-worker-<name>` is the
+    // default Compose name, and the log prefix is `worker-<name>`.
     boost::json::object labels;
     labels["com.docker.compose.project"] = "pgdemo";
     labels["com.docker.compose.service"] = "worker";

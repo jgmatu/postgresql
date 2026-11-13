@@ -34,12 +34,22 @@ fi
 # process drops to that user.
 if [[ "${1:-}" == device ]]; then
     shift
+    name=""
+    args=("$@")
+    for ((i = 0; i < ${#args[@]}; i++)); do
+        if [[ "${args[i]}" == --name && $((i + 1)) -lt ${#args[@]} ]]; then
+            name="${args[i + 1]}"
+            break
+        fi
+    done
     mkdir -p /var/lib/pgdemo/puf /var/lib/pgdemo/keystore "${ROS_LOG_DIR}"
     if [[ "$(id -u)" -eq 0 ]]; then
         chown pgdemo:pgdemo /var/lib/pgdemo /var/lib/pgdemo/puf /var/lib/pgdemo/keystore "${ROS_LOG_DIR}"
         chmod 700 /var/lib/pgdemo/puf /var/lib/pgdemo/keystore
+        printf '[entrypoint] device %s: volumes ready, starting as pgdemo\n' "${name:-worker}"
         exec runuser -u pgdemo -- /app/build/device/pgdemo-device "$@"
     fi
+    printf '[entrypoint] device %s: starting\n' "${name:-worker}"
     exec /app/build/device/pgdemo-device "$@"
 fi
 

@@ -36,6 +36,13 @@ inline Level threshold()
     return level;
 }
 
+/// Mutex shared by `write`, so one line is not split by another.
+inline std::mutex& sink_mutex()
+{
+    static std::mutex mtx;
+    return mtx;
+}
+
 /**
  * @brief Write one UTC-timestamped line to `std::clog`. Thread-safe.
  *
@@ -49,13 +56,12 @@ inline void write(Level level, std::string_view component, std::string_view mess
 {
     if (level < threshold()) return;
 
-    static std::mutex mtx;
     static constexpr std::string_view names[] = {"DEBUG", "INFO", "WARN", "ERROR"};
 
     const auto now = std::chrono::floor<std::chrono::milliseconds>(std::chrono::system_clock::now());
     const std::string line = std::format("{:%FT%T}Z {:<5} [{}] {}\n", now,
                                          names[static_cast<int>(level)], component, message);
-    std::lock_guard lock(mtx);
+    std::lock_guard lock(sink_mutex());
     std::clog << line << std::flush;
 }
 
