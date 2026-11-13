@@ -12,8 +12,8 @@ Sources:
 | [`src/ProcessTable.hpp`](src/ProcessTable.hpp), [`src/ProcessTable.cpp`](src/ProcessTable.cpp) | Slots, fork, reap, backoff, the lock |
 | [`src/Session.hpp`](src/Session.hpp), [`src/Session.cpp`](src/Session.cpp) | Handshake of one worker, then online samples |
 | [`src/TelemetryWriter.hpp`](src/TelemetryWriter.hpp), [`src/TelemetryWriter.cpp`](src/TelemetryWriter.cpp) | One sample queue and one thread per node |
-| [`src/Spawn.cpp`](src/Spawn.cpp) | `fork` + `execv` of `pgdemo-device` |
-| [`src/Origin.hpp`](src/Origin.hpp), [`src/Origin.cpp`](src/Origin.cpp) | First manager certificate, its CRL, and the mutual handshake when the factory files exist |
+| [`src/Spawn.cpp`](src/Spawn.cpp) | `fork` + `execve` of `pgdemo-device`; the child drops `ROS_SECURITY_*` |
+| [`src/Origin.hpp`](src/Origin.hpp), [`src/Origin.cpp`](src/Origin.cpp) | Manager certificate, its CRL, and the SROS2 enclave written before the node |
 
 ## Startup
 
@@ -27,7 +27,7 @@ It then connects as `pgdemo-controller` with `--max-devices + 1` query connectio
 
 ROS 2 is the fleet's executor. `rclcpp::spin` runs on the main thread. `Fleet::tick` hands an enrollment or a `device_events` notice to `ProcessTable`, and an uplink to that worker's `Session`, so the table and the sessions still take no lock. Subscriptions call `on_hello()` and `on_uplink()` directly. `tick()` reaps children, enforces handshake deadlines, and runs the heartbeat and the maintenance. Each device process has its own ROS executor for `pgdemo/worker/` and `pgdemo/manager/`.
 
-[`TelemetryWriter`](src/TelemetryWriter.hpp) is the only class that inserts samples. A node gets one FIFO and one POSIX thread. That thread checks a connection out of the pool, writes one transaction, and returns it. The spin thread keeps one connection free for a CSR, a proof or a session write, which still happen at once. The `LISTEN` connection is separate: its callback only queues the JSON object. Workers never see a connection: they have no connection string, and `close_range` between `fork` and `execv` drops every descriptor the pool holds.
+[`TelemetryWriter`](src/TelemetryWriter.hpp) is the only class that inserts samples. A node gets one FIFO and one POSIX thread. That thread checks a connection out of the pool, writes one transaction, and returns it. The spin thread keeps one connection free for a CSR, a proof or a session write, which still happen at once. The `LISTEN` connection is separate: its callback only queues the JSON object. Workers never see a connection: they have no connection string, and `close_range` between `fork` and `execve` drops every descriptor the pool holds.
 
 ```mermaid
 flowchart TB
@@ -56,7 +56,7 @@ flowchart TB
     table -->|device_session| pg
     fleet -->|maintenance and config| pg
     listener -.->|LISTEN NOTIFY| pg
-    table -->|fork plus execv| devices
+    table -->|fork plus execve| devices
     devices -->|own ROS executor| manager
 ```
 
@@ -89,9 +89,9 @@ Device names cannot start with a dot, so `.controller.lock` never clashes with a
 
 ## Factory origin
 
-[`controller/scripts/gen-manager-key.sh`](scripts/gen-manager-key.sh) writes `run/controller/manager.key` before this process starts. The process does not create that key. When the key and `run/factory/root.crt` are both present, startup registers the factory certificate in `root_ca` (the row named `factory`), asks `pgdemo-factory` once for the manager certificate, and signs `manager_revocation` with the manager key. The signature is `manager_crl_signature`. Later starts read the certificate and sign the list again from the rows.
+[`controller/scripts/gen-manager-key.sh`](scripts/gen-manager-key.sh) writes `run/controller/manager.key` before this process starts. The process does not create that key. When the key and `run/factory/root.crt` are both present, startup registers the factory certificate in `root_ca` (the row named `factory`), asks `pgdemo-factory` for the manager certificate, signs `manager_revocation` with the manager key, and writes the SROS2 enclave before the node is created. The signature is `manager_crl_signature`. A later start reuses the stored certificate and publishes that signature. It asks again only when the stored certificate is not ECDSA-SHA256. The list is signed again only when the serials change.
 
-The mutual TLS 1.3 listener then binds `127.0.0.1`. Each accepted worker must chain to the factory root, and its serial must be absent from the signed list. The presented certificate is stored on `device_certificate` with `ca_id` of the factory. `device.cert_id` is not moved. If the factory is down on that first request, the origin stays off and the challenge in [docs/DEVICE_PKI.md](../docs/DEVICE_PKI.md) continues. The factory itself is [factory/README.md](../factory/README.md).
+DDS is the admission. A worker whose `cert.pem` chains to the factory root is registered on `device_certificate`. `device.cert_id` is not moved. A serial on the manager list gets `bye` and no session. The list is republished every second on `pgdemo/manager/security/crl`. If the factory is down on that first request, `ROS_SECURITY_*` stays unset and the challenge in [docs/DEVICE_PKI.md](../docs/DEVICE_PKI.md) continues. The factory itself is [factory/README.md](../factory/README.md).
 
 ## Process table
 
@@ -119,12 +119,12 @@ The mutual TLS 1.3 listener then binds `127.0.0.1`. Each accepted worker must ch
 pgdemo-device --name NAME --type TYPE --payload scalar|gps|xy|xyz --dir DIR
               [--enroll REQUEST_ID | --rotate REQUEST_ID]
               [--device-id ID --puf PATH]
-              [--factory HOST:PORT] [--factory-root PATH] [--manager-tls HOST:PORT]
+              [--factory HOST:PORT] [--factory-root PATH] [--manager-cert PATH]
 ```
 
-The last five arguments are passed only while the factory origin is up. `--device-id` and `--puf` are added on a `Run` of a device that already has a row. What the worker does with them is [device/README.md](../device/README.md#simulated-puf).
+`--factory`, `--factory-root` and `--manager-cert` are passed on every launch while the factory origin is up. `--device-id` and `--puf` are added on a `Run` of a device that already has a row. What the worker does with them is [device/README.md](../device/README.md#simulated-puf).
 
-`spawn_process()` builds `argv` before the fork. Between `fork` and `execv` the child only calls async-signal-safe functions: it restores default dispositions for `SIGINT`, `SIGTERM`, `SIGCHLD` and `SIGPIPE`, clears the signal mask, asks for `SIGTERM` when the forking thread dies (`PR_SET_PDEATHSIG`), exits `127` if that parent is already gone, closes every descriptor above stderr, then `execv`. The child is a new ROS node (`pgdemo_device_<name>`); it inherits the parent's ROS environment and nothing of its DDS participant, because `execv` replaces the image. The death signal is tied to the thread that forked, which is the spin thread.
+`spawn_process()` builds `argv` and a copy of the environment before the fork. Every `ROS_SECURITY_*` line is dropped, so a child that has not written its enclave does not inherit Enforce. Between `fork` and `execve` the child only calls async-signal-safe functions: it restores default dispositions for `SIGINT`, `SIGTERM`, `SIGCHLD` and `SIGPIPE`, clears the signal mask, asks for `SIGTERM` when the forking thread dies (`PR_SET_PDEATHSIG`), exits `127` if that parent is already gone, closes every descriptor above stderr, then `execve`. The child is a new ROS node (`pgdemo_device_<name>`). The death signal is tied to the thread that forked, which is the spin thread.
 
 The pid is recorded before the child can publish. `set_state` writes `STARTING`. If no `hello` arrives within 5 s the child is killed.
 
@@ -147,7 +147,7 @@ sequenceDiagram
     participant T as ProcessTable
     participant S as Session
     participant D as pgdemo-device
-    T->>D: fork and execv
+    T->>D: fork and execve
     D->>S: hello on pgdemo/worker/control/hello
     opt enroll or rotate
         D->>S: csr

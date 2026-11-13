@@ -191,23 +191,26 @@ sequenceDiagram
     participant manager as Manager
 
     factory->>factory: root key already on disk
-    worker->>worker: seed in devices.puf, same P-384 key
+    worker->>worker: seed in devices.puf, P-384 key
     worker->>factory: self-signed certificate
-    factory-->>worker: certificate signed by the factory root
+    factory-->>worker: identity certificate, ECDSA-SHA256
+    factory-->>worker: signed governance and permissions
     manager->>factory: self-signed certificate, the first start
-    factory-->>manager: manager certificate signed by the factory root
-    manager->>manager: signs its own revocation list
-    worker->>manager: mutual TLS, then the list
+    factory-->>manager: manager certificate, ECDSA-SHA256
+    worker->>manager: SROS2 presents the factory certificate
+    manager->>worker: CRL signed with the manager key
+    worker->>worker: checks the CRL with the manager certificate
 ```
 
-- `scripts/gen-factory.sh` creates `run/factory/root.key` before `pgdemo-factory` starts. The process exits if the key is missing. The certificate is a `root_ca` row named `factory`. The private key is not stored.
-- A missing `device_id` in `devices.puf` is generated once and kept. The same id derives the same P-384 key. The worker sends a self-signed certificate. The factory signs the worker and, the first time, the manager. There is no second issuer.
-- The manager signs `manager_revocation` with its own key. That list is not the `crl` table. A serial on it is not authenticated, even when the worker certificate still chains to the factory.
-- The mutual TLS 1.3 handshake runs when the controller and the worker configure their ROS nodes. The challenge of the model that already runs stays. It is skipped only for a certificate that chains to the factory root.
+- `scripts/gen-factory.sh` creates `run/factory/root.key` before `pgdemo-factory` starts. The process exits if the key is missing. `root.crt` is self-signed with ECDSA-SHA256 and is a `root_ca` row named `factory`. The private key is not stored. The key stays P-384. DDS-Security on Lyrical accepts `ecdsa-with-SHA256` and rejects SHA-384, so the identity certificates use that hash. The manager's CRL signature stays ECDSA-SHA384.
+- A missing `device_id` in `devices.puf` is generated once and kept. The same id derives the same P-384 key. The worker sends a self-signed certificate. The factory signs the worker and, the first time, the manager. A stored manager certificate is asked for again only when its signature is not SHA-256. There is no second issuer.
+- The factory also signs two fixed documents, and nothing else: the governance template and the permissions template whose subject is `CN=<name>`. Both CA files in an SROS2 enclave are `root.crt`. `root.key` is not copied into the keystore.
+- The manager signs `manager_revocation` with its own key. That list is not the `crl` table and DDS does not consult it. It is published every second on `pgdemo/manager/security/crl`. Each worker holds a copy of the manager certificate and checks the signature. A serial on the list ends the worker, and a `hello` of that serial gets `bye` and no session, even when the certificate still chains to the factory.
+- DDS-Security is the admission. Each process writes its enclave and exports `ROS_SECURITY_*` before `rclcpp::init`. The OpenSSL listener is not that proof. The challenge of the model that already runs stays when the factory files are absent, or when a worker's certificate does not chain and SROS2 stays off. A manager that already enforces SROS2 does not see that worker.
 
-- [x] **The factory chain.** A `factory` directory, a simulated PUF, one signature from that root, and mutual TLS when the files exist. The model in [docs/DEVICE_PKI.md](docs/DEVICE_PKI.md) keeps running.
+- [x] **The factory chain.** A `factory` directory, a simulated PUF, one signature from that root, and SROS2 when the files exist. The model in [docs/DEVICE_PKI.md](docs/DEVICE_PKI.md) keeps running when they do not.
 
-  - [x] **Factory.** `pgdemo-factory`, and its certificate stored in `root_ca` under the name `factory`.
+  - [x] **Factory.** `pgdemo-factory`, and its certificate stored in `root_ca` under the name `factory`. It signs identities and the two policy templates.
   - [x] **Boot.** The worker reads or creates its seed in `devices.puf`, derives the P-384 key, and sends a self-signed certificate. The seed and the private key stay on the worker.
-  - [x] **One signature.** The factory signs the worker and the manager. The manager signs its own revocation list.
-  - [x] **Handshake.** The worker and the manager authenticate with mutual TLS when the ROS node is configured. The manager presents the certificate the factory signed.
+  - [x] **One signature.** The factory signs the worker and the manager with ECDSA-SHA256. The manager signs its own revocation list with ECDSA-SHA384.
+  - [x] **Admission.** The worker presents the factory certificate through SROS2. The manager publishes the CRL, and the worker checks it with the manager certificate.

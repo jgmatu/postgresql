@@ -231,7 +231,7 @@ Mapa: the last 120 fixes of each GPS device (`/history`, then `telemetry_gps`), 
 
 ![PKI](docs/screens/pki.png)
 
-PKI: the root CA and the fingerprint it signs with (`GET /api/pki/ca`), then a switch among the factory-issued worker certificates, the manager certificate and the factory root (`GET /api/pki/origin`). Below that, the signed CRL (`GET /api/pki/crl`, shown or downloaded as PEM) with the revoked serials, and the enrollment requests.
+PKI: the trust circle first (`GET /api/pki/origin`), a switch among the factory-issued worker certificates, the manager certificate and the factory root, then the list the manager signs. Below that, the demo CA and the fingerprint it signs with (`GET /api/pki/ca`), its CRL (`GET /api/pki/crl`, shown or downloaded as PEM), and the enrollment requests. The `device` and `enrollment` stream reloads the origin.
 
 ![Eventos](docs/screens/events.png)
 

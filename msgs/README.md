@@ -2,7 +2,7 @@
 
 The contract between the manager (`pgdemo-controller`) and its workers (`pgdemo-device`). PostgreSQL is not part of it: a worker has no database login, and the manager is the only process that writes samples. The structs live in [`msg/`](msg) and `rosidl` compiles them to `pgdemo_msgs::msg`.
 
-ROS 2 discovers nodes as peers. Inside this system that does not grant authority. The manager publishes `pgdemo/manager/`. Workers publish `pgdemo/worker/`. A worker does not publish on the manager's topics, does not subscribe to another worker's telemetry, and ignores a manager message whose `device` is not its own name. One ROS domain runs one manager; a second controller on the same machine is stopped by `run/devices/.controller.lock`.
+ROS 2 discovers nodes as peers. Inside this system that does not grant authority. The manager publishes `pgdemo/manager/`. Workers publish `pgdemo/worker/`. A worker does not publish on the manager's topics, does not subscribe to another worker's telemetry, and ignores a manager message whose `device` is not its own name. The manager CRL is the exception: it names no device, and every worker verifies it. One ROS domain runs one manager; a second controller on the same machine is stopped by `run/devices/.controller.lock`.
 
 `hello` is the only transient-local topic (reliable, depth 1). A worker repeats it once a second until the challenge, so a manager that starts later still sees the announcement. Every other topic is reliable and volatile, depth 16.
 
@@ -11,7 +11,7 @@ flowchart LR
     workers[pgdemo_device workers]
     manager[pgdemo_controller manager]
     workers -->|"pgdemo/worker: hello, heartbeat, error, csr, proof, config applied, telemetry"| manager
-    manager -->|"pgdemo/manager: bye, challenge, certificate, rejected, config"| workers
+    manager -->|"pgdemo/manager: bye, challenge, certificate, rejected, crl, config"| workers
 ```
 
 ## Control
@@ -33,6 +33,7 @@ The nonce and the signature are raw bytes. The text the worker signs is unchange
 | `pgdemo/manager/security/certificate` | `Certificate` | manager | `device`, `cert` (PEM) |
 | `pgdemo/manager/security/rejected` | `Rejected` | manager | `device`, `code`, `detail` |
 | `pgdemo/manager/security/challenge` | `Challenge` | manager | `device`, `nonce` (`uint8[32]`) |
+| `pgdemo/manager/security/crl` | `Crl` | manager | `payload`, `signature` (hex). Repeated every second. Every worker keeps it |
 | `pgdemo/worker/security/proof` | `Proof` | worker | `device`, `cert` (PEM), `signature` (`uint8[96]`, ECDSA P-384 `r‖s`) |
 
 ## Configuration
