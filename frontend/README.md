@@ -245,6 +245,10 @@ Sistema: `GET /api/health`, `GET /api/db/info` (PostgreSQL, connection pool, SSE
 
 Histórico: a read-only audit under the session role (`demo_normal` or `demo_admin`). Samples of one device (`GET /api/devices/{name}/history`, last hour when no dates are set, with the partition), applied configuration (`GET /api/config/history`), enrollments and rotations (`GET /api/enrollments`, including who asked), and revocations from `GET /api/pki/ca`. A scalar sample shows its value, a GPS sample its coordinates, an `xy` sample `x, y`, and an `xyz` sample `x, y, z`.
 
+![Dispositivos, usuario normal](docs/screens/devices-normal.png)
+
+`alice` on Dispositivos: the visualization tabs only. There is no Administración entry and no Gestionar button.
+
 ![Normal user menu](docs/screens/user-menu-normal.png)
 
 The same navbar for `alice`: no Administración entry and no Gestionar buttons; the menu shows `normal` and `demo_normal`.
