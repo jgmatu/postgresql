@@ -1,4 +1,5 @@
-# The stack that stays. Volumes survive `stop`. `down -v` is what removes them.
+# The stack that stays. Its volumes are external: `down` and `down -v` leave
+# them. scripts/run-all.sh creates them. Removing one is `docker volume rm`.
 #
 #   docker compose -f docker/operational/compose.yaml --env-file docker/operational/.env up --build
 
@@ -6,3 +7,75 @@ name: pgdemo
 
 include:
   - path: ../compose.yaml
+
+# The factory is not in the shared file. The end-to-end project does not
+# include this one, so its enrollment stays on the demo CA.
+services:
+  factory:
+    image: pgdemo:latest
+    init: true
+    entrypoint: ["/app/entrypoint.sh"]
+    command: ["factory"]
+    restart: unless-stopped
+    volumes:
+      - factory-key:/app/run/factory
+      - factory-cert:/app/run/factory-cert
+    healthcheck:
+      test: ["CMD", "bash", "-c", "echo >/dev/tcp/127.0.0.1/9443"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+    networks:
+      zone_factory:
+        ipv4_address: 172.28.30.10
+
+  controller:
+    networks:
+      zone_b:
+        ipv4_address: 172.28.20.20
+      zone_factory:
+        ipv4_address: 172.28.30.20
+    volumes:
+      - demo-run:/app/run
+      - device-keys:/app/run/devices
+      - factory-cert:/app/run/factory-cert:ro
+      - manager-keys:/app/run/controller
+    environment:
+      PGDEMO_MAX_DEVICES: ${PGDEMO_MAX_DEVICES:-16}
+      PGDEMO_FACTORY: 172.28.30.10:9443
+    depends_on:
+      init:
+        condition: service_completed_successfully
+      factory:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+    name: pgdemo_pgdata
+    external: true
+  demo-run:
+    name: pgdemo_demo-run
+    external: true
+  ca-keys:
+    name: pgdemo_ca-keys
+    external: true
+  device-keys:
+    name: pgdemo_device-keys
+    external: true
+  factory-key:
+    name: pgdemo_factory-key
+    external: true
+  factory-cert:
+    name: pgdemo_factory-cert
+    external: true
+  manager-keys:
+    name: pgdemo_manager-keys
+    external: true
+
+networks:
+  zone_factory:
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.28.30.0/24

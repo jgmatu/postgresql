@@ -2,7 +2,7 @@
 # Run one pgdemo process in the foreground. Compose is the supervisor.
 # Tini is pid 1 and this script execs the binary, so SIGTERM reaches it.
 #
-# Usage: entrypoint.sh server|controller
+# Usage: entrypoint.sh server|controller|factory
 set -euo pipefail
 
 if [[ -f /opt/ros/lyrical/setup.bash ]]; then
@@ -12,6 +12,22 @@ if [[ -f /opt/ros/lyrical/setup.bash ]]; then
     set -u
 fi
 export LD_LIBRARY_PATH="/app/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+# The pgdemo home is /app, owned by root. rcl refuses to start when it cannot
+# create $HOME/.ros/log. Workers inherit this path.
+export ROS_LOG_DIR=/tmp/ros-log
+mkdir -p "${ROS_LOG_DIR}"
+
+# The factory has no database. Its key stays in this container; only the
+# certificate is copied to the volume the controller mounts.
+if [[ "${1:-}" == factory ]]; then
+    /app/scripts/gen-factory.sh /app/run/factory
+    cp -f /app/run/factory/root.crt /app/run/factory-cert/root.crt
+    chmod 644 /app/run/factory-cert/root.crt
+    exec /app/build/factory/pgdemo-factory \
+        --key /app/run/factory/root.key \
+        --cert /app/run/factory/root.crt \
+        --listen 0.0.0.0 --port 9443
+fi
 
 ENV_FILE=/app/run/demo.env
 if [[ ! -f "${ENV_FILE}" ]]; then
@@ -47,10 +63,20 @@ case "${1:-}" in
     controller)
         export PGUSER=demo_controller
         export PGPASSWORD="${DEMO_CONTROLLER_DB_PASSWORD}"
+        factory_args=()
+        if [[ -f /app/run/factory-cert/root.crt ]]; then
+            /app/controller/scripts/gen-manager-key.sh /app/run/controller
+            factory_args=(
+                --manager-key /app/run/controller/manager.key
+                --factory-cert /app/run/factory-cert/root.crt
+                --factory "${PGDEMO_FACTORY:-172.28.30.10:9443}"
+            )
+        fi
         exec /app/build/controller/pgdemo-controller \
             --device-bin /app/build/device/pgdemo-device \
             --devices-dir /app/run/devices \
-            --max-devices "${PGDEMO_MAX_DEVICES:-16}"
+            --max-devices "${PGDEMO_MAX_DEVICES:-16}" \
+            "${factory_args[@]}"
         ;;
     *)
         printf '[entrypoint] usage: entrypoint.sh server|controller\n' >&2

@@ -70,14 +70,15 @@ Only the public material is stored. [libs/db](../libs/db) is the writer.
 ## Command line
 
 ```text
-pgdemo-factory [--key PATH] [--cert PATH] [--port N]
+pgdemo-factory [--key PATH] [--cert PATH] [--listen ADDR] [--port N]
 ```
 
 | Option | Default | Effect |
 |---|---|---|
 | `--key` | `run/factory/root.key` | Factory root private key. Missing, the process exits |
 | `--cert` | `run/factory/root.crt` | Factory root certificate. Missing, the process exits |
-| `--port` | `9443` | TCP port on `127.0.0.1` |
+| `--listen` | `127.0.0.1` | Bind address. The operational container passes `0.0.0.0` and has no published port; [docker/README.md](../docker/README.md) is that network |
+| `--port` | `9443` | TCP port |
 
 `SIGINT` or `SIGTERM` ends the accept loop. A bad option exits `2`.
 

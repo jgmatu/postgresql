@@ -34,16 +34,17 @@ class CertificateAuthority;
                                                   std::string_view cn, std::string_view document);
 
 /**
- * @brief Serve `request_signature` on 127.0.0.1:`port` until `stop` is set.
+ * @brief Serve `request_signature` on `listen_addr`:`port` until `stop` is set.
  *
  * The CA key is the one already loaded into `ca`. This function does not
- * create a key.
- */
-/**
- * @param port  TCP port on 127.0.0.1; 0 binds an ephemeral port
- * @param bound set to the port actually bound, before the accept loop, when not null
+ * create a key. `listen_addr` defaults to 127.0.0.1 so a host process is not
+ * reachable from another machine.
+ *
+ * @param port        TCP port; 0 binds an ephemeral port
+ * @param bound       set to the port actually bound, before the accept loop, when not null
+ * @param listen_addr IPv4 address to bind
  */
 void serve_factory(std::uint16_t port, const CertificateAuthority& ca, const std::atomic<bool>& stop,
-                   std::atomic<std::uint16_t>* bound = nullptr);
+                   std::atomic<std::uint16_t>* bound = nullptr, std::string_view listen_addr = "127.0.0.1");
 
 } // namespace pgdemo::pki

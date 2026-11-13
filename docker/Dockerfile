@@ -28,13 +28,14 @@ COPY patches patches
 COPY libs libs
 COPY controller controller
 COPY device device
+COPY factory factory
 COPY msgs msgs
 COPY server server
 RUN . /opt/ros/lyrical/setup.sh \
  && cmake -S . -B /build -G Ninja -DCMAKE_BUILD_TYPE=Release -DPGDEMO_BUILD_TESTS=OFF \
  && cmake --build /build \
  && strip /build/server/pgdemo-server /build/server/oqsprovider.so /build/controller/pgdemo-controller \
-          /build/device/pgdemo-device
+          /build/device/pgdemo-device /build/factory/pgdemo-factory
 
 FROM ubuntu:26.04
 ARG DEBIAN_FRONTEND=noninteractive
@@ -63,17 +64,19 @@ COPY --from=build /build/server/oqsprovider.so build/server/oqsprovider.so
 COPY --from=build /build/server/openssl-oqs.cnf build/server/openssl-oqs.cnf
 COPY --from=build /build/controller/pgdemo-controller build/controller/pgdemo-controller
 COPY --from=build /build/device/pgdemo-device build/device/pgdemo-device
+COPY --from=build /build/factory/pgdemo-factory build/factory/pgdemo-factory
 COPY --from=build /build/msgs/libpgdemo_msgs__*.so /app/lib/
 COPY sql sql
 COPY scripts scripts
+COPY controller/scripts/gen-manager-key.sh controller/scripts/gen-manager-key.sh
 # The control panel export: README.md only in a fresh clone, so run-all.sh
 # serves the API alone until scripts/fetch-webroot.sh or pnpm build fills it.
 COPY webroot webroot
 COPY docker/entrypoint.sh entrypoint.sh
 # run/ca and run/devices are mount points of the ca-keys and device-keys
 # volumes; a new volume copies this ownership and mode.
-RUN mkdir -p run/ca run/devices \
- && chown -R pgdemo:pgdemo run \
- && chmod 700 run/ca run/devices \
- && chmod 755 entrypoint.sh
+RUN mkdir -p run/ca run/devices run/factory run/factory-cert run/controller \
+ && chown -R pgdemo:pgdemo run controller/scripts \
+ && chmod 700 run/ca run/devices run/factory run/controller \
+ && chmod 755 run/factory-cert entrypoint.sh controller/scripts/gen-manager-key.sh
 USER pgdemo

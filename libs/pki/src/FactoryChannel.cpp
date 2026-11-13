@@ -211,7 +211,7 @@ std::string request_signature(const std::string& host, std::uint16_t port, std::
 }
 
 void serve_factory(std::uint16_t port, const CertificateAuthority& ca, const std::atomic<bool>& stop,
-                   std::atomic<std::uint16_t>* bound)
+                   std::atomic<std::uint16_t>* bound, std::string_view listen_addr)
 {
     const int fd = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
     if (fd < 0) throw std::runtime_error("factory: cannot open a socket");
@@ -220,7 +220,12 @@ void serve_factory(std::uint16_t port, const CertificateAuthority& ca, const std
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    const std::string host(listen_addr);
+    if (::inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1)
+    {
+        ::close(fd);
+        throw std::runtime_error("factory: bad listen address " + host);
+    }
     if (::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof addr) != 0 || ::listen(fd, 16) != 0)
     {
         ::close(fd);

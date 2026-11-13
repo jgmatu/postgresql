@@ -4,8 +4,9 @@
 // If that key is missing, this process exits. It does not generate one. A worker
 // sends a self-signed certificate; this process checks the signature and returns
 // a new certificate for the same public key. The manager root is not issued here.
-// The private key does not leave this process. The listener is 127.0.0.1, so a
-// controller in another zone does not gain a route to the key.
+// The private key does not leave this process. The listener defaults to
+// 127.0.0.1. --listen opens another address; the container uses that on a
+// network the server is not attached to.
 
 #include <pki/CertificateAuthority.hpp>
 #include <pki/FactoryChannel.hpp>
@@ -34,6 +35,7 @@ struct Options
 {
     std::string key = "run/factory/root.key";
     std::string cert = "run/factory/root.crt";
+    std::string listen = "127.0.0.1";
     std::uint16_t port = 9443;
 };
 
@@ -42,7 +44,8 @@ void usage()
     std::cout << "Usage: pgdemo-factory [options]\n"
                  "  --key PATH    factory root private key (default run/factory/root.key)\n"
                  "  --cert PATH   factory root certificate (default run/factory/root.crt)\n"
-                 "  --port N      listen on 127.0.0.1 (default 9443)\n";
+                 "  --listen ADDR IPv4 address to bind (default 127.0.0.1)\n"
+                 "  --port N      TCP port (default 9443)\n";
 }
 
 Options parse(int argc, char** argv)
@@ -57,6 +60,7 @@ Options parse(int argc, char** argv)
         };
         if (a == "--key") o.key = next();
         else if (a == "--cert") o.cert = next();
+        else if (a == "--listen") o.listen = next();
         else if (a == "--port") o.port = static_cast<std::uint16_t>(std::stoul(next()));
         else if (a == "-h" || a == "--help")
         {
@@ -95,8 +99,8 @@ int main(int argc, char** argv)
         const pki::CertificateAuthority ca(opt.key, opt.cert);
         std::signal(SIGINT, on_signal);
         std::signal(SIGTERM, on_signal);
-        log::info(kLog, "signing on 127.0.0.1:" + std::to_string(opt.port) + " (" + ca.fingerprint() + ")");
-        pki::serve_factory(opt.port, ca, g_stop);
+        log::info(kLog, "signing on " + opt.listen + ":" + std::to_string(opt.port) + " (" + ca.fingerprint() + ")");
+        pki::serve_factory(opt.port, ca, g_stop, nullptr, opt.listen);
         return 0;
     }
     catch (const std::exception& e)
