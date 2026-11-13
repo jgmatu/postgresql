@@ -67,7 +67,8 @@ net::awaitable<void> session(tcp::socket socket, const pki::CertificateAuthority
     if (!reply.empty())
     {
         boost::system::error_code ec;
-        co_await net::async_write(socket, net::buffer(reply), net::redirect_error(net::use_awaitable, ec));
+        co_await net::async_write(socket, net::buffer(reply),
+            net::redirect_error(net::use_awaitable, ec));
     }
 }
 

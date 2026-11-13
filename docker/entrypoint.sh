@@ -30,13 +30,14 @@ if [[ "${1:-}" == factory ]]; then
 fi
 
 # A worker has no database. The controller starts this as root so the private
-# volume can be given to pgdemo, then the process drops to that user.
+# volume, the keystore and the ROS log can be given to pgdemo, then the
+# process drops to that user.
 if [[ "${1:-}" == device ]]; then
     shift
-    mkdir -p /var/lib/pgdemo/puf
+    mkdir -p /var/lib/pgdemo/puf /var/lib/pgdemo/keystore "${ROS_LOG_DIR}"
     if [[ "$(id -u)" -eq 0 ]]; then
-        chown pgdemo:pgdemo /var/lib/pgdemo/puf
-        chmod 700 /var/lib/pgdemo/puf
+        chown pgdemo:pgdemo /var/lib/pgdemo /var/lib/pgdemo/puf /var/lib/pgdemo/keystore "${ROS_LOG_DIR}"
+        chmod 700 /var/lib/pgdemo/puf /var/lib/pgdemo/keystore
         exec runuser -u pgdemo -- /app/build/device/pgdemo-device "$@"
     fi
     exec /app/build/device/pgdemo-device "$@"
