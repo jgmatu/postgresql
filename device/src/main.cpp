@@ -201,7 +201,8 @@ void prepare_identity(const Options& opts)
 std::string node_name_for(std::string name);
 
 /// Write the SROS2 enclave and export ROS_SECURITY_* when the stored certificate
-/// chains to the factory root. A certificate from the demo CA leaves security off.
+/// chains to the factory root and the manager certificate is its own root. A
+/// certificate from the demo CA leaves security off.
 void arm_security(Options& opts)
 {
     pki::clear_ros_security();
@@ -213,17 +214,13 @@ void arm_security(Options& opts)
     const auto root = read_file(opts.factory_root);
     const auto cert = read_file(cert_path);
     const auto manager = read_file(opts.manager_cert);
+    if (!pki::self_signed_root(manager, pki::kManagerCommonName))
+    {
+        log::info("device", opts.name + ": manager certificate is not its own root; SROS2 stays off");
+        return;
+    }
+    opts.manager_cert_ok = true;
     pki::CertVerifier anchors({root});
-    try
-    {
-        anchors.verify_as(manager, pki::kManagerCommonName, {}, pki::CertVerifier::CertUse::Server);
-        opts.manager_cert_ok = true;
-    }
-    catch (const pki::PkiError& e)
-    {
-        if (e.code != "CERT_CHAIN" && e.code != "CERT_SUBJECT") throw;
-        log::info("device", opts.name + ": manager certificate is not from the factory root");
-    }
     try
     {
         anchors.verify(cert, opts.name, {});
@@ -245,8 +242,8 @@ void arm_security(Options& opts)
             pki::request_signed_document(host, port, "permissions", opts.name, pki::permissions_document(opts.name));
         const auto keystore = fs::absolute(opts.dir.parent_path().parent_path() / "keystore");
         const auto enclave = "/" + node_name_for(opts.name);
-        pki::write_enclave(pki::enclave_directory(keystore, enclave), read_file(key_path), cert, root, governance,
-                           permissions);
+        pki::write_enclave(pki::enclave_directory(keystore, enclave), read_file(key_path), cert,
+                           pki::identity_ca_bundle(root, manager), root, governance, permissions);
         pki::enable_ros_security(keystore, enclave);
         log::info("device", opts.name + ": SROS2 enclave " + pki::enclave_directory(keystore, enclave).string());
     }

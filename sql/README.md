@@ -177,14 +177,13 @@ erDiagram
 
 ### Identity
 
-A device and its current certificate point at each other. Enrollments and the process session hang off the device; the CRL does not point back at the certificate.
+A device and its current certificate point at each other. Enrollments and the process session hang off the device; the CRL does not point back at the certificate. `root_ca` holds two anchors: the demo CA and the row named `factory`. `manager_certificate` is a third anchor, the manager's own root, and it has no foreign key.
 
 ```mermaid
 erDiagram
     device ||--|{ device_certificate : "has had 1..n, ON DELETE CASCADE"
     device_certificate ||--|| device : "current (cert_id, device_id), ON DELETE CASCADE"
     root_ca ||--o{ device_certificate : "ca_id, ON DELETE RESTRICT"
-    root_ca ||--o| manager_certificate : "name factory, one row"
     root_ca ||--o{ crl : "ca_id"
     device_certificate ||..o| crl : "(ca_id, serial), no FK"
     manager_certificate ||..|| manager_crl_signature : "signs the list, no FK"
@@ -234,8 +233,7 @@ erDiagram
         text revoked_by
     }
     manager_certificate {
-        int cert_id PK "one row"
-        int ca_id FK
+        int cert_id PK "one row, no ca_id"
         text serial
         text fingerprint_sha256 UK
         text subject_cn
@@ -438,10 +436,10 @@ Every device is bound to an X.509 certificate (ECDSA P-384) signed by the intern
 
 | Table | Contents | Constraints |
 |---|---|---|
-| `root_ca` | The CA certificates the database trusts: `name`, `subject`, `fingerprint_sha256`, `cert_pem`, validity, `is_active` | `name` and `fingerprint_sha256` unique. `db-init.sh` inserts the device CA. `register_factory_root()` inserts the row named `factory`, and replaces that row when the file's fingerprint changes. The private key is never in the database |
+| `root_ca` | The CA certificates the database trusts: `name`, `subject`, `fingerprint_sha256`, `cert_pem`, validity, `is_active` | `name` and `fingerprint_sha256` unique. `db-init.sh` inserts the demo device CA. `register_factory_root()` inserts the row named `factory`, and replaces that row when the file's fingerprint changes. That row reaches the `device_certificate` rows the factory signed, and `crl` stays on the demo CA. The manager root is not a row here. The private key is never in the database |
 | `device_certificate` | Every certificate ever issued to a device: `device_id`, `ca_id`, `serial`, `fingerprint_sha256`, `subject_cn`, validity, `cert_pem`, `issued_at` | Unique `(ca_id, serial)` and `fingerprint_sha256`; unique `(cert_id, device_id)` as the target of the binding; FK `device_id` `ON DELETE CASCADE` (deferred); FK `ca_id` `ON DELETE RESTRICT`; `check_certificate_subject` makes `subject_cn` equal the device name |
 | `crl` | One row per revoked certificate: `(ca_id, serial)` PK, `fingerprint_sha256`, `device_name`, `cert_pem`, `reason`, `revoked_at`, `revoked_by` | No FK to `device_certificate`, so an entry outlives the certificate and the device. `reason` is one of six RFC 5280 names (`unspecified`, `keyCompromise`, `affiliationChanged`, `superseded`, `cessationOfOperation`, `certificateHold`). `protect_crl` refuses `UPDATE` and `DELETE` unless the reason is `certificateHold`: a hold can be lifted (deleted) or made permanent (updated). This is the issuing CA's list. The manager's own list is the two tables below |
-| `manager_certificate` | The one certificate the factory issued to the manager: `ca_id`, `serial`, `fingerprint_sha256`, `subject_cn`, validity, `cert_pem` | One row (`manager_certificate_singleton`). FK `ca_id` to the factory root. `register_manager_certificate()` replaces that row |
+| `manager_certificate` | The manager's own root: `serial`, `fingerprint_sha256`, `subject_cn`, validity, `cert_pem` | One row (`manager_certificate_singleton`). No `ca_id` and no foreign key to `root_ca`. It signs `manager_crl_signature`. `register_manager_certificate()` replaces that row |
 | `manager_revocation` | Workers the manager has revoked: `serial` PK, `fingerprint_sha256`, `device_name`, `cert_pem`, `revoked_at` | No FK to `device_certificate`, so a row outlives the certificate. `add_manager_revocation()` inserts one serial |
 | `manager_crl_signature` | The manager's signature over that list: `payload`, `signature` (hex), `signed_at` | One row. `replace_manager_crl()` writes it. The signature is checked with the manager certificate, not with the factory key |
 | `device_enrollment` | Enrollment and rotation requests: `request_id` (from `request_id_seq`), `kind` (`ENROLL`, `ROTATE`), `name`, `type_id`, `device_id`, `status`, `csr_pem`, `cert_id`, `error_code`, `error_detail`, `requested_by`, timestamps | Partial unique index on `name` while `PENDING` or `CSR_SUBMITTED`; FK `device_id` `ON DELETE SET NULL`, so the history outlives the device. `check_enrollment` refuses an `ENROLL` for a taken name and takes a rotation's name and type from its device; `check_enrollment_transition` allows only `PENDING` to `CSR_SUBMITTED`, then `ISSUED`, with `REJECTED` or `EXPIRED` from either |
@@ -460,7 +458,7 @@ How the original requirements map onto constraints:
 
 `issue_device_certificate(request_id, ca_fingerprint, serial, fingerprint, subject_cn, not_before, not_after, cert_pem)` is how an enrollment certificate enters the database and how a device row is born. It is `SECURITY DEFINER` (owner `demo_owner`, `search_path` pinned) and only `demo_server` may execute it. It locks the enrollment, checks it is `CSR_SUBMITTED`, that the subject is the requested name and that the CA is an active `root_ca`, then for `ENROLL` inserts the device, its first certificate and its `device_config` (plus history) from the type defaults, and for `ROTATE` inserts the new certificate, moves `device.cert_id` and revokes the previous certificate as `superseded` unless it was already revoked. `reject_enrollment(request_id, code, detail)` closes a request without a certificate; the server calls it when a CSR fails verification.
 
-`register_factory_worker(...)` stores a certificate the factory signed for a device that already exists. It does not move `device.cert_id`. `register_factory_root()`, `register_manager_certificate()`, `replace_manager_crl()` and `add_manager_revocation()` are the same kind of function for the factory origin. The controller executes them. The server executes `register_factory_root()` when `run/factory/root.crt` is present.
+`register_factory_worker(...)` stores a certificate the factory signed for a device that already exists. It does not move `device.cert_id`. `register_factory_root()` stores the factory root. `register_manager_certificate()` stores the manager's own root and does not look up `root_ca`. `replace_manager_crl()` and `add_manager_revocation()` write the list that root signs. The controller executes them. The server executes `register_factory_root()` when `run/factory/root.crt` is present.
 
 `v_device_identity` joins each device with its current certificate, its CA and the CRL, and derives `identity`:
 
@@ -504,7 +502,7 @@ The controller runs a process only for an `ACTIVE` device, and refuses an authen
 | `touch_updated_at()` | trigger | Body of `trg_app_users_touch` |
 | `issue_device_certificate(...)` | `SECURITY DEFINER` | Record a signed certificate for an enrollment: create the device or rotate it (see [Device identity](#device-identity)). `EXECUTE` for `demo_server`. |
 | `reject_enrollment(p_request_id bigint, p_code text, p_detail text)` | `SECURITY DEFINER`, returns whether the request was still open | Close an enrollment without a certificate. `EXECUTE` for `demo_server`. |
-| `register_factory_root(...)`, `register_manager_certificate(...)`, `register_factory_worker(...)`, `add_manager_revocation(...)`, `replace_manager_crl(...)` | `SECURITY DEFINER` | Store the factory root, the manager certificate, a factory-issued worker certificate, and the manager's signed list. They do not move `device.cert_id`. `EXECUTE` for `demo_controller`; `register_factory_root` also for `demo_server`. |
+| `register_factory_root(...)`, `register_manager_certificate(...)`, `register_factory_worker(...)`, `add_manager_revocation(...)`, `replace_manager_crl(...)` | `SECURITY DEFINER` | Store the factory root, the manager's own root, a factory-issued worker certificate, and the list that manager root signs. They do not move `device.cert_id`. `EXECUTE` for `demo_controller`; `register_factory_root` also for `demo_server`. |
 | `check_certificate_subject()`, `protect_crl()`, `check_enrollment()`, `check_enrollment_transition()` | trigger | The identity invariants of `03_identity.sql` |
 | `notify_telemetry_batch()`, `notify_device_change()`, `notify_crl_change()`, `notify_session_change()`, `notify_enrollment()`, `notify_config_request()`, `notify_config_change()`, `notify_config_error()` | trigger | Build the JSON payload and call `pg_notify` |
 

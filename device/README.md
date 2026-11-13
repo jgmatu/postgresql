@@ -77,7 +77,7 @@ Before the ROS node exists, and only when the flags are set:
 
 1. `--device-id` and `--puf`, and no `key.pem`: derive the key and save it, mode 0600. A `key.pem` already on disk is left alone, so a device enrolled with a CSR keeps that key.
 2. `--factory`, a key, and no `cert.pem`: send the self-signed certificate and store the one the factory returns.
-3. `--manager-cert` and `--factory-root`, and a `cert.pem` that chains to that root under this device's name: write the SROS2 enclave and export `ROS_SECURITY_*` before the node is created. The manager certificate must chain to the same root, its CN must be `pgdemo-manager`, and it must carry `serverAuth`. A certificate from the demo CA does not chain. SROS2 stays off and the challenge continues, and a manager that already enforces SROS2 does not see that worker. If the factory is down while signing the governance and permissions, SROS2 stays off and the process continues.
+3. `--manager-cert` and `--factory-root`, and a `cert.pem` that chains to the factory root under this device's name: write the SROS2 enclave and export `ROS_SECURITY_*` before the node is created. `--manager-cert` must be the manager's own root: self-signed, `CA:TRUE`, CN `pgdemo-manager`, ECDSA-SHA256. `identity_ca.cert.pem` is the factory root followed by that root. `permissions_ca.cert.pem` is the factory root. A certificate from the demo CA does not chain. SROS2 stays off and the challenge continues, and a manager that already enforces SROS2 does not see that worker. If the factory is down while signing the governance and permissions, SROS2 stays off and the process continues.
 
 The controller adds `--device-id` and `--puf` on a `Run` of a device that already has a row. `--factory`, `--factory-root` and `--manager-cert` go on every launch while the origin is up. An enrollment still generates its key with the CSR path. The child does not inherit the manager's `ROS_SECURITY_*`; it writes its own enclave.
 
@@ -95,6 +95,7 @@ flowchart TD
     needCert{"--factory is set, key.pem exists, cert.pem does not"}
     ask["send the self-signed certificate and store the signed PEM"]
     canShake{"--manager-cert and --factory-root, and both files exist"}
+    ownRoot{"--manager-cert is a self-signed root, CN pgdemo-manager"}
     chains{"certificate chains to the factory root under --name"}
     shake["write the SROS2 enclave and export ROS_SECURITY_*"]
     stop[exit 1]
@@ -117,7 +118,9 @@ flowchart TD
     needCert -->|no| canShake
     ask --> canShake
     canShake -->|no| node
-    canShake -->|yes| chains
+    canShake -->|yes| ownRoot
+    ownRoot -->|no| node
+    ownRoot -->|yes| chains
     chains -->|yes| shake
     chains -->|no| node
     shake -->|ok| node

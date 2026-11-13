@@ -34,13 +34,24 @@ namespace pgdemo::pki {
                                                       std::string_view enclave);
 
 /**
+ * @brief The identity CA file both enclaves share.
+ *
+ * The factory root is first, then the manager root. Fast-DDS checks the
+ * signature algorithm of the first certificate and trusts every certificate
+ * in the file.
+ */
+[[nodiscard]] std::string identity_ca_bundle(std::string_view factory_pem, std::string_view manager_pem);
+
+/**
  * @brief Write the six files an SROS2 enclave needs.
  *
- * `identity_ca.cert.pem` and `permissions_ca.cert.pem` are both `ca_pem`.
- * The factory private key is not written. `key.pem` is mode 0600.
+ * `identity_ca_pem` is the bundle of both roots. `permissions_ca_pem` is the
+ * factory certificate, which signs the policy. The factory private key is not
+ * written. `key.pem` is mode 0600.
  */
 void write_enclave(const std::filesystem::path& directory, std::string_view key_pem, std::string_view cert_pem,
-                   std::string_view ca_pem, std::string_view governance_p7s, std::string_view permissions_p7s);
+                   std::string_view identity_ca_pem, std::string_view permissions_ca_pem,
+                   std::string_view governance_p7s, std::string_view permissions_p7s);
 
 /// Export `ROS_SECURITY_*` so the next `rclcpp::init` uses `enclave`.
 void enable_ros_security(const std::filesystem::path& keystore, std::string_view enclave);

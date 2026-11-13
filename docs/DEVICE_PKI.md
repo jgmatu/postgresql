@@ -2,7 +2,7 @@
 
 Every device has an X.509 certificate issued by an internal root CA. Its process proves, each time it connects, that it holds the matching private key. This document covers the trust model, the schema behind it, the enrollment and rotation flows, how the controller runs and authenticates device processes, and what revoking or deleting a certificate does.
 
-A second origin, the factory, signs the manager and the workers from a key derived from a simulated PUF. The worker presents that certificate through SROS2, and the manager publishes a revocation list that each worker checks with a copy of the manager certificate. It does not replace this CA, this CSR or this challenge. It is [factory/README.md](../factory/README.md), and the worker side is [device/README.md](../device/README.md). When `run/factory/root.key` and `run/controller/manager.key` are absent, this document is the whole of device identity.
+A second origin, the factory, signs the workers from a key derived from a simulated PUF. The manager is its own root. The worker presents the factory certificate through SROS2, and the manager publishes a revocation list that each worker checks with a copy of that root. It does not replace this CA, this CSR or this challenge. It is [factory/README.md](../factory/README.md), and the worker side is [device/README.md](../device/README.md). When `run/factory/root.key` and `run/controller/manager.key` are absent, this document is the whole of device identity.
 
 1. [Trust model](#1-trust-model)
 2. [Schema](#2-schema)

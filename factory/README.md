@@ -1,6 +1,6 @@
 # pgdemo-factory
 
-Zone A process. It holds the root of the simulation: one P-384 key that signs the manager certificate, each worker certificate, and the two SROS2 policy documents. It does not replace the device CA in `run/ca/`. That CA, the CSR and the challenge stay the enrollment in [docs/DEVICE_PKI.md](../docs/DEVICE_PKI.md). `scripts/db-init.sh` does not call the script below. The worker side of the seed is [device/README.md](../device/README.md). The controller asks for its own certificate the first time, then asks for the signed governance and permissions.
+Zone A process. It holds the root of the simulation: one P-384 key that signs each worker certificate and the two SROS2 policy documents. It does not sign the manager. The manager is its own root, written by [controller/scripts/gen-manager-key.sh](../controller/scripts/gen-manager-key.sh). This process does not replace the device CA in `run/ca/`. That CA, the CSR and the challenge stay the enrollment in [docs/DEVICE_PKI.md](../docs/DEVICE_PKI.md). `scripts/db-init.sh` does not call the script below. The worker side of the seed is [device/README.md](../device/README.md). The controller asks for the signed governance and permissions.
 
 ## The key
 
@@ -26,7 +26,7 @@ SIGN worker NAME
 .
 ```
 
-`manager` in place of `worker` is the manager's first start. `NAME` is the subject CN. The certificate must be self-signed by an ECDSA P-384 key and must not be a CA. That signature is the proof of possession. The process issues a new certificate for the same public key:
+`NAME` is the subject CN. The certificate must be self-signed by an ECDSA P-384 key and must not be a CA. That signature is the proof of possession. The process issues a new certificate for the same public key. The running cycle asks only for `worker`. `manager` is still accepted by the listener and is not used: the manager root is self-signed and is not issued here.
 
 | Role | Profile |
 |---|---|
@@ -35,7 +35,7 @@ SIGN worker NAME
 
 The reply is a line `OK`, the PEM, and a line `.`. A refusal is one line `ERR` and the reason. The private key does not leave the process, and the process opens no database.
 
-Two more requests sign a fixed document, not a certificate. `SIGN governance` and `SIGN permissions NAME` carry the XML and end with a line `.`. The body must be exactly the governance template, or the permissions template whose subject is `CN=NAME`. Anything else is refused. The reply is `OK`, the PKCS#7 detached SMIME that SROS2 stores as `governance.p7s` or `permissions.p7s`, and a line `.`. Both CA files in an enclave are this same `root.crt`. `root.key` is not copied into the keystore.
+Two more requests sign a fixed document, not a certificate. `SIGN governance` and `SIGN permissions NAME` carry the XML and end with a line `.`. The body must be exactly the governance template, or the permissions template whose subject is `CN=NAME`. Anything else is refused. The reply is `OK`, the PKCS#7 detached SMIME that SROS2 stores as `governance.p7s` or `permissions.p7s`, and a line `.`. `permissions_ca.cert.pem` is this `root.crt`. `identity_ca.cert.pem` is this root followed by the manager root. `root.key` is not copied into the keystore.
 
 The listener is `127.0.0.1`, so a controller in another zone does not gain a route to the key. A controller that cannot connect logs the failure and continues with the enrollment that already runs.
 
@@ -50,9 +50,8 @@ sequenceDiagram
     worker->>factory: self-signed certificate
     factory-->>worker: certificate signed by the factory root
     worker->>factory: SIGN governance and SIGN permissions
-    factory-->>worker: "PKCS#7 documents; both CAs are root.crt"
-    manager->>factory: self-signed certificate, the first start
-    factory-->>manager: manager certificate signed by the factory root
+    factory-->>worker: PKCS#7 documents, permissions CA is root.crt
+    manager->>manager: self-signed root, not issued here
 ```
 
 ## Where the certificates go
@@ -62,7 +61,7 @@ Only the public material is stored. [libs/db](../libs/db) is the writer.
 | What | Where |
 |---|---|
 | Factory root | One `root_ca` row named `factory`, the PEM of `root.crt`. The server registers it at startup when `--factory-cert` exists. The controller registers it when it starts this origin. |
-| Manager | One row of `manager_certificate`. The controller replaces that row when it asks again, which it does when the stored certificate is not ECDSA-SHA256. |
+| Manager | One row of `manager_certificate`, the self-signed root beside `manager.key`. It has no `ca_id`. This process does not issue it. |
 | Worker | A row of `device_certificate` whose `ca_id` is the factory, written when the controller reads a `cert.pem` that chains to this root. `device.cert_id` stays on the certificate the enrollment already marked current. |
 | Manager revocation | `manager_revocation` and `manager_crl_signature`. The manager signs the list with its own key. This process does not sign it, and it is not the `crl` table. |
 

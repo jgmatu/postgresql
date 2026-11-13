@@ -212,7 +212,7 @@ GRANT INSERT ON device_config_history, device_config_errors TO demo_controller;
 GRANT SELECT ON root_ca, device_certificate, crl, device_enrollment, v_device_identity TO demo_controller;
 GRANT SELECT ON manager_certificate, manager_revocation, manager_crl_signature TO demo_controller;
 GRANT EXECUTE ON FUNCTION register_factory_root(text, text, text, timestamptz, timestamptz) TO demo_controller;
-GRANT EXECUTE ON FUNCTION register_manager_certificate(text, text, text, text, timestamptz, timestamptz, text)
+GRANT EXECUTE ON FUNCTION register_manager_certificate(text, text, text, timestamptz, timestamptz, text)
     TO demo_controller;
 GRANT EXECUTE ON FUNCTION replace_manager_crl(text, text) TO demo_controller;
 GRANT EXECUTE ON FUNCTION add_manager_revocation(text, text, text, text) TO demo_controller;

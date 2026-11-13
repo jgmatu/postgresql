@@ -122,15 +122,25 @@ std::filesystem::path enclave_directory(const std::filesystem::path& keystore, s
     return keystore / "enclaves" / std::string(enclave.substr(1));
 }
 
+std::string identity_ca_bundle(std::string_view factory_pem, std::string_view manager_pem)
+{
+    std::string out(factory_pem);
+    if (out.empty() || out.back() != '\n') out.push_back('\n');
+    out.append(manager_pem);
+    if (out.empty() || out.back() != '\n') out.push_back('\n');
+    return out;
+}
+
 void write_enclave(const std::filesystem::path& directory, std::string_view key_pem, std::string_view cert_pem,
-                   std::string_view ca_pem, std::string_view governance_p7s, std::string_view permissions_p7s)
+                   std::string_view identity_ca_pem, std::string_view permissions_ca_pem,
+                   std::string_view governance_p7s, std::string_view permissions_p7s)
 {
     std::filesystem::create_directories(directory);
     ::chmod(directory.c_str(), 0700);
     write_exact(directory / "key.pem", key_pem, 0600);
     write_exact(directory / "cert.pem", cert_pem, 0644);
-    write_exact(directory / "identity_ca.cert.pem", ca_pem, 0644);
-    write_exact(directory / "permissions_ca.cert.pem", ca_pem, 0644);
+    write_exact(directory / "identity_ca.cert.pem", identity_ca_pem, 0644);
+    write_exact(directory / "permissions_ca.cert.pem", permissions_ca_pem, 0644);
     write_exact(directory / "governance.p7s", governance_p7s, 0644);
     write_exact(directory / "permissions.p7s", permissions_p7s, 0644);
 }

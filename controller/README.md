@@ -81,7 +81,7 @@ pgdemo-controller [--conninfo STR] [--max-devices N]
 | `--maintenance-interval-s` | 3600 | How often partition maintenance runs |
 | `--manager-key` | `run/controller/manager.key` | Manager private key. Absent, the factory origin stays off |
 | `--factory-cert` | `run/factory/root.crt` | Public factory root. Absent, the factory origin stays off |
-| `--factory` | `127.0.0.1:9443` | `pgdemo-factory`. Used the first time the manager certificate is missing |
+| `--factory` | `127.0.0.1:9443` | `pgdemo-factory`. It signs the governance and permissions documents |
 
 Device names cannot start with a dot, so `.controller.lock` never clashes with a key directory.
 
@@ -89,7 +89,7 @@ Device names cannot start with a dot, so `.controller.lock` never clashes with a
 
 ## Factory origin
 
-[`controller/scripts/gen-manager-key.sh`](scripts/gen-manager-key.sh) writes `run/controller/manager.key` before this process starts. The process does not create that key. When the key and `run/factory/root.crt` are both present, startup registers the factory certificate in `root_ca` (the row named `factory`), asks `pgdemo-factory` for the manager certificate, signs `manager_revocation` with the manager key, and writes the SROS2 enclave before the node is created. The signature is `manager_crl_signature`. A later start reuses the stored certificate and publishes that signature. It asks again only when the stored certificate is not ECDSA-SHA256. The list is signed again only when the serials change.
+[`controller/scripts/gen-manager-key.sh`](scripts/gen-manager-key.sh) writes `run/controller/manager.key` and a self-signed `manager.crt` before this process starts. The process does not create that key and does not replace one that already exists. The certificate is the manager's own root: `CA:TRUE`, `pathlen:0`, CN `pgdemo-manager`, ECDSA-SHA256. A certificate the factory signed earlier is rewritten from the same key. When the key, that root and `run/factory/root.crt` are all present, startup registers the factory certificate in `root_ca` (the row named `factory`), registers `manager.crt` in `manager_certificate` with no `ca_id`, signs `manager_revocation` with the manager key, and writes the SROS2 enclave before the node is created. `identity_ca.cert.pem` is the factory root followed by the manager root. `permissions_ca.cert.pem` is the factory root, which signs the policy. The signature is `manager_crl_signature`. A later start reads the certificate on disk and signs the list once. Publications after that reuse the stored signature until the serials change.
 
 DDS is the admission. A worker whose `cert.pem` chains to the factory root is registered on `device_certificate`. `device.cert_id` is not moved. A serial on the manager list gets `bye` and no session. The list is republished every second on `pgdemo/manager/security/crl`. If the factory is down on that first request, `ROS_SECURITY_*` stays unset and the challenge in [docs/DEVICE_PKI.md](../docs/DEVICE_PKI.md) continues. The factory itself is [factory/README.md](../factory/README.md).
 

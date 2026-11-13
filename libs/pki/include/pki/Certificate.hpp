@@ -51,6 +51,14 @@ CertInfo inspect_certificate(std::string_view pem);
  */
 bool signed_with_sha256(std::string_view pem);
 
+/**
+ * @brief Whether `pem` is a self-signed ECDSA-SHA256 CA whose CN is `expected_cn`.
+ *
+ * The manager root is this certificate. A certificate that does not parse,
+ * is not a CA, or is signed by someone else returns false.
+ */
+bool self_signed_root(std::string_view pem, std::string_view expected_cn);
+
 /// Lower-case hex of `bytes`.
 std::string to_hex(std::span<const std::uint8_t> bytes);
 
@@ -63,7 +71,7 @@ std::vector<std::uint8_t> from_hex(std::string_view hex);
 /// UTC `YYYY-MM-DDTHH:MM:SSZ`, the form stored in `timestamptz` parameters.
 std::string format_time(std::chrono::system_clock::time_point tp);
 
-/// Subject CN of the manager certificate this model issues.
+/// Subject CN of the manager's own root.
 inline constexpr std::string_view kManagerCommonName = "pgdemo-manager";
 
 /// Standard base64 (with padding) of `bytes`.

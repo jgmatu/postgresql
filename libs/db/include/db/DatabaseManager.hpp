@@ -580,17 +580,16 @@ public:
     void ensure_factory_root(const std::string& subject, const std::string& fingerprint, const std::string& pem,
                              const std::string& not_before, const std::string& not_after);
 
-    /// True when `manager_certificate` already holds the factory-signed certificate.
+    /// True when `manager_certificate` already holds the manager root.
     bool manager_certificate_present();
 
-    /// PEM of the manager certificate, or empty when the row does not exist yet.
+    /// PEM of the manager root, or empty when the row does not exist yet.
     std::optional<std::string> load_manager_certificate_pem();
 
-    /// Insert the factory-signed manager certificate. A later call keeps the first row.
-    void register_manager_certificate(const std::string& ca_fingerprint, const std::string& serial,
-                                      const std::string& fingerprint, const std::string& subject_cn,
-                                      const std::string& not_before, const std::string& not_after,
-                                      const std::string& pem);
+    /// Store the manager's own root. A later call replaces the single row.
+    void register_manager_certificate(const std::string& serial, const std::string& fingerprint,
+                                      const std::string& subject_cn, const std::string& not_before,
+                                      const std::string& not_after, const std::string& pem);
 
     /// Replace the manager's signature over its revocation list.
     void replace_manager_crl(const std::string& payload, const std::string& signature_hex);

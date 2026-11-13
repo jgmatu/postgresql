@@ -60,8 +60,8 @@ public:
     /**
      * @brief `verify`, with `clientAuth` or `serverAuth`.
      *
-     * `verify` is the client check used by the running enrollment. The factory
-     * model uses `Server` for the manager certificate.
+     * `verify` is the client check used by the running enrollment. The manager
+     * root is checked with `self_signed_root`, not with this function.
      */
     CertInfo verify_as(std::string_view cert_pem, std::string_view expected_cn,
                        const std::set<std::string>& revoked_serials, CertUse use,

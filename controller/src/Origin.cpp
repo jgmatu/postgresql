@@ -29,19 +29,6 @@ std::string read_file(const std::string& path)
     return ss.str();
 }
 
-void write_file(const std::filesystem::path& path, const std::string& data)
-{
-    const auto tmp = path.string() + ".tmp";
-    {
-        std::ofstream out(tmp, std::ios::trunc);
-        if (!out) throw std::runtime_error("cannot write " + tmp);
-        out << data;
-    }
-    std::filesystem::rename(tmp, path);
-    std::filesystem::permissions(path, std::filesystem::perms::owner_read | std::filesystem::perms::group_read |
-                                           std::filesystem::perms::others_read);
-}
-
 std::span<const std::uint8_t> bytes_of(std::string_view text)
 {
     return {reinterpret_cast<const std::uint8_t*>(text.data()), text.size()};
@@ -77,24 +64,22 @@ void start_origin(db::DatabaseManager& db, FleetOptions& fleet, const OriginFile
         db.ensure_factory_root("CN=" + root.subject_cn, root.fingerprint, root.pem, pki::format_time(root.not_before),
                                pki::format_time(root.not_after));
 
-        auto key = pki::DeviceKey::load(files.manager_key);
-        std::string manager_pem = db.manager_certificate_present() ? *db.load_manager_certificate_pem() : std::string{};
-        // DDS-Security accepts ecdsa-with-SHA256. A certificate signed earlier with SHA-384 is replaced.
-        if (!pki::signed_with_sha256(manager_pem))
+        const auto cert_path = fs::path(files.manager_key).replace_extension("crt");
+        if (!fs::is_regular_file(cert_path))
+            throw std::runtime_error("manager root " + cert_path.string() + " is absent");
+        const auto manager_pem = read_file(cert_path.string());
+        if (!pki::self_signed_root(manager_pem, pki::kManagerCommonName))
+            throw std::runtime_error("manager root is not a self-signed ECDSA-SHA256 CA");
+        const auto info = pki::inspect_certificate(manager_pem);
+        const auto stored = db.manager_certificate_present() ? db.load_manager_certificate_pem() : std::nullopt;
+        if (!stored || *stored != info.pem)
         {
-            const auto presented = key.self_signed_pem(pki::kManagerCommonName, true);
-            const auto issued = pki::request_signature(files.factory_host, files.factory_port, "manager",
-                                                       pki::kManagerCommonName, presented);
-            const auto info = pki::inspect_certificate(issued);
-            db.register_manager_certificate(root.fingerprint, info.serial, info.fingerprint, info.subject_cn,
+            db.register_manager_certificate(info.serial, info.fingerprint, info.subject_cn,
                                             pki::format_time(info.not_before), pki::format_time(info.not_after),
                                             info.pem);
-            manager_pem = info.pem;
-            log::info(kLog, "manager certificate signed by the factory");
+            log::info(kLog, "manager root registered");
         }
-
-        const auto cert_path = fs::path(files.manager_key).replace_extension("crt");
-        write_file(cert_path, manager_pem);
+        auto key = pki::DeviceKey::load(files.manager_key);
 
         const auto serials = db.load_manager_revoked_serials();
         const auto payload = pki::manager_crl_payload(serials);
@@ -108,7 +93,7 @@ void start_origin(db::DatabaseManager& db, FleetOptions& fleet, const OriginFile
         const auto keystore = fs::absolute(fleet.devices_dir.parent_path() / "keystore");
         constexpr std::string_view kEnclave = "/pgdemo_controller";
         pki::write_enclave(pki::enclave_directory(keystore, kEnclave), read_file(files.manager_key), manager_pem,
-                           root_pem, governance, permissions);
+                           pki::identity_ca_bundle(root_pem, manager_pem), root_pem, governance, permissions);
         pki::enable_ros_security(keystore, kEnclave);
 
         fleet.puf_file = fleet.devices_dir / "devices.puf";

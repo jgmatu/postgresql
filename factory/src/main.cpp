@@ -2,10 +2,10 @@
 //
 // scripts/gen-factory.sh writes run/factory/root.key before this process starts.
 // If that key is missing, this process exits. It does not generate one. A worker
-// or the manager sends a self-signed certificate; this process checks the
-// signature and returns a new certificate for the same public key. The private
-// key does not leave this process. The listener is 127.0.0.1, so a controller
-// in another zone does not gain a route to the key.
+// sends a self-signed certificate; this process checks the signature and returns
+// a new certificate for the same public key. The manager root is not issued here.
+// The private key does not leave this process. The listener is 127.0.0.1, so a
+// controller in another zone does not gain a route to the key.
 
 #include <pki/CertificateAuthority.hpp>
 #include <pki/FactoryChannel.hpp>
