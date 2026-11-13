@@ -43,10 +43,10 @@ public:
 
     /**
      * @param send      publishes a message; empty is allowed in a test that only reads state
-     * @param generator signal of this device type
+     * @param generator signal of this device type; the caller keeps it alive
      * @param tag       log prefix
      */
-    SampleStream(Send send, Generator generator, std::string tag)
+    SampleStream(Send send, const SampleGenerator& generator, std::string tag)
         : send_(std::move(send))
         , generator_(generator)
         , tag_(std::move(tag))
@@ -94,7 +94,7 @@ public:
             std::normal_distribution<double> noise(0.0, 1.0);
             std::uniform_real_distribution<double> unit(0.0, 1.0);
             std::visit([this](auto sample) { send_(std::move(sample)); },
-                       make_sample(generator_, ++seq_, amplitude_, phase_, noise(rng_), unit(rng_), unit(rng_), unit(rng_)));
+                       generator_.make(++seq_, amplitude_, phase_, noise(rng_), unit(rng_), unit(rng_), unit(rng_)));
             last_frame_ = now;
             return;
         }
@@ -128,7 +128,7 @@ public:
 
 private:
     Send send_;
-    Generator generator_;
+    const SampleGenerator& generator_;
     std::string tag_;
     std::mt19937_64 rng_{std::random_device{}()};
     std::chrono::steady_clock::time_point last_frame_;

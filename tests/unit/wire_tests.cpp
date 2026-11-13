@@ -26,9 +26,10 @@ namespace {
 
 struct StreamHarness
 {
+    device::Sine sine;
     std::vector<device::SampleStream::Emission> sent;
-    device::SampleStream stream{[&](device::SampleStream::Emission msg) { sent.push_back(std::move(msg)); },
-                                 device::Generator::Sine, "device test"};
+    device::SampleStream stream{[&](device::SampleStream::Emission msg) { sent.push_back(std::move(msg)); }, sine,
+                                 "device test"};
 };
 
 msg::Config config(int32_t device_id, int32_t rate_ms, double amplitude, bool active)
@@ -151,27 +152,26 @@ TEST(Generators, SawtoothRampsAndWrapsEveryFiftyTicks)
 
 TEST(Generators, SamplesCarryThePayloadOfTheirType)
 {
-    const auto scalar = std::get<msg::ScalarSample>(device::make_sample(device::Generator::Sine, 10, 2.0, 0.0, 0.0));
+    const auto scalar = std::get<msg::ScalarSample>(device::Sine{}.make(10, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0));
     EXPECT_EQ(scalar.seq, 10);
     EXPECT_NEAR(scalar.value, 2.0, 1e-9);
 
-    const auto gps = std::get<msg::GpsSample>(device::make_sample(device::Generator::GpsOrbit, 10, 500.0, 0.0, 0.0));
+    const auto gps = std::get<msg::GpsSample>(device::GpsOrbit{}.make(10, 500.0, 0.0, 0.0, 0.0, 0.0, 0.0));
     EXPECT_EQ(gps.origin_lon, device::kOriginLon);
     EXPECT_EQ(gps.origin_lat, device::kOriginLat);
     EXPECT_EQ(gps.radius_m, 500.0);
     EXPECT_NEAR(gps.bearing_rad, std::numbers::pi / 2.0, 1e-9);
 
-    const auto noise = std::get<msg::ScalarSample>(device::make_sample(device::Generator::WhiteNoise, 3, 2.0, 0.0, 1.5));
+    const auto noise = std::get<msg::ScalarSample>(device::WhiteNoise{}.make(3, 2.0, 0.0, 1.5, 0.0, 0.0, 0.0));
     EXPECT_EQ(noise.seq, 3);
     EXPECT_DOUBLE_EQ(noise.value, 3.0);
 
-    const auto cloud = std::get<msg::XySample>(device::make_sample(device::Generator::Scatter, 1, 100.0, 0.0, 0.0, 0.0, 1.0));
+    const auto cloud = std::get<msg::XySample>(device::Scatter{}.make(1, 100.0, 0.0, 0.0, 0.0, 1.0, 0.0));
     EXPECT_EQ(cloud.seq, 1);
     EXPECT_DOUBLE_EQ(cloud.x, -100.0);
     EXPECT_DOUBLE_EQ(cloud.y, 100.0);
 
-    const auto cube = std::get<msg::XyzSample>(
-        device::make_sample(device::Generator::Cloud, 2, 100.0, 0.0, 0.0, 0.0, 1.0, 0.0));
+    const auto cube = std::get<msg::XyzSample>(device::Cloud{}.make(2, 100.0, 0.0, 0.0, 0.0, 1.0, 0.0));
     EXPECT_EQ(cube.seq, 2);
     EXPECT_DOUBLE_EQ(cube.x, -100.0);
     EXPECT_DOUBLE_EQ(cube.y, 100.0);

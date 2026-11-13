@@ -68,16 +68,79 @@ inline constexpr double kOriginLon = -3.7038;
 /// Latitude of that origin.
 inline constexpr double kOriginLat = 40.4168;
 
-/// Sample for tick `seq`.
-/// `noise` is a standard normal draw. `u`, `v` and `w` are uniform on `[0, 1]`
-/// and place a scatter sample in the square or a cloud sample in the cube.
-/// PostGIS projects GPS fixes from the origin.
-inline Sample make_sample(Generator g, std::int64_t seq, double amplitude, double phase, double noise, double u = 0.0,
-                          double v = 0.0, double w = 0.0)
+/**
+ * @brief One tick of a signal.
+ *
+ * `noise` is a standard normal draw. `u`, `v` and `w` are uniform on `[0, 1]`
+ * and place a scatter sample in the square or a cloud sample in the cube.
+ */
+class SampleGenerator
 {
-    switch (g)
+public:
+    virtual ~SampleGenerator() = default;
+
+    /**
+     * @brief Build the sample for tick `seq`.
+     * @param seq       tick number
+     * @param amplitude peak, standard deviation, orbit radius or half-extent
+     * @param phase     radians, from `phase_for`
+     * @param noise     a standard normal draw
+     * @param u         uniform draw on `[0, 1]`
+     * @param v         uniform draw on `[0, 1]`
+     * @param w         uniform draw on `[0, 1]`
+     */
+    [[nodiscard]] virtual Sample make(std::int64_t seq, double amplitude, double phase, double noise, double u, double v,
+                                      double w) const = 0;
+};
+
+/// `a·sin(2π·seq/40 + phase)` on the scalar topic.
+class Sine : public SampleGenerator
+{
+public:
+    [[nodiscard]] Sample make(std::int64_t seq, double amplitude, double phase, double /*noise*/, double /*u*/, double /*v*/,
+                              double /*w*/) const override
     {
-    case Generator::GpsOrbit:
+        pgdemo_msgs::msg::ScalarSample m;
+        m.seq = seq;
+        m.value = sine(seq, amplitude, phase);
+        return m;
+    }
+};
+
+/// `a·(seq mod 50)/50` plus 5 % gaussian noise, on the scalar topic.
+class Sawtooth : public SampleGenerator
+{
+public:
+    [[nodiscard]] Sample make(std::int64_t seq, double amplitude, double /*phase*/, double noise, double /*u*/, double /*v*/,
+                              double /*w*/) const override
+    {
+        pgdemo_msgs::msg::ScalarSample m;
+        m.seq = seq;
+        m.value = sawtooth(seq, amplitude, noise);
+        return m;
+    }
+};
+
+/// Normal draw with standard deviation `a`, on the scalar topic.
+class WhiteNoise : public SampleGenerator
+{
+public:
+    [[nodiscard]] Sample make(std::int64_t seq, double amplitude, double /*phase*/, double noise, double /*u*/, double /*v*/,
+                              double /*w*/) const override
+    {
+        pgdemo_msgs::msg::ScalarSample m;
+        m.seq = seq;
+        m.value = amplitude * noise;
+        return m;
+    }
+};
+
+/// Circle of radius `a` metres around Madrid, one turn per 40 ticks.
+class GpsOrbit : public SampleGenerator
+{
+public:
+    [[nodiscard]] Sample make(std::int64_t seq, double amplitude, double phase, double /*noise*/, double /*u*/, double /*v*/,
+                              double /*w*/) const override
     {
         pgdemo_msgs::msg::GpsSample m;
         m.seq = seq;
@@ -87,21 +150,14 @@ inline Sample make_sample(Generator g, std::int64_t seq, double amplitude, doubl
         m.bearing_rad = angle_at(seq, phase);
         return m;
     }
-    case Generator::Sawtooth:
-    {
-        pgdemo_msgs::msg::ScalarSample m;
-        m.seq = seq;
-        m.value = sawtooth(seq, amplitude, noise);
-        return m;
-    }
-    case Generator::WhiteNoise:
-    {
-        pgdemo_msgs::msg::ScalarSample m;
-        m.seq = seq;
-        m.value = amplitude * noise;
-        return m;
-    }
-    case Generator::Scatter:
+};
+
+/// Uniform `x` and `y` in `[-a, a]`.
+class Scatter : public SampleGenerator
+{
+public:
+    [[nodiscard]] Sample make(std::int64_t seq, double amplitude, double /*phase*/, double /*noise*/, double u, double v,
+                              double /*w*/) const override
     {
         pgdemo_msgs::msg::XySample m;
         m.seq = seq;
@@ -109,7 +165,14 @@ inline Sample make_sample(Generator g, std::int64_t seq, double amplitude, doubl
         m.y = (2.0 * v - 1.0) * amplitude;
         return m;
     }
-    case Generator::Cloud:
+};
+
+/// Uniform `x`, `y` and `z` in `[-a, a]`.
+class Cloud : public SampleGenerator
+{
+public:
+    [[nodiscard]] Sample make(std::int64_t seq, double amplitude, double /*phase*/, double /*noise*/, double u, double v,
+                              double w) const override
     {
         pgdemo_msgs::msg::XyzSample m;
         m.seq = seq;
@@ -118,13 +181,6 @@ inline Sample make_sample(Generator g, std::int64_t seq, double amplitude, doubl
         m.z = (2.0 * w - 1.0) * amplitude;
         return m;
     }
-    case Generator::Sine:
-        break;
-    }
-    pgdemo_msgs::msg::ScalarSample m;
-    m.seq = seq;
-    m.value = sine(seq, amplitude, phase);
-    return m;
-}
+};
 
 } // namespace pgdemo::device

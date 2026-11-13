@@ -6,7 +6,7 @@ One simulated device, one process, one ROS 2 node (`pgdemo_device_<name>`). It h
 
 There is one topic per kind of message, not one topic per device. Every worker subscribes to the same five manager topics: `pgdemo/manager/control/bye`, `pgdemo/manager/security/challenge`, `pgdemo/manager/security/certificate`, `pgdemo/manager/security/rejected` and `pgdemo/manager/config`. A publication on any of them is delivered to every subscriber.
 
-The worker keeps a message only when its `device` field equals `--name`. [`DeviceNode::mine`](src/main.cpp) does that comparison and drops the rest. The field is the device name, the same string that is the certificate's CN.
+The worker keeps a message only when its `device` field equals `--name`. [`Worker`](src/Worker.hpp) does that comparison and drops the rest. The field is the device name, the same string that is the certificate's CN.
 
 `device_id` is not that selector. `bye`, `challenge`, `certificate` and `rejected` do not carry it. Only `config` does. After the name has matched, the worker uses `device_id` to offset its generator: `(device_id mod 8)·π/4` ([`phase_for`](src/Generators.hpp)). A `config` whose name is this worker's is applied even if the `device_id` belongs to someone else. A `config` whose name is someone else's is ignored even when the `device_id` is this worker's.
 
@@ -47,7 +47,56 @@ pgdemo-device --name NAME --type TYPE --payload scalar|gps|xy|xyz --dir DIR
               [--factory HOST:PORT] [--factory-root PATH] [--manager-cert PATH]
 ```
 
-`--name` is the device name and the certificate CN. `--type` selects the generator. `--payload` is `scalar`, `gps`, `xy` or `xyz`, and the process publishes only that telemetry topic. `--dir` holds `key.pem` and `cert.pem`, mode `0700`. `--enroll` and `--rotate` generate a key, publish a CSR and store the issued certificate; `--rotate` replaces the key only once the new certificate arrives.
+`--name` is the device name and the certificate CN. `--type` selects the generator. `--payload` is `scalar`, `gps`, `xy` or `xyz`, and the process publishes only that telemetry topic. After `AppBootstrap` prepares the PUF and the factory identity, the process instantiates `ScalarWorker`, `GpsWorker`, `XyWorker` or `XyzWorker`. `--dir` holds `key.pem` and `cert.pem`, mode `0700`. `--enroll` and `--rotate` generate a key, publish a CSR and store the issued certificate; `--rotate` replaces the key only once the new certificate arrives.
+
+`AppBootstrap` runs before `rclcpp::init`. `Worker` is the ROS node: the handshake and the publishers every payload shares. The telemetry class adds its own publisher. `Worker` owns one `SampleGenerator` and the `SampleStream` clock. `ScalarWorker` is given `Sine`, `Sawtooth` or `WhiteNoise`; the other three workers construct their generator themselves.
+
+```mermaid
+classDiagram
+    direction TB
+    class AppBootstrap {
+        +run()
+    }
+    class Worker {
+        +publish_sample()
+    }
+    class ScalarWorker
+    class GpsWorker
+    class XyWorker
+    class XyzWorker
+    class SampleStream {
+        +tick()
+    }
+    class SampleGenerator {
+        +make()
+    }
+    class Sine
+    class Sawtooth
+    class WhiteNoise
+    class GpsOrbit
+    class Scatter
+    class Cloud
+
+    AppBootstrap ..> Worker : before the node
+    Worker <|-- ScalarWorker
+    Worker <|-- GpsWorker
+    Worker <|-- XyWorker
+    Worker <|-- XyzWorker
+    Worker *-- SampleStream
+    Worker *-- SampleGenerator
+    SampleGenerator <|-- Sine
+    SampleGenerator <|-- Sawtooth
+    SampleGenerator <|-- WhiteNoise
+    SampleGenerator <|-- GpsOrbit
+    SampleGenerator <|-- Scatter
+    SampleGenerator <|-- Cloud
+    ScalarWorker ..> Sine
+    ScalarWorker ..> Sawtooth
+    ScalarWorker ..> WhiteNoise
+    GpsWorker ..> GpsOrbit
+    XyWorker ..> Scatter
+    XyzWorker ..> Cloud
+```
 
 `--device-id` and `--puf` are the simulated PUF, described below. `--factory` is where a missing `cert.pem` is sent for signature. `--factory-root` is that root's certificate. `--manager-cert` is the manager's public certificate, used to verify the CRL the manager publishes. The controller passes them only while the factory origin is up. Without them the process is the enrollment in [docs/DEVICE_PKI.md](../docs/DEVICE_PKI.md).
 
