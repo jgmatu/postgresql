@@ -1,7 +1,8 @@
-#include <pki/FactoryChannel.hpp>
+#include <factory/FactoryChannel.hpp>
 
+#include <factory/SecurityPolicy.hpp>
+#include <pki/Certificate.hpp>
 #include <pki/CertificateAuthority.hpp>
-#include <pki/SecurityPolicy.hpp>
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -14,7 +15,7 @@
 #include <stdexcept>
 #include <string>
 
-namespace pgdemo::pki {
+namespace pgdemo::factory {
 
 namespace {
 
@@ -108,7 +109,7 @@ int connect_to(const std::string& host, std::uint16_t port)
     return fd;
 }
 
-void serve_one(int client, const CertificateAuthority& ca)
+void serve_one(int client, const pki::CertificateAuthority& ca)
 {
     deadlines(client);
     std::string pending;
@@ -170,7 +171,7 @@ std::string request_signature(const std::string& host, std::uint16_t port, std::
     }
 }
 
-std::string answer_factory(const CertificateAuthority& ca, std::string_view head, std::string_view body)
+std::string answer_factory(const pki::CertificateAuthority& ca, std::string_view head, std::string_view body)
 {
     auto signed_reply = [&](std::string_view document) {
         std::string smime = ca.sign_document(document);
@@ -179,14 +180,16 @@ std::string answer_factory(const CertificateAuthority& ca, std::string_view head
     };
     if (head == "SIGN governance")
     {
-        if (body != governance_document()) throw PkiError("CERT_SUBJECT", "governance document is not the template");
+        if (body != governance_document())
+            throw pki::PkiError("CERT_SUBJECT", "governance document is not the template");
         return signed_reply(body);
     }
     constexpr std::string_view kPermissions = "SIGN permissions ";
     if (head.starts_with(kPermissions))
     {
         const std::string cn(head.substr(kPermissions.size()));
-        if (body != permissions_document(cn)) throw PkiError("CERT_SUBJECT", "permissions document is not the template");
+        if (body != permissions_document(cn))
+            throw pki::PkiError("CERT_SUBJECT", "permissions document is not the template");
         return signed_reply(body);
     }
     const auto role_at = head.find(' ');
@@ -196,15 +199,15 @@ std::string answer_factory(const CertificateAuthority& ca, std::string_view head
         const auto role = head.substr(role_at + 1, cn_at - role_at - 1);
         const auto cn = head.substr(cn_at + 1);
         if (role != "worker" && role != "manager") return "ERR role must be worker or manager\n";
-        const auto use = role == "manager" ? CertificateAuthority::PresentedUse::Manager
-                                            : CertificateAuthority::PresentedUse::Worker;
+        const auto use = role == "manager" ? pki::CertificateAuthority::PresentedUse::Manager
+                                            : pki::CertificateAuthority::PresentedUse::Worker;
         const auto issued = ca.sign_presented(std::string(body), std::string(cn), use);
         return "OK\n" + issued.pem + ".\n";
     }
     return "ERR expected SIGN worker|manager name, SIGN governance, or SIGN permissions name\n";
 }
 
-void serve_factory(std::uint16_t port, const CertificateAuthority& ca, const std::atomic<bool>& stop,
+void serve_factory(std::uint16_t port, const pki::CertificateAuthority& ca, const std::atomic<bool>& stop,
                    std::atomic<std::uint16_t>* bound, std::string_view listen_addr)
 {
     const int fd = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
@@ -247,7 +250,7 @@ void serve_factory(std::uint16_t port, const CertificateAuthority& ca, const std
         {
             serve_one(client, ca);
         }
-        catch (const PkiError& e)
+        catch (const pki::PkiError& e)
         {
             try
             {
@@ -272,4 +275,4 @@ void serve_factory(std::uint16_t port, const CertificateAuthority& ca, const std
     ::close(fd);
 }
 
-} // namespace pgdemo::pki
+} // namespace pgdemo::factory

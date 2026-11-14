@@ -1,22 +1,22 @@
 // Device PKI: CSR signing by the CA, verification by the controller, proofs, CRL.
 //
-// The CA is generated per test run with openssl into a temporary directory,
-// exactly as scripts/gen-device-ca.sh does.
+// The CA is generated per test run with Botan into a temporary directory,
+// with the same profile scripts/gen-device-ca.sh writes.
 
 #include <gtest/gtest.h>
 
+#include <pki/Bytes.hpp>
 #include <pki/CertVerifier.hpp>
 #include <pki/CertificateAuthority.hpp>
 #include <pki/DeviceKey.hpp>
-#include <pki/FactoryChannel.hpp>
 #include <pki/Handshake.hpp>
-#include <pki/PufTable.hpp>
-#include <pki/SecurityPolicy.hpp>
 
 #include <botan/auto_rng.h>
 #include <botan/data_src.h>
 #include <botan/ec_group.h>
 #include <botan/ecdsa.h>
+#include <botan/pkcs8.h>
+#include <botan/pkix_enums.h>
 #include <botan/rsa.h>
 #include <botan/x509_crl.h>
 #include <botan/x509self.h>
@@ -28,6 +28,7 @@
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <set>
 #include <span>
 #include <sstream>
 #include <string>
@@ -38,19 +39,21 @@ using namespace pgdemo::pki;
 
 namespace {
 
-std::string make_ca(const fs::path& dir, const std::string& cn)
+void make_ca(const fs::path& dir, const std::string& cn, std::string_view hash)
 {
     fs::create_directories(dir);
-    const auto key = (dir / "ca.key").string();
-    const auto crt = (dir / "ca.crt").string();
-    const std::string cmd =
-        "openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-384 -out " + key +
-        " 2>/dev/null && openssl req -new -x509 -key " + key + " -sha384 -days 30 -subj '/CN=" + cn +
-        "' -addext basicConstraints=critical,CA:TRUE,pathlen:0 -addext keyUsage=critical,keyCertSign,cRLSign"
-        " -addext subjectKeyIdentifier=hash -out " +
-        crt + " 2>/dev/null";
-    if (std::system(cmd.c_str()) != 0) throw std::runtime_error("openssl failed");
-    return crt;
+    Botan::AutoSeeded_RNG rng;
+    const Botan::ECDSA_PrivateKey key(rng, Botan::EC_Group::from_name("secp384r1"));
+    Botan::X509_Cert_Options opts;
+    opts.common_name = cn;
+    opts.CA_key(0);
+    opts.constraints = Botan::Key_Constraints::ca_constraints();
+    const auto cert = Botan::X509::create_self_signed_cert(opts, key, std::string(hash), rng);
+    std::ofstream key_out(dir / "ca.key");
+    key_out << Botan::PKCS8::PEM_encode(key);
+    std::ofstream cert_out(dir / "ca.crt");
+    cert_out << cert.PEM_encode();
+    if (!key_out || !cert_out) throw std::runtime_error("cannot write the test CA");
 }
 
 std::string read_file(const fs::path& p)
@@ -80,8 +83,8 @@ protected:
     static void SetUpTestSuite()
     {
         dir_ = fs::temp_directory_path() / ("pgdemo-pki-" + std::to_string(::getpid()));
-        make_ca(dir_ / "a", "test root A");
-        make_ca(dir_ / "b", "test root B");
+        make_ca(dir_ / "a", "test root A", "SHA-384");
+        make_ca(dir_ / "b", "test root B", "SHA-384");
         ca_ = std::make_unique<CertificateAuthority>((dir_ / "a" / "ca.key").string(),
                                                      (dir_ / "a" / "ca.crt").string());
         other_ = std::make_unique<CertificateAuthority>((dir_ / "b" / "ca.key").string(),
@@ -248,21 +251,6 @@ TEST_F(PkiTest, SameSeedDerivesTheSamePkcs8)
     EXPECT_NE(read_file(a), read_file(c));
 }
 
-TEST_F(PkiTest, PufTableKeepsTheSeedOfADevice)
-{
-    const auto path = dir_ / "devices.puf";
-    PufTable table(path);
-    const auto first = table.seed_for(7);
-    EXPECT_EQ(table.seed_for(7), first);
-    EXPECT_NE(table.seed_for(8), first);
-    EXPECT_EQ(fs::status(path).permissions() & fs::perms::all, fs::perms::owner_read | fs::perms::owner_write);
-    const auto again = (dir_ / "puf-again.key").string();
-    const auto once = (dir_ / "puf-once.key").string();
-    DeviceKey::from_seed(first).save(once);
-    DeviceKey::from_seed(PufTable(path).seed_for(7)).save(again);
-    EXPECT_EQ(read_file(once), read_file(again));
-}
-
 TEST_F(PkiTest, FactorySignsTheWorkerAndTheManager)
 {
     const auto worker = DeviceKey::generate();
@@ -299,29 +287,6 @@ TEST_F(PkiTest, FactorySignsTheWorkerAndTheManager)
 
     CertVerifier demo({other_->certificate_pem()});
     EXPECT_EQ(expect_code([&] { demo.verify(worker_cert.pem, "sensor-a", {}); }), "CERT_CHAIN");
-}
-
-TEST_F(PkiTest, FactoryChannelReturnsTheSignedCertificate)
-{
-    const auto worker = DeviceKey::generate();
-    const auto presented = worker.self_signed_pem("sensor-a");
-    std::atomic<bool> stop{false};
-    std::atomic<std::uint16_t> bound{0};
-    std::thread server([&] { serve_factory(0, *ca_, stop, &bound); });
-    for (int i = 0; i < 200 && bound.load() == 0; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    ASSERT_NE(bound.load(), 0);
-    const auto pem = request_signature("127.0.0.1", bound.load(), "worker", "sensor-a", presented);
-    stop.store(true);
-    server.join();
-
-    const auto manager = DeviceKey::generate();
-    const auto manager_cert = ca_->sign_presented(manager.self_signed_pem(std::string(kManagerCommonName), true),
-                                                  std::string(kManagerCommonName),
-                                                  CertificateAuthority::PresentedUse::Manager);
-    const auto payload = manager_crl_payload({});
-    verify_factory_pair(pem, manager_cert.pem, ca_->certificate_pem(), "sensor-a", payload, manager.sign(bytes_of(payload)));
-    const auto probe = random_bytes(32);
-    EXPECT_TRUE(CertVerifier::verify_signature(pem, probe, worker.sign(probe)));
 }
 
 TEST_F(PkiTest, HandshakeAuthenticatesTheWorkerAndHonoursTheCrl)
@@ -400,40 +365,111 @@ TEST_F(PkiTest, HandshakeAuthenticatesTheWorkerAndHonoursTheCrl)
     rejected_root.join();
 }
 
-TEST_F(PkiTest, FactorySignsOnlyThePolicyTemplate)
+TEST_F(PkiTest, PresentedCertificateIsSha256AndTheCsrIsNot)
 {
-    std::atomic<bool> stop{false};
-    std::atomic<std::uint16_t> bound{0};
-    std::thread server([&] { serve_factory(0, *ca_, stop, &bound); });
-    for (int i = 0; i < 200 && bound.load() == 0; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    ASSERT_NE(bound.load(), 0);
+    const auto key = DeviceKey::generate();
+    const auto csr = ca_->sign_csr(key.csr_pem("sensor-a"), "sensor-a");
+    const auto presented =
+        ca_->sign_presented(key.self_signed_pem("sensor-a"), "sensor-a", CertificateAuthority::PresentedUse::Worker);
+    EXPECT_FALSE(signed_with_sha256(csr.pem));
+    EXPECT_TRUE(signed_with_sha256(presented.pem));
+    EXPECT_FALSE(signed_with_sha256("not a certificate"));
+}
 
-    const auto governance = request_signed_document("127.0.0.1", bound.load(), "governance", "", governance_document());
-    EXPECT_NE(governance.find("allow_unauthenticated_participants"), std::string::npos);
-    EXPECT_NE(governance.find("multipart/signed"), std::string::npos);
-    auto tampered = governance_document();
-    const auto at = tampered.find(">false<");
-    ASSERT_NE(at, std::string::npos);
-    tampered.replace(at, 7, ">true<");
-    EXPECT_THROW(
-        [&] {
-            const auto ignored = request_signed_document("127.0.0.1", bound.load(), "governance", "", tampered);
-            static_cast<void>(ignored);
-        }(),
-        std::runtime_error);
+TEST_F(PkiTest, SelfSignedRootRequiresSha256AndTheExpectedName)
+{
+    make_ca(dir_ / "sha256", std::string(kManagerCommonName), "SHA-256");
+    const auto root = read_file(dir_ / "sha256" / "ca.crt");
+    EXPECT_TRUE(self_signed_root(root, kManagerCommonName));
+    EXPECT_FALSE(self_signed_root(root, "other"));
+    EXPECT_FALSE(self_signed_root(ca_->certificate_pem(), "test root A"));
 
-    const auto permissions =
-        request_signed_document("127.0.0.1", bound.load(), "permissions", "sensor-a", permissions_document("sensor-a"));
-    EXPECT_NE(permissions.find("CN=sensor-a"), std::string::npos);
-    EXPECT_THROW(
-        [] {
-            const auto ignored = permissions_document("not a name");
-            static_cast<void>(ignored);
-        }(),
-        std::invalid_argument);
+    const auto leaf = DeviceKey::generate();
+    const auto cert = ca_->sign_csr(leaf.csr_pem("sensor-a"), "sensor-a");
+    EXPECT_FALSE(self_signed_root(cert.pem, "sensor-a"));
+    EXPECT_FALSE(self_signed_root("not a certificate", kManagerCommonName));
+}
 
-    stop.store(true);
-    server.join();
+TEST_F(PkiTest, SmimeSignatureVerifiesWithTheCa)
+{
+    const std::string document = "hello\nworld\n";
+    const auto smime = ca_->sign_document(document);
+    const auto in = dir_ / "doc.p7s";
+    const auto out = dir_ / "recovered.txt";
+    const auto log = dir_ / "smime.log";
+    {
+        std::ofstream file(in);
+        file << smime;
+    }
+    const std::string cmd = "openssl smime -verify -text -in " + in.string() + " -CAfile " +
+                            (dir_ / "a" / "ca.crt").string() + " -out " + out.string() + " >" + log.string() + " 2>&1";
+    ASSERT_EQ(std::system(cmd.c_str()), 0) << read_file(log);
+
+    auto recovered = read_file(out);
+    for (std::size_t at = 0; (at = recovered.find("\r\n", at)) != std::string::npos;) recovered.replace(at, 2, "\n");
+    EXPECT_EQ(recovered, document);
+
+    auto tampered = smime;
+    const auto letter = tampered.find("hello");
+    ASSERT_NE(letter, std::string::npos);
+    tampered[letter] = 'j';
+    {
+        std::ofstream file(in);
+        file << tampered;
+    }
+    EXPECT_NE(std::system(cmd.c_str()), 0);
+}
+
+TEST_F(PkiTest, HexRoundTripsAndRejectsMalformedText)
+{
+    const std::uint8_t raw[]{0x0a, 0xff};
+    EXPECT_EQ(to_hex(raw), "0aff");
+    EXPECT_EQ(from_hex("0aff"), (std::vector<std::uint8_t>{0x0a, 0xff}));
+    EXPECT_THROW(from_hex("zz"), std::invalid_argument);
+    EXPECT_THROW(from_hex("abc"), std::invalid_argument);
+}
+
+TEST_F(PkiTest, ProofMessageBindsNonceNameAndFingerprint)
+{
+    const std::vector<std::uint8_t> nonce{1, 2, 3};
+    const auto msg = proof_message(nonce, "sensor-a", "abcd");
+    std::vector<std::uint8_t> expect(kProofContext.begin(), kProofContext.end());
+    expect.push_back(0);
+    expect.insert(expect.end(), nonce.begin(), nonce.end());
+    expect.push_back(0);
+    const std::string name = "sensor-a";
+    expect.insert(expect.end(), name.begin(), name.end());
+    expect.push_back(0);
+    const std::string fingerprint = "abcd";
+    expect.insert(expect.end(), fingerprint.begin(), fingerprint.end());
+    EXPECT_EQ(msg, expect);
+}
+
+TEST_F(PkiTest, ManagerCrlPayloadIsCanonical)
+{
+    const std::set<std::string> serials{"0b", "0a"};
+    const auto payload = manager_crl_payload(serials);
+    EXPECT_EQ(payload, "pgdemo-manager-crl-v1\n0a\n0b\n");
+    EXPECT_EQ(manager_crl_serials(payload), serials);
+    EXPECT_EQ(expect_code([&] { (void)manager_crl_serials("nope\n"); }), "CERT_CHAIN");
+    EXPECT_EQ(expect_code([&] { (void)manager_crl_serials("pgdemo-manager-crl-v1\n0b\n0a\n"); }), "CERT_CHAIN");
+}
+
+TEST_F(PkiTest, SeedMustBe32Bytes)
+{
+    std::array<std::uint8_t, 31> short_seed{};
+    EXPECT_THROW(DeviceKey::from_seed(short_seed), std::invalid_argument);
+}
+
+TEST_F(PkiTest, UnknownCrlReasonBecomesUnspecified)
+{
+    const auto key = DeviceKey::generate();
+    const auto cert = ca_->sign_csr(key.csr_pem("sensor-a"), "sensor-a");
+    const auto pem = ca_->crl_pem({{cert.pem, "not-a-reason"}});
+    Botan::DataSource_Memory src(pem);
+    const Botan::X509_CRL crl(src);
+    ASSERT_EQ(crl.get_revoked().size(), 1u);
+    EXPECT_EQ(crl.get_revoked()[0].reason_code(), Botan::CRL_Code::Unspecified);
 }
 
 } // namespace

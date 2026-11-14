@@ -1,4 +1,4 @@
-#include <pki/SecurityPolicy.hpp>
+#include <factory/SecurityPolicy.hpp>
 
 #include <sys/stat.h>
 
@@ -7,7 +7,7 @@
 #include <fstream>
 #include <stdexcept>
 
-namespace pgdemo::pki {
+namespace pgdemo::factory {
 
 namespace {
 
@@ -161,4 +161,4 @@ void clear_ros_security()
     ::unsetenv("ROS_SECURITY_ENCLAVE_OVERRIDE");
 }
 
-} // namespace pgdemo::pki
+} // namespace pgdemo::factory

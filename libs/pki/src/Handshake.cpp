@@ -2,9 +2,17 @@
 
 #include <pki/Certificate.hpp>
 
-#include <openssl/err.h>
-#include <openssl/ssl.h>
-#include <openssl/x509.h>
+#include <botan/auto_rng.h>
+#include <botan/certstor.h>
+#include <botan/credentials_manager.h>
+#include <botan/data_src.h>
+#include <botan/pkcs8.h>
+#include <botan/tls_client.h>
+#include <botan/tls_policy.h>
+#include <botan/tls_server.h>
+#include <botan/tls_session_manager_noop.h>
+#include <botan/x509cert.h>
+#include <botan/x509path.h>
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -12,9 +20,12 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <algorithm>
+#include <array>
 #include <csignal>
-#include <climits>
 #include <cstring>
+#include <memory>
+#include <span>
 #include <stdexcept>
 
 namespace pgdemo::pki {
@@ -30,68 +41,19 @@ void ignore_sigpipe()
     (void)once;
 }
 
-[[noreturn]] void tls_fail(const std::string& what)
+void write_all(int fd, std::span<const uint8_t> data)
 {
-    const unsigned long err = ERR_get_error();
-    if (err == 0) throw PkiError("CERT_CHAIN", what);
-    char buf[256];
-    ERR_error_string_n(err, buf, sizeof buf);
-    throw PkiError("CERT_CHAIN", what + ": " + buf);
-}
-
-BIO* mem(const std::string& pem)
-{
-    if (pem.size() > static_cast<std::size_t>(INT_MAX)) throw std::runtime_error("TLS: PEM too large");
-    BIO* bio = BIO_new_mem_buf(pem.data(), static_cast<int>(pem.size()));
-    if (bio == nullptr) throw std::runtime_error("TLS: out of memory");
-    return bio;
-}
-
-SSL_CTX* make_ctx(const std::string& key_pem, const std::string& cert_pem, const std::string& root_pem)
-{
-    SSL_CTX* ctx = SSL_CTX_new(TLS_method());
-    if (ctx == nullptr) tls_fail("cannot create a TLS context");
-    if (SSL_CTX_set_min_proto_version(ctx, TLS1_3_VERSION) != 1 ||
-        SSL_CTX_set_max_proto_version(ctx, TLS1_3_VERSION) != 1)
+    std::size_t done = 0;
+    while (done < data.size())
     {
-        SSL_CTX_free(ctx);
-        tls_fail("cannot require TLS 1.3");
+        const ssize_t n = ::write(fd, data.data() + done, data.size() - done);
+        if (n < 0)
+        {
+            if (errno == EINTR) continue;
+            throw PkiError("CERT_CHAIN", std::string("handshake failed: ") + std::strerror(errno));
+        }
+        done += static_cast<std::size_t>(n);
     }
-    SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT, nullptr);
-
-    BIO* root_bio = mem(root_pem);
-    X509* root = PEM_read_bio_X509(root_bio, nullptr, nullptr, nullptr);
-    BIO_free(root_bio);
-    if (root == nullptr || X509_STORE_add_cert(SSL_CTX_get_cert_store(ctx), root) != 1)
-    {
-        X509_free(root);
-        SSL_CTX_free(ctx);
-        tls_fail("cannot load the factory root");
-    }
-    X509_free(root);
-
-    BIO* cert_bio = mem(cert_pem);
-    X509* cert = PEM_read_bio_X509(cert_bio, nullptr, nullptr, nullptr);
-    BIO_free(cert_bio);
-    if (cert == nullptr || SSL_CTX_use_certificate(ctx, cert) != 1)
-    {
-        X509_free(cert);
-        SSL_CTX_free(ctx);
-        tls_fail("cannot load the certificate");
-    }
-    X509_free(cert);
-
-    BIO* key_bio = mem(key_pem);
-    EVP_PKEY* key = PEM_read_bio_PrivateKey(key_bio, nullptr, nullptr, nullptr);
-    BIO_free(key_bio);
-    if (key == nullptr || SSL_CTX_use_PrivateKey(ctx, key) != 1 || SSL_CTX_check_private_key(ctx) != 1)
-    {
-        EVP_PKEY_free(key);
-        SSL_CTX_free(ctx);
-        tls_fail("cannot load the private key");
-    }
-    EVP_PKEY_free(key);
-    return ctx;
 }
 
 void deadlines(int fd)
@@ -101,56 +63,189 @@ void deadlines(int fd)
     ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
 }
 
-HandshakePeer peer_of(SSL* ssl, std::string_view expected_cn)
+class Tls13Policy final : public Botan::TLS::Policy
 {
-    X509* cert = SSL_get1_peer_certificate(ssl);
-    if (cert == nullptr) throw PkiError("CERT_CHAIN", "peer presented no certificate");
-    char cn[256];
-    const int n = X509_NAME_get_text_by_NID(X509_get_subject_name(cert), NID_commonName, cn, sizeof cn);
-    BIO* out = BIO_new(BIO_s_mem());
-    if (n < 0 || out == nullptr || PEM_write_bio_X509(out, cert) != 1)
+public:
+    bool allow_tls12() const override { return false; }
+
+    bool acceptable_protocol_version(Botan::TLS::Protocol_Version version) const override
     {
-        BIO_free(out);
-        X509_free(cert);
-        throw PkiError("CERT_MALFORMED", "peer certificate cannot be read");
+        return version == Botan::TLS::Protocol_Version::TLS_V13;
     }
-    X509_free(cert);
-    char* data = nullptr;
-    const long len = BIO_get_mem_data(out, &data);
-    HandshakePeer peer{n > 0 ? std::string(cn, static_cast<std::size_t>(n)) : std::string{},
-                       std::string(data, static_cast<std::size_t>(len))};
-    BIO_free(out);
+
+    Botan::TLS::Protocol_Version latest_supported_version(bool datagram) const override
+    {
+        if (datagram) return Botan::TLS::Protocol_Version::latest_dtls_version();
+        return Botan::TLS::Protocol_Version::TLS_V13;
+    }
+
+    bool require_client_certificate_authentication() const override { return true; }
+
+    std::size_t new_session_tickets_upon_handshake_success() const override { return 0; }
+
+    bool support_cert_status_message() const override { return false; }
+};
+
+Botan::X509_Certificate load_cert(const std::string& pem)
+{
+    Botan::DataSource_Memory src(pem);
+    return Botan::X509_Certificate(src);
+}
+
+class Identity final : public Botan::Credentials_Manager
+{
+public:
+    Identity(const std::string& key_pem, const std::string& cert_pem, const std::string& root_pem)
+        : leaf_(load_cert(cert_pem))
+    {
+        Botan::DataSource_Memory key_src(key_pem);
+        key_ = Botan::PKCS8::load_key(key_src);
+        if (!key_) throw std::runtime_error("TLS: cannot load the private key");
+        store_.add_certificate(load_cert(root_pem));
+    }
+
+    std::vector<Botan::Certificate_Store*> trusted_certificate_authorities(const std::string&,
+                                                                           const std::string&) override
+    {
+        return {&store_};
+    }
+
+    std::vector<Botan::X509_Certificate> find_cert_chain(const std::vector<std::string>& cert_key_types,
+                                                         const std::vector<Botan::AlgorithmIdentifier>&,
+                                                         const std::vector<Botan::X509_DN>&, const std::string&,
+                                                         const std::string&) override
+    {
+        if (!cert_key_types.empty() &&
+            std::find(cert_key_types.begin(), cert_key_types.end(), std::string("ECDSA")) == cert_key_types.end())
+            return {};
+        return {leaf_};
+    }
+
+    std::shared_ptr<Botan::Private_Key> private_key_for(const Botan::X509_Certificate&, const std::string&,
+                                                        const std::string&) override
+    {
+        return key_;
+    }
+
+private:
+    std::shared_ptr<Botan::Private_Key> key_;
+    Botan::X509_Certificate leaf_;
+    Botan::Certificate_Store_In_Memory store_;
+};
+
+class SocketCallbacks final : public Botan::TLS::Callbacks
+{
+public:
+    explicit SocketCallbacks(int fd) : fd_(fd) {}
+
+    void tls_emit_data(std::span<const uint8_t> data) override { write_all(fd_, data); }
+
+    void tls_record_received(uint64_t, std::span<const uint8_t>) override {}
+
+    void tls_alert(Botan::TLS::Alert alert) override
+    {
+        if (alert.is_fatal()) fatal_ = alert.type_string();
+    }
+
+    void tls_verify_cert_chain(const std::vector<Botan::X509_Certificate>& cert_chain,
+                               const std::vector<std::optional<Botan::OCSP::Response>>&,
+                               const std::vector<Botan::Certificate_Store*>& trusted_roots, Botan::Usage_Type usage,
+                               std::string_view, const Botan::TLS::Policy&) override
+    {
+        if (cert_chain.empty() || trusted_roots.empty()) throw std::runtime_error("peer presented no certificate");
+        const Botan::Path_Validation_Restrictions restrictions(false, 110);
+        const auto result = Botan::x509_path_validate(cert_chain, restrictions, trusted_roots, "", usage);
+        if (!result.successful_validation()) throw std::runtime_error(result.result_string());
+    }
+
+    [[nodiscard]] const std::string& fatal() const noexcept { return fatal_; }
+
+private:
+    int fd_{-1};
+    std::string fatal_;
+};
+
+struct Materials
+{
+    std::shared_ptr<Botan::AutoSeeded_RNG> rng = std::make_shared<Botan::AutoSeeded_RNG>();
+    std::shared_ptr<Botan::TLS::Policy> policy = std::make_shared<Tls13Policy>();
+    std::shared_ptr<Botan::TLS::Session_Manager_Noop> sessions = std::make_shared<Botan::TLS::Session_Manager_Noop>();
+    std::shared_ptr<Identity> identity;
+
+    Materials(const std::string& key_pem, const std::string& cert_pem, const std::string& root_pem)
+        : identity(std::make_shared<Identity>(key_pem, cert_pem, root_pem))
+    {
+    }
+};
+
+void pump(int fd, Botan::TLS::Channel& channel, const SocketCallbacks& callbacks)
+{
+    std::array<uint8_t, 4096> buf{};
+    while (!channel.is_handshake_complete())
+    {
+        if (!callbacks.fatal().empty()) throw PkiError("CERT_CHAIN", "handshake failed: " + callbacks.fatal());
+        const ssize_t n = ::recv(fd, buf.data(), buf.size(), 0);
+        if (n < 0)
+        {
+            if (errno == EINTR) continue;
+            throw PkiError("CERT_CHAIN", std::string("handshake failed: ") + std::strerror(errno));
+        }
+        if (n == 0) throw PkiError("CERT_CHAIN", "handshake failed: connection closed");
+        try
+        {
+            channel.received_data(buf.data(), static_cast<std::size_t>(n));
+        }
+        catch (const PkiError&)
+        {
+            throw;
+        }
+        catch (const std::exception& e)
+        {
+            throw PkiError("CERT_CHAIN", std::string("handshake failed: ") + e.what());
+        }
+    }
+    if (!callbacks.fatal().empty()) throw PkiError("CERT_CHAIN", "handshake failed: " + callbacks.fatal());
+}
+
+HandshakePeer peer_of(Botan::TLS::Channel& channel, std::string_view expected_cn)
+{
+    const auto chain = channel.peer_cert_chain();
+    if (chain.empty()) throw PkiError("CERT_CHAIN", "peer presented no certificate");
+    const auto& cert = chain.front();
+    HandshakePeer peer{cert.subject_dn().get_first_attribute("CN"), cert.PEM_encode()};
     if (!expected_cn.empty() && peer.common_name != expected_cn)
         throw PkiError("CERT_SUBJECT", "peer CN '" + peer.common_name + "' is not '" + std::string(expected_cn) + "'");
     return peer;
 }
 
-struct Session
+void shutdown_quietly(Botan::TLS::Channel& channel)
 {
-    SSL* ssl{nullptr};
-    explicit Session(SSL_CTX* ctx) : ssl(SSL_new(ctx))
+    try
     {
-        if (ssl == nullptr) tls_fail("cannot create a TLS session");
+        channel.close();
     }
-    ~Session() { SSL_free(ssl); }
-    Session(const Session&) = delete;
-    Session& operator=(const Session&) = delete;
-};
+    catch (const std::exception&)
+    {
+    }
+}
 
 } // namespace
 
 struct HandshakeListener::Ctx
 {
-    SSL_CTX* ssl;
+    Materials materials;
+    explicit Ctx(const std::string& key_pem, const std::string& cert_pem, const std::string& root_pem)
+        : materials(key_pem, cert_pem, root_pem)
+    {
+    }
 };
 
 HandshakeListener::HandshakeListener(const std::string& key_pem, const std::string& cert_pem, const std::string& root_pem)
-    : ctx_((ignore_sigpipe(), new Ctx{make_ctx(key_pem, cert_pem, root_pem)}))
+    : ctx_((ignore_sigpipe(), new Ctx(key_pem, cert_pem, root_pem)))
 {
     fd_ = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
     if (fd_ < 0)
     {
-        SSL_CTX_free(ctx_->ssl);
         delete ctx_;
         throw std::runtime_error("TLS: cannot open a socket");
     }
@@ -163,7 +258,6 @@ HandshakeListener::HandshakeListener(const std::string& key_pem, const std::stri
     if (::bind(fd_, reinterpret_cast<sockaddr*>(&addr), sizeof addr) != 0 || ::listen(fd_, 16) != 0)
     {
         ::close(fd_);
-        SSL_CTX_free(ctx_->ssl);
         delete ctx_;
         throw std::runtime_error("TLS: cannot listen on 127.0.0.1");
     }
@@ -172,7 +266,6 @@ HandshakeListener::HandshakeListener(const std::string& key_pem, const std::stri
     if (::getsockname(fd_, reinterpret_cast<sockaddr*>(&bound), &len) != 0)
     {
         ::close(fd_);
-        SSL_CTX_free(ctx_->ssl);
         delete ctx_;
         throw std::runtime_error("TLS: cannot read the bound port");
     }
@@ -182,11 +275,7 @@ HandshakeListener::HandshakeListener(const std::string& key_pem, const std::stri
 HandshakeListener::~HandshakeListener()
 {
     if (fd_ >= 0) ::close(fd_);
-    if (ctx_ != nullptr)
-    {
-        SSL_CTX_free(ctx_->ssl);
-        delete ctx_;
-    }
+    delete ctx_;
 }
 
 bool HandshakeListener::wait(std::chrono::milliseconds timeout) const
@@ -201,19 +290,16 @@ HandshakePeer HandshakeListener::accept_one()
     sockaddr_in peer{};
     socklen_t len = sizeof peer;
     const int client = ::accept(fd_, reinterpret_cast<sockaddr*>(&peer), &len);
-    if (client < 0) tls_fail("accept failed");
+    if (client < 0) throw PkiError("CERT_CHAIN", std::string("accept failed: ") + std::strerror(errno));
     deadlines(client);
-    Session session(ctx_->ssl);
-    SSL_set_fd(session.ssl, client);
-    if (SSL_accept(session.ssl) != 1)
-    {
-        ::close(client);
-        tls_fail("handshake failed");
-    }
     try
     {
-        auto presented = peer_of(session.ssl, {});
-        SSL_shutdown(session.ssl);
+        auto callbacks = std::make_shared<SocketCallbacks>(client);
+        const auto& m = ctx_->materials;
+        Botan::TLS::Server server(callbacks, m.sessions, m.identity, m.policy, m.rng);
+        pump(client, server, *callbacks);
+        auto presented = peer_of(server, {});
+        shutdown_quietly(server);
         ::close(client);
         return presented;
     }
@@ -228,13 +314,8 @@ HandshakePeer handshake_connect(const std::string& host, std::uint16_t port, con
                                 const std::string& cert_pem, const std::string& root_pem, std::string_view expected_cn)
 {
     ignore_sigpipe();
-    SSL_CTX* ctx = make_ctx(key_pem, cert_pem, root_pem);
     const int fd = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
-    if (fd < 0)
-    {
-        SSL_CTX_free(ctx);
-        throw std::runtime_error("TLS: cannot open a socket");
-    }
+    if (fd < 0) throw std::runtime_error("TLS: cannot open a socket");
     deadlines(fd);
     try
     {
@@ -243,23 +324,22 @@ HandshakePeer handshake_connect(const std::string& host, std::uint16_t port, con
         addr.sin_port = htons(port);
         if (::inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1)
             throw std::runtime_error("TLS: " + host + " is not an IPv4 address");
-        if (::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof addr) != 0) tls_fail("cannot connect");
-        HandshakePeer presented;
-        {
-            Session session(ctx);
-            SSL_set_fd(session.ssl, fd);
-            if (SSL_connect(session.ssl) != 1) tls_fail("handshake failed");
-            presented = peer_of(session.ssl, expected_cn);
-            SSL_shutdown(session.ssl);
-        }
+        if (::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof addr) != 0)
+            throw PkiError("CERT_CHAIN", std::string("cannot connect: ") + std::strerror(errno));
+
+        Materials materials(key_pem, cert_pem, root_pem);
+        auto callbacks = std::make_shared<SocketCallbacks>(fd);
+        Botan::TLS::Client client(callbacks, materials.sessions, materials.identity, materials.policy, materials.rng,
+                                  Botan::TLS::Server_Information(), Botan::TLS::Protocol_Version::TLS_V13);
+        pump(fd, client, *callbacks);
+        auto presented = peer_of(client, expected_cn);
+        shutdown_quietly(client);
         ::close(fd);
-        SSL_CTX_free(ctx);
         return presented;
     }
     catch (...)
     {
         ::close(fd);
-        SSL_CTX_free(ctx);
         throw;
     }
 }

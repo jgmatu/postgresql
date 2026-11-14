@@ -2,12 +2,14 @@
 
 #include "Files.hpp"
 
+#include "PufTable.hpp"
+
+#include <factory/FactoryChannel.hpp>
+#include <factory/SecurityPolicy.hpp>
+#include <pki/Bytes.hpp>
 #include <pki/CertVerifier.hpp>
 #include <pki/Certificate.hpp>
 #include <pki/DeviceKey.hpp>
-#include <pki/FactoryChannel.hpp>
-#include <pki/PufTable.hpp>
-#include <pki/SecurityPolicy.hpp>
 
 #include <log/Log.hpp>
 
@@ -121,7 +123,7 @@ void AppBootstrap::prepare_identity()
                 const auto [host, port] = split_endpoint(opts_.factory);
                 auto key = pki::DeviceKey::load(factory_key.string());
                 const auto pem =
-                    pki::request_signature(host, port, "worker", opts_.name, key.self_signed_pem(opts_.name));
+                    factory::request_signature(host, port, "worker", opts_.name, key.self_signed_pem(opts_.name));
                 write_file(factory_crt, pem);
                 trace(with_serial("factory signed the certificate", pki::inspect_certificate(pem).serial));
             }
@@ -134,7 +136,7 @@ void AppBootstrap::prepare_identity()
     trace("no PUF directory");
     if (opts_.device_id && !opts_.puf.empty() && !fs::exists(key_path))
     {
-        const auto seed = pki::PufTable(opts_.puf).seed_for(*opts_.device_id);
+        const auto seed = PufTable(opts_.puf).seed_for(*opts_.device_id);
         pki::DeviceKey::from_seed(seed).save(key_path.string());
         trace("derived the key from devices.puf");
     }
@@ -151,7 +153,7 @@ void AppBootstrap::prepare_identity()
         {
             const auto [host, port] = split_endpoint(opts_.factory);
             auto key = pki::DeviceKey::load(key_path.string());
-            const auto pem = pki::request_signature(host, port, "worker", opts_.name, key.self_signed_pem(opts_.name));
+            const auto pem = factory::request_signature(host, port, "worker", opts_.name, key.self_signed_pem(opts_.name));
             write_file(cert_path, pem);
             trace(with_serial("factory signed the certificate", pki::inspect_certificate(pem).serial));
         }
@@ -162,7 +164,7 @@ void AppBootstrap::prepare_identity()
 
 void AppBootstrap::arm_security()
 {
-    pki::clear_ros_security();
+    factory::clear_ros_security();
     fs::path key_path = opts_.dir / "key.pem";
     fs::path cert_path = opts_.dir / "cert.pem";
     std::string pair = "key.pem and cert.pem";
@@ -214,22 +216,22 @@ void AppBootstrap::arm_security()
     try
     {
         const auto [host, port] = split_endpoint(opts_.factory);
-        const auto governance = pki::request_signed_document(host, port, "governance", "", pki::governance_document());
+        const auto governance = factory::request_signed_document(host, port, "governance", "", factory::governance_document());
         trace("SROS2 governance signed");
         const auto permissions =
-            pki::request_signed_document(host, port, "permissions", opts_.name, pki::permissions_document(opts_.name));
+            factory::request_signed_document(host, port, "permissions", opts_.name, factory::permissions_document(opts_.name));
         trace("SROS2 permissions signed");
         const auto keystore = fs::absolute(opts_.dir.parent_path().parent_path() / "keystore");
         const auto enclave = "/" + node_name_for(opts_.name);
-        const auto directory = pki::enclave_directory(keystore, enclave);
-        pki::write_enclave(directory, read_file(key_path), cert, pki::identity_ca_bundle(root, manager), root, governance,
+        const auto directory = factory::enclave_directory(keystore, enclave);
+        factory::write_enclave(directory, read_file(key_path), cert, factory::identity_ca_bundle(root, manager), root, governance,
                            permissions);
-        pki::enable_ros_security(keystore, enclave);
+        factory::enable_ros_security(keystore, enclave);
         trace("SROS2 enclave " + directory.string());
     }
     catch (const std::exception& e)
     {
-        pki::clear_ros_security();
+        factory::clear_ros_security();
         log::warn("device " + opts_.name, std::string("SROS2 stays off: ") + e.what());
     }
 }

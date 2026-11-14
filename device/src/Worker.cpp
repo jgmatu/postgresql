@@ -3,6 +3,7 @@
 #include "ConfigCheck.hpp"
 #include "Files.hpp"
 
+#include <pki/Bytes.hpp>
 #include <pki/CertVerifier.hpp>
 #include <pki/Certificate.hpp>
 

@@ -1,6 +1,6 @@
-#include <pki/PufTable.hpp>
+#include "PufTable.hpp"
 
-#include <pki/Certificate.hpp>
+#include <pki/Bytes.hpp>
 
 #include <fcntl.h>
 #include <sys/file.h>
@@ -14,7 +14,7 @@
 #include <stdexcept>
 #include <string>
 
-namespace pgdemo::pki {
+namespace pgdemo::device {
 
 namespace {
 
@@ -91,7 +91,7 @@ private:
 
 std::array<std::uint8_t, 32> parse_seed(std::string_view hex)
 {
-    const auto bytes = from_hex(hex);
+    const auto bytes = pki::from_hex(hex);
     if (bytes.size() != 32) throw std::runtime_error("PufTable: seed is not 32 bytes");
     std::array<std::uint8_t, 32> out{};
     std::copy(bytes.begin(), bytes.end(), out.begin());
@@ -127,11 +127,11 @@ std::array<std::uint8_t, 32> PufTable::seed_for(std::int64_t device_id) const
         return parse_seed(line.substr(space + 1));
     }
 
-    const auto fresh = random_bytes(32);
-    file.append(std::to_string(device_id) + " " + to_hex(fresh) + "\n");
+    const auto fresh = pki::random_bytes(32);
+    file.append(std::to_string(device_id) + " " + pki::to_hex(fresh) + "\n");
     std::array<std::uint8_t, 32> out{};
     std::copy(fresh.begin(), fresh.end(), out.begin());
     return out;
 }
 
-} // namespace pgdemo::pki
+} // namespace pgdemo::device

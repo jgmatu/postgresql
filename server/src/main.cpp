@@ -30,6 +30,7 @@
 #include <auth/JwtManager.hpp>
 #include <auth/PasswordHasher.hpp>
 #include <db/DatabaseManager.hpp>
+#include <db/Time.hpp>
 #include <log/Log.hpp>
 
 #include "Services.hpp"
@@ -312,7 +313,7 @@ int run(const ServerConfig& cfg)
             pem << in.rdbuf();
             const auto info = pki::inspect_certificate(pem.str());
             services->db->ensure_factory_root("CN=" + info.subject_cn, info.fingerprint, info.pem,
-                                              pki::format_time(info.not_before), pki::format_time(info.not_after));
+                                              db::format_time(info.not_before), db::format_time(info.not_after));
             log::info(kLog, "factory root " + info.fingerprint);
         }
         catch (const std::exception& e)

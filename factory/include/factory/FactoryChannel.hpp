@@ -6,8 +6,10 @@
 #include <string_view>
 
 namespace pgdemo::pki {
-
 class CertificateAuthority;
+}
+
+namespace pgdemo::factory {
 
 /**
  * @brief Ask the factory process to sign a self-signed certificate.
@@ -44,7 +46,7 @@ class CertificateAuthority;
  * @param bound       set to the port actually bound, before the accept loop, when not null
  * @param listen_addr IPv4 address to bind
  */
-void serve_factory(std::uint16_t port, const CertificateAuthority& ca, const std::atomic<bool>& stop,
+void serve_factory(std::uint16_t port, const pki::CertificateAuthority& ca, const std::atomic<bool>& stop,
                    std::atomic<std::uint16_t>* bound = nullptr, std::string_view listen_addr = "127.0.0.1");
 
 /**
@@ -54,6 +56,7 @@ void serve_factory(std::uint16_t port, const CertificateAuthority& ca, const std
  * followed it, without the terminating dot line. The reply is `OK` plus the
  * signed material, or an `ERR` line.
  */
-[[nodiscard]] std::string answer_factory(const CertificateAuthority& ca, std::string_view head, std::string_view body);
+[[nodiscard]] std::string answer_factory(const pki::CertificateAuthority& ca, std::string_view head,
+                                            std::string_view body);
 
-} // namespace pgdemo::pki
+} // namespace pgdemo::factory

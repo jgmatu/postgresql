@@ -1,12 +1,14 @@
 #include "Origin.hpp"
 
+#include <factory/FactoryChannel.hpp>
+#include <factory/SecurityPolicy.hpp>
+#include <pki/Bytes.hpp>
 #include <pki/CertVerifier.hpp>
 #include <pki/Certificate.hpp>
 #include <pki/DeviceKey.hpp>
-#include <pki/FactoryChannel.hpp>
-#include <pki/SecurityPolicy.hpp>
 
 #include <db/DatabaseManager.hpp>
+#include <db/Time.hpp>
 #include <log/Log.hpp>
 
 #include <filesystem>
@@ -36,7 +38,7 @@ std::span<const std::uint8_t> bytes_of(std::string_view text)
 
 void clear_origin(FleetOptions& fleet)
 {
-    pki::clear_ros_security();
+    factory::clear_ros_security();
     fleet.puf_file.clear();
     fleet.factory_root.clear();
     fleet.factory_addr.clear();
@@ -61,8 +63,8 @@ void start_origin(db::DatabaseManager& db, FleetOptions& fleet, const OriginFile
     {
         const auto root_pem = read_file(files.factory_cert);
         const auto root = pki::inspect_certificate(root_pem);
-        db.ensure_factory_root("CN=" + root.subject_cn, root.fingerprint, root.pem, pki::format_time(root.not_before),
-                               pki::format_time(root.not_after));
+        db.ensure_factory_root("CN=" + root.subject_cn, root.fingerprint, root.pem, db::format_time(root.not_before),
+                               db::format_time(root.not_after));
 
         const auto cert_path = fs::path(files.manager_key).replace_extension("crt");
         if (!fs::is_regular_file(cert_path))
@@ -75,7 +77,7 @@ void start_origin(db::DatabaseManager& db, FleetOptions& fleet, const OriginFile
         if (!stored || *stored != info.pem)
         {
             db.register_manager_certificate(root.fingerprint, info.serial, info.fingerprint, info.subject_cn,
-                                            pki::format_time(info.not_before), pki::format_time(info.not_after),
+                                            db::format_time(info.not_before), db::format_time(info.not_after),
                                             info.pem);
             log::info(kLog, "manager root registered");
         }
@@ -85,16 +87,16 @@ void start_origin(db::DatabaseManager& db, FleetOptions& fleet, const OriginFile
         const auto payload = pki::manager_crl_payload(serials);
         db.replace_manager_crl(payload, pki::to_hex(key.sign(bytes_of(payload))));
 
-        const auto governance = pki::request_signed_document(files.factory_host, files.factory_port, "governance", "",
-                                                             pki::governance_document());
-        const auto permissions = pki::request_signed_document(files.factory_host, files.factory_port, "permissions",
+        const auto governance = factory::request_signed_document(files.factory_host, files.factory_port, "governance", "",
+                                                             factory::governance_document());
+        const auto permissions = factory::request_signed_document(files.factory_host, files.factory_port, "permissions",
                                                               pki::kManagerCommonName,
-                                                              pki::permissions_document(pki::kManagerCommonName));
+                                                              factory::permissions_document(pki::kManagerCommonName));
         const auto keystore = fs::absolute(fleet.devices_dir.parent_path() / "keystore");
         constexpr std::string_view kEnclave = "/pgdemo_controller";
-        pki::write_enclave(pki::enclave_directory(keystore, kEnclave), read_file(files.manager_key), manager_pem,
-                           pki::identity_ca_bundle(root_pem, manager_pem), root_pem, governance, permissions);
-        pki::enable_ros_security(keystore, kEnclave);
+        factory::write_enclave(factory::enclave_directory(keystore, kEnclave), read_file(files.manager_key), manager_pem,
+                           factory::identity_ca_bundle(root_pem, manager_pem), root_pem, governance, permissions);
+        factory::enable_ros_security(keystore, kEnclave);
 
         fleet.puf_file = fleet.devices_dir / "devices.puf";
         fleet.factory_root = fs::absolute(files.factory_cert);
@@ -102,7 +104,7 @@ void start_origin(db::DatabaseManager& db, FleetOptions& fleet, const OriginFile
         fleet.factory_fingerprint = root.fingerprint;
         fleet.manager_cert = fs::absolute(cert_path);
         fleet.manager_key = files.manager_key;
-        log::info(kLog, "SROS2 enclave " + pki::enclave_directory(keystore, kEnclave).string());
+        log::info(kLog, "SROS2 enclave " + factory::enclave_directory(keystore, kEnclave).string());
     }
     catch (const std::exception& e)
     {

@@ -11,6 +11,17 @@ target_link_libraries(pki_tests PRIVATE pgdemo::pki GTest::gtest_main)
 target_compile_options(pki_tests PRIVATE ${PGDEMO_WARNINGS})
 gtest_discover_tests(pki_tests)
 
+add_executable(factory_tests unit/factory_tests.cpp)
+target_link_libraries(factory_tests PRIVATE pgdemo::factory GTest::gtest_main)
+target_compile_options(factory_tests PRIVATE ${PGDEMO_WARNINGS})
+gtest_discover_tests(factory_tests)
+
+add_executable(device_puf_tests unit/device_puf_tests.cpp ${PROJECT_SOURCE_DIR}/device/src/PufTable.cpp)
+target_include_directories(device_puf_tests PRIVATE ${PROJECT_SOURCE_DIR}/device/src)
+target_link_libraries(device_puf_tests PRIVATE pgdemo::pki GTest::gtest_main)
+target_compile_options(device_puf_tests PRIVATE ${PGDEMO_WARNINGS})
+gtest_discover_tests(device_puf_tests)
+
 add_executable(wire_tests unit/wire_tests.cpp)
 target_include_directories(wire_tests PRIVATE ${PROJECT_SOURCE_DIR}/device/src)
 target_link_libraries(wire_tests PRIVATE pgdemo::msgs pgdemo::log GTest::gtest_main)

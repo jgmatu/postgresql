@@ -1,80 +1,16 @@
 #include <pki/Certificate.hpp>
 
-#include <botan/auto_rng.h>
-#include <botan/base64.h>
+#include <pki/Bytes.hpp>
+
 #include <botan/data_src.h>
-#include <botan/hex.h>
 #include <botan/pk_keys.h>
 #include <botan/pkix_types.h>
 #include <botan/x509cert.h>
 
 #include <algorithm>
 #include <cctype>
-#include <format>
 
 namespace pgdemo::pki {
-
-std::string to_hex(std::span<const std::uint8_t> bytes)
-{
-    return Botan::hex_encode(bytes.data(), bytes.size(), false);
-}
-
-std::vector<std::uint8_t> from_hex(std::string_view hex)
-{
-    try
-    {
-        return Botan::hex_decode(hex);
-    }
-    catch (const std::exception& e)
-    {
-        throw std::invalid_argument(std::string("invalid hex: ") + e.what());
-    }
-}
-
-std::string format_time(std::chrono::system_clock::time_point tp)
-{
-    return std::format("{:%FT%TZ}", std::chrono::floor<std::chrono::seconds>(tp));
-}
-
-std::string base64_encode(std::span<const std::uint8_t> bytes)
-{
-    return Botan::base64_encode(bytes.data(), bytes.size());
-}
-
-std::vector<std::uint8_t> base64_decode(std::string_view text)
-{
-    try
-    {
-        return Botan::unlock(Botan::base64_decode(text));
-    }
-    catch (const std::exception& e)
-    {
-        throw std::invalid_argument(std::string("invalid base64: ") + e.what());
-    }
-}
-
-std::vector<std::uint8_t> random_bytes(std::size_t n)
-{
-    Botan::AutoSeeded_RNG rng;
-    std::vector<std::uint8_t> out(n);
-    rng.randomize(out);
-    return out;
-}
-
-std::vector<std::uint8_t> proof_message(std::span<const std::uint8_t> nonce, std::string_view name,
-                                        std::string_view fingerprint)
-{
-    std::vector<std::uint8_t> m;
-    m.reserve(kProofContext.size() + nonce.size() + name.size() + fingerprint.size() + 3);
-    m.insert(m.end(), kProofContext.begin(), kProofContext.end());
-    m.push_back(0);
-    m.insert(m.end(), nonce.begin(), nonce.end());
-    m.push_back(0);
-    m.insert(m.end(), name.begin(), name.end());
-    m.push_back(0);
-    m.insert(m.end(), fingerprint.begin(), fingerprint.end());
-    return m;
-}
 
 bool signed_with_sha256(std::string_view pem)
 {

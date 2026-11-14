@@ -1,8 +1,11 @@
 #include "Fleet.hpp"
 
+#include <pki/Bytes.hpp>
 #include <pki/CertVerifier.hpp>
 #include <pki/Certificate.hpp>
 #include <pki/DeviceKey.hpp>
+
+#include <db/Time.hpp>
 
 #include <log/Log.hpp>
 
@@ -279,7 +282,7 @@ bool Fleet::factory_listed(const std::string& name, const std::string& pem)
         const auto root = read_file(opts.factory_root);
         const auto info = pki::CertVerifier({root}).verify(pem, name, {});
         if (!db_.register_factory_worker(info.subject_cn, opts.factory_fingerprint, info.serial, info.fingerprint,
-                                         pki::format_time(info.not_before), pki::format_time(info.not_after), info.pem))
+                                         db::format_time(info.not_before), db::format_time(info.not_after), info.pem))
             log::info(kLog, name + " authenticated; no device row to attach the certificate");
         return db_.load_manager_revoked_serials().contains(info.serial);
     }

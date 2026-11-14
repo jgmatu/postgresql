@@ -1,7 +1,7 @@
 #include "AsioServer.hpp"
 
+#include <factory/FactoryChannel.hpp>
 #include <pki/Certificate.hpp>
-#include <pki/FactoryChannel.hpp>
 
 #include <log/Log.hpp>
 
@@ -95,7 +95,7 @@ net::awaitable<void> session(tcp::socket socket, const pki::CertificateAuthority
         log::info(kLog, peer + ": " + head);
         std::string body = nl == std::string::npos ? std::string{} : text.substr(nl + 1);
         if (body.ends_with(".\n")) body.resize(body.size() - 2);
-        reply = pki::answer_factory(ca, head, body);
+        reply = answer_factory(ca, head, body);
         log::info(kLog, peer + ": " + outcome_of(head, reply));
     }
     catch (const pki::PkiError& e)

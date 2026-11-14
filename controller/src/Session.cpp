@@ -3,6 +3,7 @@
 #include "ProcessTable.hpp"
 #include "TelemetryWriter.hpp"
 
+#include <pki/Bytes.hpp>
 #include <pki/CertVerifier.hpp>
 #include <pki/Certificate.hpp>
 

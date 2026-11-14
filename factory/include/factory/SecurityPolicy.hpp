@@ -4,7 +4,7 @@
 #include <string>
 #include <string_view>
 
-namespace pgdemo::pki {
+namespace pgdemo::factory {
 
 /**
  * @brief The governance document every enclave shares.
@@ -62,4 +62,4 @@ void enable_ros_security(const std::filesystem::path& keystore, std::string_view
 /// Remove `ROS_SECURITY_ENABLE`, the strategy, the keystore and the enclave override.
 void clear_ros_security();
 
-} // namespace pgdemo::pki
+} // namespace pgdemo::factory

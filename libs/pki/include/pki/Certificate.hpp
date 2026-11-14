@@ -1,12 +1,9 @@
 #pragma once
 
 #include <chrono>
-#include <cstdint>
-#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <vector>
 
 namespace pgdemo::pki {
 
@@ -59,45 +56,7 @@ bool signed_with_sha256(std::string_view pem);
  */
 bool self_signed_root(std::string_view pem, std::string_view expected_cn);
 
-/// Lower-case hex of `bytes`.
-std::string to_hex(std::span<const std::uint8_t> bytes);
-
-/**
- * @brief Inverse of `to_hex()`.
- * @throws std::invalid_argument on malformed input
- */
-std::vector<std::uint8_t> from_hex(std::string_view hex);
-
-/// UTC `YYYY-MM-DDTHH:MM:SSZ`, the form stored in `timestamptz` parameters.
-std::string format_time(std::chrono::system_clock::time_point tp);
-
 /// Subject CN of the manager's own root.
 inline constexpr std::string_view kManagerCommonName = "pgdemo-manager";
-
-/// Standard base64 (with padding) of `bytes`.
-std::string base64_encode(std::span<const std::uint8_t> bytes);
-
-/**
- * @brief Inverse of `base64_encode()`.
- * @throws std::invalid_argument on malformed input
- */
-std::vector<std::uint8_t> base64_decode(std::string_view text);
-
-/// `n` bytes from the system RNG.
-std::vector<std::uint8_t> random_bytes(std::size_t n);
-
-/// Domain separation string of the device authentication proof.
-inline constexpr std::string_view kProofContext = "pgdemo-device-auth-v1";
-
-/**
- * @brief Bytes a device signs to prove it holds the key of its certificate:
- * `kProofContext || 0 || nonce || 0 || name || 0 || fingerprint`.
- *
- * Binding the name and the certificate fingerprint stops a proof from being
- * replayed for another device or another certificate; the nonce stops it from
- * being replayed at all.
- */
-std::vector<std::uint8_t> proof_message(std::span<const std::uint8_t> nonce, std::string_view name,
-                                        std::string_view fingerprint);
 
 } // namespace pgdemo::pki

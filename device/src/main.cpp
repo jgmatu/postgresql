@@ -12,7 +12,7 @@
 #include "XyWorker.hpp"
 #include "XyzWorker.hpp"
 
-#include <pki/SecurityPolicy.hpp>
+#include <factory/SecurityPolicy.hpp>
 
 #include <log/Log.hpp>
 
@@ -134,7 +134,7 @@ int run_main(int argc, char** argv)
     }
     catch (const std::exception& e)
     {
-        pki::clear_ros_security();
+        factory::clear_ros_security();
         log::error("device", e.what());
         return kFailed;
     }

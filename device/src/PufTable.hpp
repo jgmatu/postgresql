@@ -5,7 +5,7 @@
 #include <filesystem>
 #include <string>
 
-namespace pgdemo::pki {
+namespace pgdemo::device {
 
 /**
  * @brief `devices.puf`: one 32-byte seed per `device_id`, mode 0600.
@@ -30,4 +30,4 @@ private:
     std::filesystem::path path_;
 };
 
-} // namespace pgdemo::pki
+} // namespace pgdemo::device
