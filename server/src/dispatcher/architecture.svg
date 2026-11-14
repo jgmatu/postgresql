@@ -1,0 +1,233 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="900" viewBox="0 0 1400 900" role="img" aria-labelledby="title desc">
+  <title id="title">Dispatcher</title>
+  <desc id="desc">Three columns: the connection thread's stack, the map under map_mtx, and PostgreSQL. nextval, the INSERT and the final SELECT each take a short checkout. The thread sleeps in cv.wait_for with no session. The listener writes the stack context under map_mtx and does not touch the pool.</desc>
+  <defs>
+    <filter id="soft" x="-12%" y="-16%" width="124%" height="140%">
+      <feDropShadow dx="0" dy="3" stdDeviation="5" flood-color="#020617" flood-opacity="0.55"/>
+    </filter>
+    <marker id="arrow-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#10B981"/>
+    </marker>
+    <marker id="arrow-amber" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#F59E0B"/>
+    </marker>
+    <marker id="arrow-cyan" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#38BDF8"/>
+    </marker>
+  </defs>
+
+  <rect width="1400" height="900" fill="#0F172A"/>
+
+  <!-- Badges -->
+  <g font-family="Inter, system-ui, sans-serif" font-size="14" font-weight="600" fill="#F8FAFC">
+    <g filter="url(#soft)">
+      <rect x="20" y="16" width="330" height="52" rx="10" fill="#1E293B" stroke="#334155"/>
+      <rect x="364" y="16" width="330" height="52" rx="10" fill="#1E293B" stroke="#334155"/>
+      <rect x="708" y="16" width="330" height="52" rx="10" fill="#1E293B" stroke="#334155"/>
+      <rect x="1052" y="16" width="328" height="52" rx="10" fill="#1E293B" stroke="#334155"/>
+    </g>
+    <circle cx="44" cy="42" r="5" fill="#38BDF8"/>
+    <circle cx="388" cy="42" r="5" fill="#10B981"/>
+    <circle cx="732" cy="42" r="5" fill="#F59E0B"/>
+    <circle cx="1076" cy="42" r="5" fill="#38BDF8"/>
+    <text x="185" y="46" text-anchor="middle">0 Heap Allocations</text>
+    <text x="529" y="46" text-anchor="middle">500 Waiters / 8 DB Sessions</text>
+    <text x="873" y="46" text-anchor="middle">0 Deadlocks (No Nested Locks)</text>
+    <text x="1216" y="46" text-anchor="middle">Dangling-Pointer Safe</text>
+  </g>
+
+  <!-- Columns -->
+  <g filter="url(#soft)">
+    <rect x="20" y="84" width="424" height="544" rx="14" fill="#1E293B" stroke="#334155"/>
+    <rect x="464" y="84" width="424" height="544" rx="14" fill="#1E293B" stroke="#334155"/>
+    <rect x="908" y="84" width="472" height="544" rx="14" fill="#1E293B" stroke="#334155"/>
+  </g>
+
+  <!-- Left: connection thread -->
+  <g font-family="Inter, system-ui, sans-serif">
+    <text x="40" y="114" fill="#F8FAFC" font-size="16" font-weight="600">Connection thread</text>
+    <text x="40" y="134" fill="#94A3B8" font-size="12">The frame stays pushed while this thread sleeps.</text>
+
+    <line x1="48" y1="168" x2="48" y2="478" stroke="#38BDF8" stroke-width="2" stroke-linecap="round"/>
+    <circle cx="48" cy="218" r="4" fill="#38BDF8"/>
+    <circle cx="48" cy="330" r="4" fill="#38BDF8"/>
+    <circle cx="48" cy="438" r="4" fill="#38BDF8"/>
+
+    <rect x="68" y="168" width="248" height="100" rx="8" fill="#0B1220" stroke="#38BDF8"/>
+    <text x="84" y="190" fill="#38BDF8" font-size="13" font-weight="600">RequestContext ctx</text>
+    <text x="84" y="208" fill="#94A3B8" font-size="11">automatic variable of this frame</text>
+    <g font-family="JetBrains Mono, ui-monospace, monospace" font-size="11">
+      <text x="84" y="230" fill="#E2E8F0">cv</text>
+      <text x="84" y="246" fill="#E2E8F0">status</text>
+      <text x="148" y="246" fill="#38BDF8">PENDING</text>
+      <text x="84" y="262" fill="#E2E8F0">ready</text>
+      <text x="148" y="262" fill="#38BDF8">false</text>
+    </g>
+
+    <rect x="68" y="284" width="248" height="92" rx="8" fill="#0B1220" stroke="#38BDF8"/>
+    <text x="84" y="308" fill="#F8FAFC" font-size="13" font-weight="600">wait_for_response()</text>
+    <text x="84" y="328" fill="#94A3B8" font-size="12">blocked in cv.wait_for()</text>
+    <rect x="84" y="340" width="118" height="22" rx="6" fill="#0F172A" stroke="#38BDF8"/>
+    <text x="143" y="355" text-anchor="middle" fill="#38BDF8" font-size="11" font-weight="600">4  no session</text>
+
+    <rect x="68" y="392" width="248" height="86" rx="8" fill="#0B1220" stroke="#334155"/>
+    <text x="84" y="416" fill="#F8FAFC" font-size="13" font-weight="600">HTTP handler</text>
+    <text x="84" y="436" fill="#94A3B8" font-size="12">oldest frame on this thread</text>
+    <text x="84" y="456" fill="#94A3B8" font-size="12">SELECT runs after the return</text>
+
+    <rect x="68" y="494" width="248" height="52" rx="8" fill="#0F172A" stroke="#334155"/>
+    <text x="84" y="516" fill="#E2E8F0" font-size="12">Sleep parks the CPU.</text>
+    <text x="84" y="534" fill="#E2E8F0" font-size="12">It does not pop the frame.</text>
+  </g>
+
+  <!-- Center: map -->
+  <g font-family="Inter, system-ui, sans-serif">
+    <text x="484" y="114" fill="#F8FAFC" font-size="16" font-weight="600">Synchronization</text>
+    <rect x="484" y="130" width="92" height="26" rx="13" fill="#422006" stroke="#F59E0B"/>
+    <text x="530" y="148" text-anchor="middle" fill="#F59E0B" font-size="12" font-weight="600" font-family="JetBrains Mono, ui-monospace, monospace">map_mtx</text>
+    <text x="584" y="148" fill="#94A3B8" font-size="12">held only around the map</text>
+
+    <text x="484" y="178" fill="#94A3B8" font-size="11" font-family="JetBrains Mono, ui-monospace, monospace">unordered_map&lt;uint64_t, RequestContext*&gt;</text>
+
+    <rect x="484" y="190" width="300" height="76" rx="8" fill="#0B1220" stroke="#F59E0B"/>
+    <text x="500" y="214" fill="#94A3B8" font-size="11" font-family="JetBrains Mono, ui-monospace, monospace">request_id</text>
+    <text x="640" y="214" fill="#F59E0B" font-size="12" font-family="JetBrains Mono, ui-monospace, monospace">&amp;ctx</text>
+    <line x1="500" y1="228" x2="768" y2="228" stroke="#334155"/>
+    <text x="500" y="250" fill="#E2E8F0" font-size="12" font-family="JetBrains Mono, ui-monospace, monospace">pending_requests</text>
+
+    <rect x="484" y="282" width="360" height="64" rx="8" fill="#1C1408" stroke="#F59E0B"/>
+    <text x="500" y="306" fill="#F59E0B" font-size="12" font-weight="600">&amp;ctx is erased before</text>
+    <text x="500" y="326" fill="#F59E0B" font-size="12" font-weight="600">wait_for_response() returns</text>
+
+    <g fill="#94A3B8" font-size="12">
+      <text x="484" y="372">Cap 500, checked before try_emplace.</text>
+      <text x="484" y="394">map_mtx is released before the INSERT.</text>
+      <text x="484" y="416">A missing id does not touch the stack.</text>
+    </g>
+
+    <text x="484" y="478" fill="#F59E0B" font-size="12" font-weight="600">6  notify_one</text>
+    <text x="484" y="496" fill="#94A3B8" font-size="12">map_mtx held, pool not touched</text>
+  </g>
+
+  <!-- Right: PostgreSQL -->
+  <g font-family="Inter, system-ui, sans-serif">
+    <text x="928" y="114" fill="#F8FAFC" font-size="16" font-weight="600">PostgreSQL</text>
+    <text x="928" y="134" fill="#94A3B8" font-size="12">The query pool and the LISTEN session are distinct.</text>
+
+    <rect x="928" y="152" width="300" height="176" rx="8" fill="#0B1220" stroke="#10B981"/>
+    <text x="944" y="176" fill="#10B981" font-size="13" font-weight="600">ConnectionPool</text>
+    <text x="944" y="196" fill="#94A3B8" font-size="12">8 query sessions</text>
+    <g fill="#064E3B" stroke="#10B981">
+      <rect x="944" y="212" width="30" height="26" rx="4"/>
+      <rect x="980" y="212" width="30" height="26" rx="4"/>
+      <rect x="1016" y="212" width="30" height="26" rx="4"/>
+      <rect x="1052" y="212" width="30" height="26" rx="4"/>
+      <rect x="1088" y="212" width="30" height="26" rx="4"/>
+      <rect x="1124" y="212" width="30" height="26" rx="4"/>
+      <rect x="1160" y="212" width="30" height="26" rx="4"/>
+      <rect x="1196" y="212" width="30" height="26" rx="4"/>
+    </g>
+    <g fill="#A7F3D0" font-size="10" font-family="JetBrains Mono, ui-monospace, monospace" text-anchor="middle">
+      <text x="959" y="229">1</text>
+      <text x="995" y="229">2</text>
+      <text x="1031" y="229">3</text>
+      <text x="1067" y="229">4</text>
+      <text x="1103" y="229">5</text>
+      <text x="1139" y="229">6</text>
+      <text x="1175" y="229">7</text>
+      <text x="1211" y="229">8</text>
+    </g>
+    <text x="944" y="262" fill="#94A3B8" font-size="12">All eight are in the pool</text>
+    <text x="944" y="280" fill="#94A3B8" font-size="12">while the thread sleeps.</text>
+    <text x="944" y="306" fill="#6EE7B7" font-size="11" font-family="JetBrains Mono, ui-monospace, monospace">nextval · INSERT · SELECT</text>
+
+    <rect x="928" y="392" width="300" height="200" rx="8" fill="#0B1220" stroke="#10B981"/>
+    <text x="944" y="416" fill="#10B981" font-size="13" font-weight="600">Listener thread</text>
+    <text x="944" y="436" fill="#94A3B8" font-size="12">one LISTEN session, not in the pool</text>
+    <g font-family="JetBrains Mono, ui-monospace, monospace" font-size="11" fill="#A7F3D0">
+      <rect x="944" y="448" width="132" height="20" rx="5" fill="#064E3B" stroke="#10B981"/>
+      <text x="954" y="462">config_events</text>
+      <rect x="944" y="474" width="124" height="20" rx="5" fill="#064E3B" stroke="#10B981"/>
+      <text x="954" y="488">error_events</text>
+      <rect x="944" y="500" width="156" height="20" rx="5" fill="#064E3B" stroke="#10B981"/>
+      <text x="954" y="514">enrollment_events</text>
+    </g>
+    <text x="944" y="546" fill="#E2E8F0" font-size="12">Writes status and ready.</text>
+    <text x="944" y="566" fill="#E2E8F0" font-size="12">Does not check out a session.</text>
+  </g>
+
+  <!-- 2 try_emplace, and the erase that precedes the return -->
+  <g font-family="Inter, system-ui, sans-serif" font-size="12" font-weight="600">
+    <text x="328" y="206" fill="#F59E0B">2  try_emplace</text>
+    <text x="328" y="238" fill="#F59E0B">7  erase &amp;ctx</text>
+  </g>
+  <path d="M 316 214 H 484" fill="none" stroke="#F59E0B" stroke-width="1.75" stroke-dasharray="5 4" marker-end="url(#arrow-amber)"/>
+  <path d="M 484 246 H 316" fill="none" stroke="#F59E0B" stroke-width="1.75" stroke-dasharray="5 4" marker-end="url(#arrow-amber)"/>
+
+  <!-- 5 NOTIFY, inside the PostgreSQL column -->
+  <path d="M 1078 336 V 384" fill="none" stroke="#10B981" stroke-width="1.75" stroke-dasharray="5 4" marker-end="url(#arrow-green)"/>
+  <text x="1090" y="366" fill="#10B981" font-family="Inter, system-ui, sans-serif" font-size="12" font-weight="600">5  NOTIFY</text>
+
+  <!-- 6 notify_one, listener to the map. Does not enter the pool. -->
+  <path d="M 928 530 H 720" fill="none" stroke="#F59E0B" stroke-width="1.75" stroke-dasharray="5 4" marker-end="url(#arrow-amber)"/>
+
+  <!-- Short checkouts. The lines stay under the columns and climb the pool's empty right gutter. -->
+  <g fill="none" stroke="#10B981" stroke-width="1.75" marker-end="url(#arrow-green)">
+    <path d="M 188 666 H 1272 V 258 H 1228"/>
+    <path d="M 188 698 H 1312 V 286 H 1228"/>
+    <path d="M 188 730 H 1352 V 314 H 1228"/>
+  </g>
+  <g font-family="Inter, system-ui, sans-serif" font-size="12" font-weight="600" fill="#10B981">
+    <text x="36" y="662">1  nextval</text>
+    <text x="36" y="694">3  INSERT + COMMIT</text>
+    <text x="36" y="726">7  SELECT</text>
+  </g>
+
+  <!-- Outside the three columns: the two mutexes are never nested. -->
+  <text x="700" y="768" text-anchor="middle" fill="#E2E8F0" font-family="Inter, system-ui, sans-serif" font-size="13">map_mtx and the pool mutex are never held together.</text>
+
+  <!-- Order, left to right, matching the arrows above. -->
+  <g font-family="Inter, system-ui, sans-serif">
+    <rect x="20" y="786" width="184" height="96" rx="8" fill="#1E293B" stroke="#334155"/>
+    <rect x="214" y="786" width="184" height="96" rx="8" fill="#1E293B" stroke="#334155"/>
+    <rect x="408" y="786" width="184" height="96" rx="8" fill="#1E293B" stroke="#334155"/>
+    <rect x="602" y="786" width="184" height="96" rx="8" fill="#1E293B" stroke="#334155"/>
+    <rect x="796" y="786" width="184" height="96" rx="8" fill="#1E293B" stroke="#334155"/>
+    <rect x="990" y="786" width="184" height="96" rx="8" fill="#1E293B" stroke="#334155"/>
+    <rect x="1184" y="786" width="196" height="96" rx="8" fill="#1E293B" stroke="#334155"/>
+
+    <g font-size="12" font-weight="600">
+      <text x="36" y="810" fill="#10B981">1  Session</text>
+      <text x="230" y="810" fill="#F59E0B">2  Register</text>
+      <text x="424" y="810" fill="#10B981">3  Session</text>
+      <text x="618" y="810" fill="#38BDF8">4  Sleep</text>
+      <text x="812" y="810" fill="#10B981">5  Wake</text>
+      <text x="1006" y="810" fill="#F59E0B">6  Signal</text>
+      <text x="1200" y="810" fill="#F8FAFC">7  Leave</text>
+    </g>
+    <g font-size="11" fill="#94A3B8">
+      <text x="36" y="832">nextval, then the</text>
+      <text x="36" y="850">session returns</text>
+      <text x="230" y="832">try_emplace &amp;ctx</text>
+      <text x="230" y="850">before the INSERT</text>
+      <text x="424" y="832">INSERT + COMMIT,</text>
+      <text x="424" y="850">then the session returns</text>
+      <text x="618" y="832">cv.wait_for,</text>
+      <text x="618" y="850">no session held</text>
+      <text x="812" y="832">NOTIFY on the</text>
+      <text x="812" y="850">LISTEN session</text>
+      <text x="1006" y="832">write &amp;ctx,</text>
+      <text x="1006" y="850">then notify_one</text>
+      <text x="1200" y="832">erase &amp;ctx, return,</text>
+      <text x="1200" y="850">then SELECT</text>
+    </g>
+  </g>
+  <g stroke="#334155" stroke-width="1.5" marker-end="url(#arrow-cyan)">
+    <path d="M 206 834 H 210" fill="none"/>
+    <path d="M 400 834 H 404" fill="none"/>
+    <path d="M 594 834 H 598" fill="none"/>
+    <path d="M 788 834 H 792" fill="none"/>
+    <path d="M 982 834 H 986" fill="none"/>
+    <path d="M 1176 834 H 1180" fill="none"/>
+  </g>
+</svg>

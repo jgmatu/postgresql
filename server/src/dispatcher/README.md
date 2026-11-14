@@ -1,6 +1,8 @@
 # Dispatcher
 
-`POST /api/config`, `POST /api/devices` and a certificate rotation are synchronous for the client and asynchronous underneath. The connection thread that accepted the HTTP request blocks until PostgreSQL reports that the same `request_id` finished, or until the deadline. [`Dispatcher`](Dispatcher.hpp) is that wait. The row in `device_config_pending` or `device_enrollment` is the result; the notification only wakes the thread. The lock order of that wait is drawn in [architecture.html](architecture.html).
+`POST /api/config`, `POST /api/devices` and a certificate rotation are synchronous for the client and asynchronous underneath. The connection thread that accepted the HTTP request blocks until PostgreSQL reports that the same `request_id` finished, or until the deadline. [`Dispatcher`](Dispatcher.hpp) is that wait. The row in `device_config_pending` or `device_enrollment` is the result; the notification only wakes the thread.
+
+![Arquitectura del Dispatcher](./architecture.svg)
 
 ## Two different pools
 
