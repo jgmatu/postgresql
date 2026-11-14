@@ -49,20 +49,34 @@ The dispatcher does not own the thread and does not join it. The connection thre
 5. The function returns. Destroying `ctx` runs as the frame goes away. The thread keeps running: the handler above this frame reads the row and writes the HTTP response.
 
 ```mermaid
-flowchart BT
-    subgraph stack ["Connection thread — the stack grows upward"]
-        direction BT
-        handler["HTTP handler, oldest frame<br/>after wait_for_response returns, this frame<br/>SELECTs the row and writes the response"]
-        frame["wait_for_response<br/>suspended in cv.wait_for,<br/>so this frame stays pushed"]
-        ctx["RequestContext ctx<br/>cv, status, ready<br/>the automatic variable"]
-        handler --> frame --> ctx
+flowchart LR
+    subgraph conn ["Connection Thread (Call Stack)"]
+        direction TB
+        handler["HTTP Handler<br/>oldest frame<br/>SELECT after return"]
+        subgraph frame ["wait_for_response()<br/>frozen in cv.wait_for"]
+            direction TB
+            ctx["RequestContext ctx<br/>cv, status, ready<br/>automatic, 0 heap"]
+        end
+        handler --> frame
     end
 
-    map["pending_requests: request_id to &ctx"]
-    listener["Listener thread"]
+    subgraph shared ["Shared State (map_mtx)"]
+        map["pending_requests[id]<br/>= &ctx"]
+    end
 
-    ctx -.->|"published under map_mtx<br/>erased before the frame returns"| map
-    listener -->|"dispatch writes status and ready,<br/>then notify_one, still holding map_mtx"| ctx
+    subgraph listen ["Listener Thread"]
+        dispatch["dispatch()<br/>map_mtx only"]
+    end
+
+    ctx -.->|"1. Publica &ctx<br/>4. Borra antes de salir"| map
+    dispatch ==>|"2. Escribe status y ready<br/>3. notify_one() bajo map_mtx"| ctx
+
+    classDef stack fill:#dbeafe,stroke:#1e40af,color:#1e3a8a
+    classDef sharedState fill:#fef3c7,stroke:#b45309,color:#78350f
+    classDef listener fill:#d1fae5,stroke:#047857,color:#064e3b
+    class conn,handler,frame,ctx stack
+    class shared,map sharedState
+    class listen,dispatch listener
 ```
 
 The pointer is removed while the thread is inside the function. The thread continues after that return. What ends with the erase is the publication of the address, and what ends with the return is the object. The other order would be a dangling pointer: a listener thread writing a frame the owner had already popped.
