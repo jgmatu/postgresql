@@ -2,130 +2,131 @@
 
 Project `pgdemo` is the stack that stays. [docker/README.md](../README.md) is the virtualization of both projects. This file is the network scheme of this one.
 
-Three bridges, and no new one for the object store. `zone_a` and `zone_b` are declared in [`compose.yaml`](../compose.yaml). `zone_factory` is declared in [`compose.yaml`](compose.yaml). PostgreSQL and SeaweedFS join both zone bridges. Each store is one container with two interfaces.
+PostgreSQL is one container. SeaweedFS is one container. Both are shared by zone A and zone B: each store has one volume and two addresses, one on each bridge. The server, in analysis and operations, uses the zone A address. The controller, in robotics, uses the zone B address. They open the same process and the same files. A worker is its own container. It joins the robotics bridge and the factory bridge, and it mounts its own PUF volume. It does not mount the database or the object store.
+
+Three bridges, and no new one for the object store. `zone_a` and `zone_b` are declared in [`compose.yaml`](../compose.yaml). `zone_factory` is declared in [`compose.yaml`](compose.yaml).
+
+## Network isolation
+
+A box here is a bridge. The only node inside the box is that bridge. Every container is drawn once, outside the boxes, and an edge is the address of one of its interfaces. Two edges from `postgres` are two addresses of that one container. Two edges from `seaweed` are the same. `zone_b` and `zone_factory` are `internal: true`. `zone_b` has no route to `zone_a`. A second interface does not forward a neighbor's packets, so the server has no route to `172.28.20.0/24` and the controller has no route to `172.28.10.0/24`. Neither store is a gateway.
 
 ```mermaid
 flowchart LR
-    subgraph zoneA ["zone_a bridge 172.28.10.0/24"]
-        pgA["postgres 172.28.10.10"]
-        swA["seaweed 172.28.10.11"]
-        server["server 172.28.10.20"]
+    init["init"]
+    server["server"]
+    postgres["postgres"]
+    seaweed["seaweed"]
+    controller["controller"]
+    worker["worker"]
+    factory["factory"]
+
+    subgraph zoneA ["zone A, analysis and operations"]
+        netA["bridge 172.28.10.0/24"]
     end
-    subgraph zoneB ["zone_b bridge internal 172.28.20.0/24"]
-        pgB["postgres 172.28.20.10"]
-        swB["seaweed 172.28.20.11"]
-        controller["controller 172.28.20.20"]
+    subgraph zoneB ["zone B, robotics, internal"]
+        netB["bridge 172.28.20.0/24"]
     end
-    subgraph zoneF ["zone_factory bridge internal 172.28.30.0/24"]
-        factory["factory 172.28.30.10"]
-        controllerF["controller 172.28.30.20"]
+    subgraph zoneF ["zone_factory, internal"]
+        netF["bridge 172.28.30.0/24"]
     end
-    server --> pgA
-    server --> swA
-    controller --> pgB
-    controller --> swB
-    controllerF --> factory
+
+    init --> netA
+    server -->|"172.28.10.20"| netA
+    postgres -->|"172.28.10.10"| netA
+    seaweed -->|"172.28.10.11"| netA
+    postgres -->|"172.28.20.10"| netB
+    seaweed -->|"172.28.20.11"| netB
+    controller -->|"172.28.20.20"| netB
+    worker --> netB
+    controller -->|"172.28.30.20"| netF
+    worker --> netF
+    factory -->|"172.28.30.10"| netF
 ```
 
-`pgA` and `pgB` are the same database. `swA` and `swB` are the same `weed mini`. There is no edge between the bridges, and no edge between the two stores.
-
-## Addresses
-
-| Address | Bridge |
+| Container | Where it attaches |
 |---|---|
-| `postgres` `172.28.10.10` | `zone_a` |
-| `seaweed` `172.28.10.11` | `zone_a` |
-| `server` `172.28.10.20` | `zone_a` |
-| `postgres` `172.28.20.10` | `zone_b` |
-| `seaweed` `172.28.20.11` | `zone_b` |
-| `controller` `172.28.20.20` | `zone_b` |
-| `factory` `172.28.30.10` | `zone_factory` |
-| `controller` `172.28.30.20` | `zone_factory` |
+| `postgres` | `172.28.10.10` on zone A and `172.28.20.10` on zone B. One database. |
+| `seaweed` | `172.28.10.11` on zone A and `172.28.20.11` on zone B. One object store. |
+| `server` | `172.28.10.20` on zone A |
+| `init` | zone A, then it exits |
+| `controller` | `172.28.20.20` on zone B and `172.28.30.20` on `zone_factory` |
+| `worker` | zone B and `zone_factory`. One container per device, `pgdemo-worker-<name>`, with no fixed address |
+| `factory` | `172.28.30.10` on `zone_factory` |
 
-The name `postgres` resolves, on each bridge, to the address of that bridge. The name `seaweed` does the same. The server uses the addresses on `zone_a`. The controller uses the addresses on `zone_b`.
+On each bridge the name `postgres` resolves to the address of that bridge, and the name `seaweed` does the same. The server uses the zone A addresses. The controller uses the zone B addresses. The host publishes one port, `127.0.0.1:8080`, to the server's 8443. SeaweedFS listens on port 8333 inside the bridges. That port is not published. The end-to-end project does not include this file, so it has no factory, no SeaweedFS and no `zone_factory`.
 
-## Isolation
+## Container namespaces
 
-`zone_b` and `zone_factory` are `internal: true`. `zone_b` has no route to `zone_a`. A container with two interfaces does not forward packets from its neighbors, so the server has no route to `172.28.20.0/24` and the controller has no route to `172.28.10.0/24`. Neither store is a gateway.
-
-PostgreSQL is the path between the server and the controller. SeaweedFS is the object store on those same bridges. Its S3 gateway listens on port 8333. That port is not published. The host publishes one port, `127.0.0.1:8080`, to the server's 8443.
-
-The filer keeps SeaweedFS's own index in the volume `pgdemo_seaweed`, mounted at `/data` in that container only. The filer is not pointed at the `pgdemo` database.
-
-Workers the controller creates join `zone_b` and `zone_factory`. They are not on `zone_a`. The end-to-end project does not include this file, so it has no factory, no SeaweedFS and no `zone_factory`.
-
-## Containers, traffic and volumes
-
-Zone A is analysis and operations. Zone B is robotics. A rectangle is one interface of a container, and a cylinder is storage. `pgA` and `pgB` are the same database and the same mount. `swA` and `swB` are the same `weed mini` and the same mount. `controller` and `controllerF` are one process. `worker` and `workerF` are one device container, `pgdemo-worker-<name>`.
+A box here is one container: its own namespaces, its own process, and the volumes mounted only there. `postgres` and `seaweed` are the shared stores, each in its own box, and the server and the controller both call the one database. A worker is not part of the controller's box. Its PUF volume sits in the worker box. Volumes mounted by more than one container stay outside the boxes.
 
 ```mermaid
-flowchart LR
+flowchart TB
     host["host 127.0.0.1:8080"]
 
-    subgraph zoneA ["zone A, analysis and operations, 172.28.10.0/24"]
+    subgraph nsInit ["init"]
         init["init"]
-        server["server .20"]
-        pgA["postgres .10"]
-        swA["seaweed .11"]
     end
-
-    subgraph zoneB ["zone B, robotics, internal 172.28.20.0/24"]
-        controller["controller .20"]
-        worker["worker"]
-        pgB["postgres .10"]
-        swB["seaweed .11"]
+    subgraph nsServer ["server"]
+        server["server"]
     end
-
-    subgraph zoneF ["zone_factory, internal 172.28.30.0/24"]
-        factory["factory .10"]
-        controllerF["controller .20"]
-        workerF["worker"]
-    end
-
-    subgraph disks ["volumes"]
+    subgraph nsPostgres ["postgres"]
+        postgres["postgres"]
         pgdata[("pgdemo_pgdata")]
+    end
+    subgraph nsSeaweed ["seaweed"]
+        seaweed["seaweed"]
         seaweedVol[("pgdemo_seaweed")]
-        demoRun[("pgdemo_demo-run")]
-        caKeys[("pgdemo_ca-keys")]
+    end
+    subgraph nsController ["controller"]
+        controller["controller"]
         deviceKeys[("pgdemo_device-keys")]
-        factoryKey[("pgdemo_factory-key")]
-        factoryCert[("pgdemo_factory-cert")]
         managerKeys[("pgdemo_manager-keys")]
-        puf[("pgdemo_puf_name")]
         sock[("docker.sock")]
     end
+    subgraph nsWorker ["worker"]
+        worker["pgdemo-worker-name"]
+        puf[("pgdemo_puf_name")]
+    end
+    subgraph nsFactory ["factory"]
+        factory["factory"]
+        factoryKey[("pgdemo_factory-key")]
+    end
+
+    demoRun[("pgdemo_demo-run")]
+    caKeys[("pgdemo_ca-keys")]
+    factoryCert[("pgdemo_factory-cert")]
 
     host -->|"HTTPS 8443"| server
-    init -->|"SQL"| pgA
-    server -->|"SQL"| pgA
-    pgA -.->|"NOTIFY"| server
-    controller -->|"SQL"| pgB
-    pgB -.->|"NOTIFY"| controller
-    controller -->|"Engine API"| sock
+    init -->|"SQL"| postgres
+    server -->|"SQL"| postgres
+    postgres -.->|"NOTIFY"| server
+    controller -->|"SQL"| postgres
+    postgres -.->|"NOTIFY"| controller
     controller -->|"creates"| worker
     worker -->|"ROS 2"| controller
-    controllerF -->|"9443"| factory
-    workerF -->|"9443"| factory
+    controller -->|"9443"| factory
+    worker -->|"9443"| factory
 
-    pgA -->|"/var/lib/postgresql"| pgdata
-    pgB -->|"/var/lib/postgresql"| pgdata
-    swA -->|"/data"| seaweedVol
-    swB -->|"/data"| seaweedVol
+    postgres -->|"/var/lib/postgresql"| pgdata
+    seaweed -->|"/data"| seaweedVol
+    controller -->|"/app/run/devices"| deviceKeys
+    controller -->|"/app/run/controller"| managerKeys
+    controller -->|"/var/run/docker.sock"| sock
+    worker -->|"/var/lib/pgdemo/puf"| puf
+    factory -->|"/app/run/factory"| factoryKey
     init -->|"/app/run"| demoRun
     server -->|"/app/run"| demoRun
     controller -->|"/app/run"| demoRun
     init -->|"/app/run/ca"| caKeys
     server -->|"/app/run/ca"| caKeys
-    controller -->|"/app/run/devices"| deviceKeys
-    controller -->|"/app/run/controller"| managerKeys
-    controller -->|"ro /app/run/factory-cert"| factoryCert
-    factory -->|"/app/run/factory"| factoryKey
     factory -->|"/app/run/factory-cert"| factoryCert
-    workerF -->|"ro /run/factory-cert"| factoryCert
+    controller -->|"ro /app/run/factory-cert"| factoryCert
+    worker -->|"ro /run/factory-cert"| factoryCert
     worker -->|"ro /run/manager.crt"| managerKeys
-    worker -->|"/var/lib/pgdemo/puf"| puf
 ```
 
-The host reaches analysis through the one published port. `init` loads the schema and exits. The server and the controller meet in the commits of PostgreSQL: each one uses the address of its own zone, and a dotted edge is the `NOTIFY` of that commit. A worker's traffic stays in robotics and on the factory bridge. On zone B it publishes ROS 2 to the controller at `172.28.20.20`. On `zone_factory` it asks the factory to sign, and the controller does the same at `172.28.30.10:9443`. The controller creates that container through the engine socket. `docker.sock` is that socket, not a project volume.
+The host reaches analysis through the published port. `init` loads the schema into the one database and exits. The server and the controller meet in the commits of that database. A dotted edge is the `NOTIFY` of a commit. The controller reads it from `172.28.20.10`. The server reads it from `172.28.10.10`.
 
-Each worker mounts only its own `pgdemo_puf_<name>` at `/var/lib/pgdemo/puf`, plus `root.crt` and `manager.crt` read only. `manager.key` stays on `pgdemo_manager-keys`. The two arrows into `pgdemo_pgdata` are one mount, and the two arrows into `pgdemo_seaweed` are one mount. SeaweedFS is addressed in both zones. No process opens port 8333 yet.
+On zone B the worker publishes ROS 2 to the controller at `172.28.20.20`. On `zone_factory` the worker and the controller ask the factory at `172.28.30.10:9443`. The controller creates the worker through the engine socket. `docker.sock` is that socket, mounted only in the controller.
+
+`pgdemo_pgdata` is the database volume, mounted only in `postgres`. `pgdemo_seaweed` is the object store, mounted only in `seaweed` at `/data`. The filer keeps its index there and is not pointed at the `pgdemo` database. No process opens port 8333 yet. Each worker mounts only its own `pgdemo_puf_<name>` at `/var/lib/pgdemo/puf`, plus `root.crt` and `manager.crt` read only. `manager.key` stays in the controller, on `pgdemo_manager-keys`.
