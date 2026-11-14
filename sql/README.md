@@ -4,6 +4,45 @@ The seven files in this directory are the whole contract between `pgdemo-server`
 
 The model is IoT-shaped. A device is a row of `device`, not a table: adding one needs no schema change, no new channel and no rebuild. Tables are cut by the *shape* of the data instead (`telemetry_scalar`, `telemetry_gps`, `telemetry_xy`, `telemetry_xyz`), and configuration hangs off `device_id`. Every device is bound to an X.509 certificate issued by an internal root CA; nobody inserts into `device` directly, a device appears when its first certificate is issued ([docs/DEVICE_PKI.md](../docs/DEVICE_PKI.md)).
 
+## Atomic clock and telemetry index
+
+A commit is the tick, because this database is ACID. Atomicity: the row changes and the `NOTIFY` of their `AFTER` triggers leave together. A trigger does not announce a row whose transaction then rolls back. Consistency is the `CHECK`s and the identity and configuration triggers. Isolation: the other process reads rows that have committed, and `telemetry_read_cursor` advances in its own transaction. Durability: the tick is in the WAL before the notice is sent. There is no commit shared with any other store.
+
+The files below are the three structures. The triggers in [`04_triggers.sql`](04_triggers.sql) are the clock. The channels are [Triggers and NOTIFY channels](#triggers-and-notify-channels).
+
+- **Security.** [`00_roles.sql`](00_roles.sql), [`03_identity.sql`](03_identity.sql) and [`03_users.sql`](03_users.sql): certificates, the CRL, users and roles.
+- **Worker control.** `device`, `device_enrollment`, `device_session`, `device_config` and its queue: enrollment, the session, and applied and desired configuration.
+- **Index of the ingest.** `device_state`, `telemetry_scalar`, `telemetry_gps`, `telemetry_xy`, `telemetry_xyz` and `telemetry_read_cursor`. The index names objects in [SeaweedFS](https://github.com/seaweedfs/seaweedfs), which stores the whole telemetry ingest: scalar, GPS, `xy`, `xyz` and a fat frame. A row carries the device, the time, `seq`, a few magnitudes and the object key. The body does not enter the WAL. The clock of each batch is the `AFTER INSERT FOR EACH STATEMENT` trigger: one `NOTIFY` per commit, not one per device. These seven files still store the sample inside the row. [TODO.md](../TODO.md) is the cut on which the row becomes only that index. The same commit stays the clock.
+
+`pgdemo-server` and `pgdemo-controller` do not know each other. They meet in these commits. The producer writes the segment to SeaweedFS and only then commits the key. An object already uploaded whose key is not in that commit does not exist for the reader.
+
+```mermaid
+flowchart TB
+    subgraph zoneB [Zone B]
+        controller[pgdemo-controller]
+    end
+    subgraph zoneA [Zone A]
+        server[pgdemo-server]
+    end
+    subgraph clock ["PostgreSQL, ACID clock and index"]
+        security[Security]
+        workers[Worker control]
+        index[Index of the objects]
+    end
+    seaweed["SeaweedFS, the whole ingest"]
+
+    controller -->|upload the segment| seaweed
+    controller -->|commit the object key| index
+    controller -->|session and applied config| workers
+    server -->|identity and users| security
+    server -->|enrollment and desired config| workers
+    security -.->|NOTIFY on commit| controller
+    workers -.->|NOTIFY on commit| server
+    workers -.->|NOTIFY on commit| controller
+    index -.->|NOTIFY on commit| server
+    server -->|GET that key| seaweed
+```
+
 ## Loading order
 
 [`scripts/db-init.sh`](../scripts/db-init.sh) loads the files as a superuser: `00_roles.sql` against the `postgres` database (roles belong to the cluster), then `01` to `05` against `pgdemo`. Every file is idempotent within this model, so running it again keeps an existing database. Each file switches to `SET ROLE demo_owner`, so `demo_owner` owns every object; the controller and the server own nothing. After loading, `db-init.sh` generates the device root CA if `run/ca/` has none ([`scripts/gen-device-ca.sh`](../scripts/gen-device-ca.sh)) and inserts its certificate into `root_ca`.
