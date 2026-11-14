@@ -18,21 +18,22 @@ A second origin, the factory, signs the workers from a key derived from a simula
 
 | Secret | Where it lives | Who can read it |
 |---|---|---|
-| Root CA private key | `run/ca/ca.key` (0600, PKCS#8, P-384). In Docker, the `ca-keys` volume. | `pgdemo-server` (zone A), which signs CSRs and CRLs with it; `init` creates it |
+| Root CA private key | `run/ca/ca.key` (0600, PKCS#8, P-384). In Docker, `pgdemo_ca-keys`. | `init` creates it and `pgdemo-server` signs CSRs and CRLs with it. The controller does not mount it |
 | Root CA certificate | `run/ca/ca.crt` and the `root_ca` table | everyone |
-| Device private key | `run/devices/NAME/key.pem` (0600) in a 0700 directory. In Docker, the `device-keys` volume. | that device's process, started by `pgdemo-controller` (zone B) |
+| Device private key | On the fork path, `run/devices/NAME/key.pem` (0600) in a 0700 directory on `pgdemo_device-keys`. On the operational stack, `seed` on that worker's `pgdemo_puf_<name>`, from which it derives the P-384 key | the forked process, through the controller's volume; the worker container, through its own volume |
 | Device certificate | `run/devices/NAME/cert.pem` and `device_certificate` | everyone |
 
 - **The server signs, it never verifies a device.** It checks the CSR (self-signature, ECDSA P-384, `CN` equal to the device name, no CA request) and then issues a certificate with a fixed profile, whatever the CSR asked for: subject `CN=NAME` only, `basicConstraints CA:FALSE` (critical), `keyUsage digitalSignature` (critical), `extendedKeyUsage clientAuth`, subject and authority key identifiers, a random 128-bit serial, ECDSA-SHA384, `--cert-validity-days` (365) of validity.
 - **The controller verifies, it never signs** with this CA. It checks the chain against the active `root_ca` rows, the validity dates, the CRL, and that the process holds the key (challenge-response, [section 5](#5-authentication)). The factory origin, when its files exist, has the manager sign its own revocation list with `run/controller/manager.key`. Worker certificates on that path are signed by the factory.
-- **No key crosses a zone.** The CA key stays in zone A, device keys in zone B. Only CSRs, certificates and the CRL travel, through PostgreSQL.
+- **A private key stays in the namespace that uses it.** The volumes are [docker/operational/README.md](../docker/operational/README.md#private-keys). On the operational stack the device seed is `pgdemo_puf_<name>`. `device-keys` is the controller volume on the fork path. CSRs, certificates and the CRL travel through PostgreSQL.
 
 ```mermaid
 flowchart LR
-    subgraph zoneA ["zone A"]
-        server["pgdemo-server<br/>signs CSRs and CRLs"]
-        caKey[("ca-keys: ca.key")]
-    end
+    server["pgdemo-server<br/>signs CSRs and CRLs"]
+    controller["pgdemo-controller<br/>verifies, --max-devices N"]
+    topics(("pgdemo/worker, pgdemo/manager"))
+    d1["pgdemo-device dummy1"]
+    d2["pgdemo-device sensor-a"]
     subgraph pg ["PostgreSQL"]
         rootCa[("root_ca")]
         certs[("device_certificate")]
@@ -40,14 +41,6 @@ flowchart LR
         enroll[("device_enrollment")]
         dev[("device")]
     end
-    subgraph zoneB ["zone B"]
-        controller["pgdemo-controller<br/>verifies, --max-devices N"]
-        topics(("pgdemo/worker, pgdemo/manager"))
-        d1["pgdemo-device dummy1"]
-        d2["pgdemo-device sensor-a"]
-        devKeys[("device-keys: key.pem per device")]
-    end
-    caKey --- server
     server -->|"issue_device_certificate()"| certs
     server -->|"reads CSR"| enroll
     controller -->|"fork + execv"| d1
@@ -55,7 +48,6 @@ flowchart LR
     d1 --> topics
     d2 --> topics
     topics --> controller
-    d1 --- devKeys
     controller -->|"stores CSR"| enroll
     controller -->|"reads"| rootCa
     controller -->|"reads"| crl
@@ -314,7 +306,7 @@ client/pgdemo.sh pki crl | openssl crl -noout -text   # the superseded serial is
 | `run/devices/NAME/key.pem`, `cert.pem` | one device's identity (directory 0700, key 0600) |
 | `run/devices/NAME/key.next.pem`, `cert.next.pem` | only while a rotation is in progress |
 
-In Docker, `ca-keys` is mounted at `/app/run/ca` by `init` and `server`, and `device-keys` at `/app/run/devices` by `controller` only. Neither container can read the other's secrets.
+In Docker, `ca-keys` is mounted at `/app/run/ca` by `init` and `server`, and `device-keys` at `/app/run/devices` by `controller` only. Neither container can read the other's secrets. On the operational stack the worker's seed is a separate volume, [docker/operational/README.md](../docker/operational/README.md#private-keys).
 
 Inspecting:
 

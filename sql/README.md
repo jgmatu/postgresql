@@ -14,16 +14,12 @@ The files below are the three structures. The triggers in [`04_triggers.sql`](04
 - **Worker control.** `device`, `device_enrollment`, `device_session`, `device_config` and its queue: enrollment, the session, and applied and desired configuration.
 - **Index of the ingest.** `device_state`, `telemetry_scalar`, `telemetry_gps`, `telemetry_xy`, `telemetry_xyz` and `telemetry_read_cursor`. The index names objects in [SeaweedFS](https://github.com/seaweedfs/seaweedfs), which stores the whole telemetry ingest: scalar, GPS, `xy`, `xyz` and a fat frame. A row carries the device, the time, `seq`, a few magnitudes and the object key. The body does not enter the WAL. The clock of each batch is the `AFTER INSERT FOR EACH STATEMENT` trigger: one `NOTIFY` per commit, not one per device. These seven files still store the sample inside the row. [TODO.md](../TODO.md) is the cut on which the row becomes only that index. The same commit stays the clock.
 
-`pgdemo-server` and `pgdemo-controller` do not know each other. They meet in these commits. The producer writes the segment to SeaweedFS and only then commits the key. An object already uploaded whose key is not in that commit does not exist for the reader.
+`pgdemo-server` and `pgdemo-controller` do not know each other. They meet in these commits. The producer writes the segment to SeaweedFS and only then commits the key. An object already uploaded whose key is not in that commit does not exist for the reader. Which container each one is, and on which bridge, is [docker/operational/README.md](../docker/operational/README.md).
 
 ```mermaid
 flowchart TB
-    subgraph zoneB [Zone B]
-        controller[pgdemo-controller]
-    end
-    subgraph zoneA [Zone A]
-        server[pgdemo-server]
-    end
+    controller[pgdemo-controller]
+    server[pgdemo-server]
     subgraph clock ["PostgreSQL, ACID clock and index"]
         security[Security]
         workers[Worker control]

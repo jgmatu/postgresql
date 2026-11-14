@@ -29,6 +29,8 @@ ROS 2 is the fleet's executor. `rclcpp::spin` runs on the main thread. `Fleet::t
 
 [`TelemetryWriter`](src/TelemetryWriter.hpp) is the only class that inserts samples. A node gets one FIFO and one POSIX thread. That thread checks a connection out of the pool, writes one transaction, and returns it. The spin thread keeps one connection free for a CSR, a proof or a session write, which still happen at once. The `LISTEN` connection is separate: its callback only queues the JSON object. Workers never see a connection: they have no connection string, and `close_range` between `fork` and `execve` drops every descriptor the pool holds.
 
+The box below is the threads inside this process. On the operational stack each device is its own worker container, drawn in [docker/operational/README.md](../docker/operational/README.md#container-namespaces). The `fork` in this figure is the end-to-end project.
+
 ```mermaid
 flowchart TB
     subgraph ctl [pgdemo-controller]

@@ -1,6 +1,6 @@
 # Operational network
 
-Project `pgdemo` is the stack that stays. [docker/README.md](../README.md) is the virtualization of both projects. This file is the network scheme of this one.
+Project `pgdemo` is the stack that stays. Bridges, container namespaces and private-key custody are drawn only in this file. [docker/README.md](../README.md) is the virtualization of both projects and links here.
 
 PostgreSQL is one container. SeaweedFS is one container. Both are shared by zone A and zone B: each store has one volume and two addresses, one on each bridge. The server, in analysis and operations, uses the zone A address. The controller, in robotics, uses the zone B address. They open the same process and the same files. A worker is its own container. It joins the robotics bridge and the factory bridge, and it mounts its own PUF volume. It does not mount the database or the object store.
 
@@ -130,3 +130,48 @@ The host reaches analysis through the published port. `init` loads the schema in
 On zone B the worker publishes ROS 2 to the controller at `172.28.20.20`. On `zone_factory` the worker and the controller ask the factory at `172.28.30.10:9443`. The controller creates the worker through the engine socket. `docker.sock` is that socket, mounted only in the controller.
 
 `pgdemo_pgdata` is the database volume, mounted only in `postgres`. `pgdemo_seaweed` is the object store, mounted only in `seaweed` at `/data`. The filer keeps its index there and is not pointed at the `pgdemo` database. No process opens port 8333 yet. Each worker mounts only its own `pgdemo_puf_<name>` at `/var/lib/pgdemo/puf`, plus `root.crt` and `manager.crt` read only. `manager.key` stays in the controller, on `pgdemo_manager-keys`.
+
+## Private keys
+
+A private key is mounted in the container that uses it. A certificate that another container must see is mounted read only. `pgdemo_demo-run` also holds `run/demo.env`, the JWT key and the server's TLS certificate, because the controller mounts that volume too. Those are not identity keys, and they are not in this diagram.
+
+```mermaid
+flowchart TB
+    subgraph nsInit ["init"]
+        init["init"]
+    end
+    subgraph nsServer ["server"]
+        server["server"]
+    end
+    subgraph nsFactory ["factory"]
+        factory["factory"]
+        factoryKey[("pgdemo_factory-key")]
+    end
+    subgraph nsController ["controller"]
+        controller["controller"]
+        managerKeys[("pgdemo_manager-keys")]
+        deviceKeys[("pgdemo_device-keys")]
+    end
+    subgraph nsWorker ["worker"]
+        worker["worker"]
+        puf[("pgdemo_puf_name")]
+    end
+
+    caKeys[("pgdemo_ca-keys")]
+    factoryCert[("pgdemo_factory-cert")]
+
+    init -->|"creates ca.key"| caKeys
+    server -->|"ca.key"| caKeys
+    factory -->|"root.key"| factoryKey
+    controller -->|"manager.key"| managerKeys
+    controller -->|"devices.puf"| deviceKeys
+    worker -->|"seed"| puf
+    factory -->|"writes root.crt"| factoryCert
+    controller -->|"ro root.crt"| factoryCert
+    worker -->|"ro root.crt"| factoryCert
+    worker -->|"ro manager.crt"| managerKeys
+```
+
+`init` creates `ca.key` on `pgdemo_ca-keys` and the server signs CSRs and CRLs with it. The controller does not mount that volume. `root.key` stays on `pgdemo_factory-key`, mounted only by the factory. `manager.key` stays on `pgdemo_manager-keys`, mounted only by the controller. The worker receives `manager.crt` from that volume and does not receive the key.
+
+Each worker derives its P-384 key from `seed` on its own `pgdemo_puf_<name>`. The factory and the controller do not mount that volume. What they receive is the certificate. `pgdemo_device-keys` is the controller's volume: `devices.puf` for a worker the controller forks, and the controller lock. It is not the private key of the worker container. `pgdemo_factory-cert` holds `root.crt`. The factory writes it. The controller and the worker mount it read only.

@@ -62,31 +62,35 @@ Each run generates `POSTGRES_PASSWORD` and `DEMO_ADMIN_PASSWORD` with `secrets.t
 
 ## Networks
 
-`postgres` is attached to both zones and is the only path between them. `zone_b` is an `internal` network, so it has no route out, including none to `zone_a`. The host publishes a single port, bound to loopback.
+`postgres` is one container attached to both zones, and it is the only path between them. `zone_b` is an `internal` network, so it has no route out, including none to `zone_a`. The host publishes a single port, bound to loopback. This project has no SeaweedFS, no factory and no worker container: the device is a process the controller forks. The stack that stays is drawn in [docker/operational/README.md](../../docker/operational/README.md).
 
 ```mermaid
 flowchart LR
     host["host: Robot, curl, client"]
-    subgraph zoneA ["zone_a 172.28.10.0/24"]
-        server["server 172.28.10.20"]
-        pgA["postgres 172.28.10.10"]
+    server["server"]
+    controller["controller"]
+    postgres["postgres"]
+
+    subgraph zoneA ["zone A, analysis and operations"]
+        netA["bridge 172.28.10.0/24"]
     end
-    subgraph zoneB ["zone_b internal 172.28.20.0/24"]
-        controller["controller 172.28.20.20"]
-        pgB["postgres 172.28.20.10"]
+    subgraph zoneB ["zone B, robotics, internal"]
+        netB["bridge 172.28.20.0/24"]
     end
+
     host -->|"127.0.0.1:8080 to 8443"| server
-    server --> pgA
-    controller --> pgB
-    pgA --- pgB
+    server -->|"172.28.10.20"| netA
+    postgres -->|"172.28.10.10"| netA
+    controller -->|"172.28.20.20"| netB
+    postgres -->|"172.28.20.10"| netB
 ```
 
 | Address | Who holds it |
 |---|---|
 | `127.0.0.1:8080` | The host, mapped to `server:8443` (HTTPS) |
-| `172.28.10.10` | `postgres` on `zone_a` |
+| `172.28.10.10` | `postgres`, its address on `zone_a` |
 | `172.28.10.20` | `server` on `zone_a` |
-| `172.28.20.10` | `postgres` on `zone_b` |
+| `172.28.20.10` | `postgres`, its address on `zone_b` |
 | `172.28.20.20` | `controller` on `zone_b` |
 
 `06__network_zones.robot` checks the boundary from inside the controller container: opening `/dev/tcp/172.28.10.20/8443` fails, and opening `/dev/tcp/172.28.20.10/5432` succeeds.

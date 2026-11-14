@@ -14,24 +14,22 @@ The demo models a small IoT fleet of simulated devices. A device is a row of `de
 - **Secure authentication and authorization.** Passwords are stored as Argon2id hashes and requests carry ES384 JWTs. Each request runs under `SET LOCAL ROLE demo_admin | demo_normal`, so PostgreSQL enforces the role a second time, independently of the HTTP check.
 - **TLS 1.3.** The Oat++ listener terminates HTTPS. OpenSSL 3.5's `X25519MLKEM768` is the group a stock client negotiates. liboqs, loaded as the `oqsprovider` module from the config beside the binary, is also accepted when the client offers one of its groups.
 
+Where each of these runs is [docker/operational/README.md](docker/operational/README.md). This diagram is the contract of tables and `NOTIFY`.
+
 ```mermaid
 flowchart LR
     client["client/pgdemo.sh<br/>(curl + jq)"]
-    subgraph zoneA["zone A"]
-        server["pgdemo-server<br/>Oat++ HTTPS"]
-    end
+    server["pgdemo-server<br/>Oat++ HTTPS"]
+    controller["pgdemo-controller<br/>supervisor + queue worker"]
+    worker["worker × N<br/>(one container per device)"]
+    device["pgdemo-device × N<br/>(one process per device)"]
+    puf[("PUF seed<br/>per worker")]
     subgraph db["PostgreSQL 18 + PostGIS"]
         enrollment[("device_enrollment<br/>(CSR queue)")]
         registry[("device + device_certificate + crl<br/>(identity)")]
         queue[("device_config_pending<br/>(queue)")]
         applied[("device_config<br/>(applied)")]
         data[("device_state<br/>+ telemetry_scalar / telemetry_gps / telemetry_xy / telemetry_xyz<br/>(monthly partitions)")]
-    end
-    subgraph zoneB["zone B"]
-        controller["pgdemo-controller<br/>supervisor + queue worker"]
-        workers["worker × N<br/>(one container per device)"]
-        devices["pgdemo-device × N<br/>(one process per device)"]
-        puf[("PUF<br/>(seed per worker)")]
     end
 
     client -- "HTTPS + Bearer JWT" --> server
@@ -41,10 +39,10 @@ flowchart LR
     enrollment -. "NOTIFY enrollment_csr" .-> server
     server -- "sign, issue / revoke / DELETE" --> registry
     registry -. "NOTIFY device_events" .-> controller
-    controller -- "creates" --> workers
-    workers -- "runs" --> devices
-    workers -- "private volume" --> puf
-    devices <-- "ROS 2: pgdemo/worker, pgdemo/manager" --> controller
+    controller -- "creates" --> worker
+    worker -- "runs" --> device
+    worker -- "private volume" --> puf
+    device <-- "ROS 2: pgdemo/worker, pgdemo/manager" --> controller
     server -- "INSERT desired" --> queue
     queue -. "NOTIFY config_requested" .-> controller
     controller -- "UPSERT applied / errors" --> applied

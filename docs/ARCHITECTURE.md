@@ -30,6 +30,8 @@ Each process holds query connections plus one listener connection:
 - **query connections.** The server opens a pool at `connect()` (8 by default, `--pool-size`). Every transaction checks one out and returns it when the transaction ends. The pool mutex guards only the free list; the connection itself is used by one thread until the checkout ends. Callers block when the pool is exhausted. The controller opens `--max-devices + 1` query connections (17 by default): one for each node's flush, and one for session, enrollment and configuration writes on the ROS spin thread.
 - **listener connection.** Only `LISTEN` and a thread blocked on its socket. It is not a query connection: `LISTEN` state and `wait_notification()` belong to one session.
 
+The box below is the threads inside one process. On the operational stack each device is its own worker container, drawn in [docker/operational/README.md](../docker/operational/README.md#container-namespaces). The `fork` in this figure is the end-to-end project.
+
 ```mermaid
 flowchart TB
     subgraph S["pgdemo-server (zone A)"]

@@ -29,30 +29,7 @@ The end-to-end project does not define `factory` or `seaweed`, so the workers th
 
 ## Networks
 
-```mermaid
-flowchart LR
-    subgraph zoneA ["zone_a bridge 172.28.10.0/24"]
-        pgA["postgres 172.28.10.10"]
-        swA["seaweed 172.28.10.11"]
-        server["server 172.28.10.20"]
-    end
-    subgraph zoneB ["zone_b bridge internal 172.28.20.0/24"]
-        pgB["postgres 172.28.20.10"]
-        swB["seaweed 172.28.20.11"]
-        controller["controller 172.28.20.20"]
-    end
-    subgraph zoneF ["zone_factory bridge internal 172.28.30.0/24"]
-        factory["factory 172.28.30.10"]
-        controllerF["controller 172.28.30.20"]
-    end
-    server --> pgA
-    server --> swA
-    controller --> pgB
-    controller --> swB
-    controllerF --> factory
-```
-
-The operational scheme is [`operational/README.md`](operational/README.md). PostgreSQL and SeaweedFS sit on both zone bridges, and a container with two interfaces does not open a route between the zones. SeaweedFS listens on port 8333, and that port is not published. The end-to-end project does not define this service.
+The bridges, the namespaces and the private keys are [`operational/README.md`](operational/README.md). PostgreSQL and SeaweedFS sit on both zone bridges, and a container with two interfaces does not open a route between the zones. SeaweedFS listens on port 8333, and that port is not published. The end-to-end project does not define this service.
 
 `zone_b` and `zone_factory` are `internal: true`. The controller has no route to `zone_a`. The factory is not on `zone_a` or `zone_b`, and its port is not published, so the server and the host cannot open it. The process binds `0.0.0.0` inside that one network. When `PGDEMO_DOCKER_SPAWN` is set, each worker is its own container on `zone_b` and `zone_factory`. It publishes on the ROS domain and asks the factory at `172.28.30.10:9443`. The bridge does not carry DDS multicast, so the worker lists the controller (`172.28.20.20`) as a static peer. The end-to-end project does not set that variable: its workers stay children of the controller. The host publishes one port, bound to loopback: `127.0.0.1:8080` forwards to the server's 8443. The end-to-end suite checks that the controller cannot open a TCP connection to the server and that it can open one to PostgreSQL on `172.28.20.10:5432`. The end-to-end project has no `zone_factory`.
 
@@ -60,41 +37,7 @@ The operational scheme is [`operational/README.md`](operational/README.md). Post
 
 Operational volumes are external and named `pgdemo_pgdata`, `pgdemo_seaweed`, `pgdemo_demo-run`, `pgdemo_ca-keys`, `pgdemo_device-keys`, `pgdemo_factory-key`, `pgdemo_factory-cert` and `pgdemo_manager-keys`. `scripts/run-all.sh` creates any that are missing. Compose does not delete them. A test run uses its own `pgdemo-e2e_` volumes, and those do go away with `down -v`.
 
-Project `pgdemo` is the persistent virtual environment. In this flowchart a rectangle is a container and a cylinder is an external volume. The edge is the mount path inside the container. The cylinders sit outside the containers: `stop`, `down` and `down -v` leave them. `ca-keys` covers `/app/run/ca` on top of `demo-run`. The factory writes `factory-cert` and the controller mounts it read only.
-
-```mermaid
-flowchart LR
-  subgraph containers [pgdemo containers]
-    postgres[postgres]
-    seaweed[seaweed]
-    init[init]
-    server[server]
-    controller[controller]
-    factory[factory]
-  end
-  subgraph persistent [external volumes]
-    pgdata[("pgdemo_pgdata")]
-    seaweedData[("pgdemo_seaweed")]
-    demoRun[("pgdemo_demo-run")]
-    caKeys[("pgdemo_ca-keys")]
-    deviceKeys[("pgdemo_device-keys")]
-    factoryKey[("pgdemo_factory-key")]
-    factoryCert[("pgdemo_factory-cert")]
-    managerKeys[("pgdemo_manager-keys")]
-  end
-  postgres -->|"/var/lib/postgresql"| pgdata
-  seaweed -->|"/data"| seaweedData
-  init -->|"/app/run"| demoRun
-  server -->|"/app/run"| demoRun
-  controller -->|"/app/run"| demoRun
-  init -->|"/app/run/ca"| caKeys
-  server -->|"/app/run/ca"| caKeys
-  controller -->|"/app/run/devices"| deviceKeys
-  controller -->|"/app/run/controller"| managerKeys
-  controller -->|"ro /app/run/factory-cert"| factoryCert
-  factory -->|"/app/run/factory"| factoryKey
-  factory -->|"/app/run/factory-cert"| factoryCert
-```
+Project `pgdemo` is the persistent virtual environment. Which container mounts which volume is [operational/README.md](operational/README.md#container-namespaces). `stop`, `down` and `down -v` leave the volumes. `ca-keys` covers `/app/run/ca` on top of `demo-run`. The factory writes `factory-cert` and the controller mounts it read only. Private keys are [operational/README.md](operational/README.md#private-keys).
 
 | Volume | Mounted by | Contents |
 |---|---|---|

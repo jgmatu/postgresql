@@ -38,23 +38,17 @@ If the digest itself reached thousands of batches per second, the wake-up would 
 
 ## Components
 
-Two planes. The control plane is the one the demo already runs. The telemetry body is the spool and SeaweedFS. While the segment is open the server reads the digest and does not see the body. After the key is written it reads that closed object from SeaweedFS. The panel talks only to the server.
+Two planes. The control plane is the one the demo already runs. The telemetry body is the spool and SeaweedFS. While the segment is open the server reads the digest and does not see the body. After the key is written it reads that closed object from SeaweedFS. The panel talks only to the server. Where each process runs is [docker/operational/README.md](docker/operational/README.md). The spool is a file on the controller, not a container.
 
 ```mermaid
 flowchart TB
-    subgraph zoneA [Zone A]
-        panel[Control panel]
-        server[pgdemo-server]
-    end
-    subgraph database ["PostgreSQL, atomic clock and index"]
-        digest[Digest rows and device_state]
-        cursor[telemetry_read_cursor]
-    end
-    subgraph zoneB [Zone B]
-        worker[pgdemo-device]
-        controller[pgdemo-controller]
-        spool[Local MCAP spool]
-    end
+    panel[Control panel]
+    server[pgdemo-server]
+    digest[Digest rows and device_state]
+    cursor[telemetry_read_cursor]
+    worker[pgdemo-device]
+    controller[pgdemo-controller]
+    spool[Local MCAP spool]
     seaweed[SeaweedFS]
 
     worker -->|frame| controller
@@ -113,18 +107,10 @@ Two identities, both from the environment and neither committed. The controller'
 
 ```mermaid
 flowchart LR
-    subgraph zoneB [Zone B]
-        producer[pgdemo-controller]
-    end
-    subgraph buffer [SeaweedFS on both zones]
-        bucket[Private bucket]
-    end
-    subgraph handoff [PostgreSQL]
-        key[Object key on the digest row]
-    end
-    subgraph zoneA [Zone A]
-        consumer[pgdemo-server]
-    end
+    producer[pgdemo-controller]
+    bucket["SeaweedFS, one private bucket"]
+    key[Object key on the digest row]
+    consumer[pgdemo-server]
 
     producer -->|PUT the closed MCAP| bucket
     producer -->|write the key after the object is complete| key
