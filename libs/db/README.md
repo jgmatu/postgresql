@@ -1,6 +1,6 @@
 # Database library
 
-`DatabaseManager` is the PostgreSQL access of `pgdemo-server` and `pgdemo-controller`. A `pqxx::connection` is not thread-safe, so the library keeps two kinds of session apart: a fixed pool for queries, and one connection that only runs `LISTEN`. The schema and the channel list are [sql/README.md](../../sql/README.md).
+`DatabaseManager` is the PostgreSQL access of `pgdemo-server` and `pgdemo-controller`. A `pqxx::connection` is not thread-safe, so the library keeps two kinds of session apart: a fixed pool for queries, and one connection that only runs `LISTEN`. The schema and the channel list are [sql/README.md](../../sql/README.md). The lock order of that split is drawn in [architecture.html](architecture.html).
 
 ## Query pool
 
