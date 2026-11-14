@@ -1,8 +1,12 @@
 # Mass ingest
 
-A fat sensor sample is split in two. The database stays the index and the wake-up. The blob stays out of the engine. Scalar, GPS, `xy` and `xyz` telemetry is unchanged. A digest row appears only when the sample would stop being a point.
+`pgdemo-controller` produces and `pgdemo-server` consumes. There is no socket between them. `zone_b` is `internal: true` in [docker/compose.yaml](docker/compose.yaml), and the signal crosses as `NOTIFY`.
 
-This is one more sentence of the demo in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), not a new store. The scaling limits of the current path are [sql/README.md](sql/README.md#scaling-notes).
+The body of every telemetry sample, scalar, GPS, `xy`, `xyz` and a fat frame, is an MCAP segment in [SeaweedFS](https://github.com/seaweedfs/seaweedfs). PostgreSQL never sees those bytes, so they never enter the WAL.
+
+PostgreSQL is both things at once. It is the atomic data clock: each tick is one commit, and `NOTIFY` fires with that commit, so the server never observes a half-written index row. The atom is that transaction. It is not a commit shared with SeaweedFS. An object already uploaded whose key is not committed does not exist for the server. It is the index of the store: the digest (`device_id`, time, `seq`, the magnitudes, a segment id, the object key), `device_state` with the latest sample, and PostGIS on the last fix and on the segment box. A query by device and time, or a spatial query, returns keys. Nobody lists the bucket.
+
+The monthly `telemetry_*` tables are the path that runs today, described in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). This file is the cut on which they stop being the archive. The scaling limits of that path are [sql/README.md](sql/README.md#scaling-notes).
 
 ## Digest and body
 
@@ -10,7 +14,9 @@ The **digest** follows the path the small samples already use. The controller wr
 
 A digest row carries `device_id`, `seq`, the sample time, and a few magnitudes: pose, point count, a box, an indicator. It also carries the object key once the segment has been uploaded. The key is empty while the segment is still open. Live analysis does not need it.
 
-The **body** is the frame itself. The controller appends it to a local MCAP (rosbag2, already in ROS 2 Lyrical) and uploads that file to [SeaweedFS](https://github.com/seaweedfs/seaweedfs) when the segment closes. PostgreSQL never sees those bytes, so they never enter the WAL. Post-mortem analysis queries by device and `recorded_at`, reads the keys, and opens those objects.
+The **body** is the telemetry itself: scalar, GPS, `xy`, `xyz` and a fat frame. The controller appends it to a local MCAP (rosbag2, already in ROS 2 Lyrical) and uploads that file to SeaweedFS when the segment closes. PostgreSQL never sees those bytes, so they never enter the WAL. Post-mortem analysis queries by device and `recorded_at`, reads the keys, and opens those objects.
+
+`ST_Project` builds the `gps_orbit` sample. It is the generator, not the archive. A real fix already carries latitude and longitude. PostGIS stays on the last point in `device_state` and on the box or simplified track of the segment. The GiST on every monthly sample leaves with those samples.
 
 The notification carries the id, not the URL. A `NOTIFY` payload is limited to 8000 bytes, and the key is read from the row. Ids are `bigint`, as in the rest of the schema. The digest hangs off `device_id`. There is no parallel sensor registry.
 
@@ -23,7 +29,8 @@ If the digest itself reached thousands of batches per second, the wake-up would 
 - A training store. FiftyOne, Lance, DVC, or WebDataset can read the MCAP later. This demo does not add frame indexes, embeddings, labelling queues, train/val splits, or a training format of its own.
 - The cloud or the frame inside PostgreSQL (`bytea`, large objects, or a wide telemetry row).
 - A data socket between `pgdemo-server` and `pgdemo-controller`. `zone_b` is `internal: true` in [docker/compose.yaml](docker/compose.yaml). The signal crosses as `NOTIFY`. The bytes go from the controller to SeaweedFS. The day SeaweedFS joins the compose file, it attaches to both zones the way PostgreSQL does. That is a shared service, not a socket between the two processes.
-- Pointing the SeaweedFS filer at the demo database. The filer keeps its own object index. PostgreSQL is the clock between the two processes, not the filer's store.
+- Pointing the SeaweedFS filer at the demo database. The filer keeps its own object index. PostgreSQL is the atomic data clock and the index of the store, not the filer's store.
+- Client-side encryption, and storing the data key in PostgreSQL. The bucket's SSE-S3 `AES256` is the encryption. The data key stays in SeaweedFS.
 - A SeaweedFS volume cluster, erasure coding, or a cloud tier. This demo runs one `weed mini`.
 - A listening data port on the robot. A robot behind NAT cannot be dialled from outside either.
 - A Python or JavaScript object-storage client. The server is C++20 and the controller is C++ with ROS 2.
@@ -31,7 +38,7 @@ If the digest itself reached thousands of batches per second, the wake-up would 
 
 ## Components
 
-Two planes. The control plane is the one the demo already runs. The fat-data plane is the spool and SeaweedFS. While the segment is open the server reads the digest and does not see the body. After the key is written it reads that closed object from SeaweedFS. The panel talks only to the server.
+Two planes. The control plane is the one the demo already runs. The telemetry body is the spool and SeaweedFS. While the segment is open the server reads the digest and does not see the body. After the key is written it reads that closed object from SeaweedFS. The panel talks only to the server.
 
 ```mermaid
 flowchart TB
@@ -39,7 +46,7 @@ flowchart TB
         panel[Control panel]
         server[pgdemo-server]
     end
-    subgraph database [PostgreSQL]
+    subgraph database ["PostgreSQL, atomic clock and index"]
         digest[Digest rows and device_state]
         cursor[telemetry_read_cursor]
     end
@@ -57,7 +64,7 @@ flowchart TB
     server -->|SSE of the digest| panel
     server -->|GET a closed object| seaweed
     controller --> spool
-    spool -->|upload when the segment closes| seaweed
+    spool -->|upload the closed telemetry segment| seaweed
 ```
 
 ## One segment
@@ -91,7 +98,7 @@ While the segment is open, the canvas follows the SSE of the digest. The full fr
 
 ## Producer and consumer
 
-The controller produces the body and the server consumes it. The bulk frame never crosses a socket between them. SeaweedFS is the buffer, attached to `zone_a` and `zone_b` the way PostgreSQL is, so each process uses the address of its own zone. One `weed mini` process is enough for this demo: master, volume server, filer and the S3 gateway on port 8333, path-style. The two processes speak S3 (`CreateMultipartUpload`, `UploadPart`, `CompleteMultipartUpload`, `AbortMultipartUpload`, and a presigned GET). The client stays C++.
+The controller produces the telemetry body and the server consumes it. PostgreSQL is the atomic data clock and the index of that store. The body never crosses a socket between the two processes. SeaweedFS is the store, attached to `zone_a` and `zone_b` the way PostgreSQL is, so each process uses the address of its own zone. One `weed mini` process is enough for this demo: master, volume server, filer and the S3 gateway on port 8333, path-style. The two processes speak S3 (`CreateMultipartUpload`, `UploadPart`, `CompleteMultipartUpload`, `AbortMultipartUpload`, and a presigned GET). The client stays C++. The private bucket stores every object under SSE-S3 `AES256`. SeaweedFS encrypts it with AES-256, and the `GET` decrypts it in the gateway for the read identity. The data key stays in SeaweedFS. PostgreSQL stores the object name, not the data key and not the ciphertext.
 
 PostgreSQL is the clock. The tick is a commit, and `NOTIFY` publishes it. An object that already sits in SeaweedFS is not a tick. The consumer does not list the bucket and does not read the filer.
 
@@ -152,11 +159,11 @@ flowchart LR
 
 ## Milestones
 
-- [x] **The cut.** This file is the contract: digest in PostgreSQL, body in a MCAP on SeaweedFS, and the out-of-scope list above.
+- [x] **The cut.** This file is the contract: PostgreSQL is the atomic data clock and the index, the telemetry body is an MCAP on SeaweedFS under SSE-S3 `AES256`, and the out-of-scope list is above.
 - [ ] **The digest, with the rules of `telemetry_*`.** Monthly partitions, no foreign key to `device`, one `NOTIFY` per `INSERT`, and a read cursor. The body is the local MCAP and the SeaweedFS upload when the segment closes. The upload writes the key. A failed upload aborts the multipart upload, leaves the key empty, and marks the segment `FAILED`.
 
-  - [ ] **Schema.** A digest table partitioned by month on `recorded_at`, with no foreign key to `device`. Columns: `device_id`, `seq`, the sample time, pose, point count, a box, an indicator, a segment id, and an object key that stays empty until the upload. A statement trigger, its channel, a `telemetry_read_cursor` row, and the grants: the controller inserts the digest and later writes the key, the server reads and advances the cursor. One row in [sql/README.md](sql/README.md).
-  - [ ] **SeaweedFS.** One `weed mini` attached to `zone_a` and `zone_b`, the S3 gateway on port 8333, a private bucket, and two identities from the environment: the controller has `Write` (multipart and the delete of a failed upload), the server has `Read`. Neither secret is committed. The filer is not pointed at the `pgdemo` database. Still no TCP between `pgdemo-server` and `pgdemo-controller`.
+  - [ ] **Schema.** A digest table partitioned by month on `recorded_at`, with no foreign key to `device`. It indexes every telemetry segment. Columns: `device_id`, `seq`, the sample time, pose, point count, a box, an indicator, a segment id, and an object key that stays empty until the upload. PostGIS stays on the last fix in `device_state` and on the box of the segment. A statement trigger, its channel, a `telemetry_read_cursor` row, and the grants: the controller inserts the digest and later writes the key, the server reads and advances the cursor. One row in [sql/README.md](sql/README.md).
+  - [ ] **SeaweedFS.** One `weed mini` attached to `zone_a` and `zone_b`, the S3 gateway on port 8333, a private bucket with SSE-S3 `AES256`, and two identities from the environment: the controller has `Write` (multipart and the delete of a failed upload), the server has `Read`. Neither secret is committed, and the data key stays in SeaweedFS. PostgreSQL is the atomic clock and the index: it stores the object name. The filer is not pointed at the `pgdemo` database. Still no TCP between `pgdemo-server` and `pgdemo-controller`.
   - [ ] **Record.** The controller appends the frame to the local MCAP and, on the current cadence (64 samples or 100 ms), inserts the digest and updates `device_state`. The queue of 256 still drops the sample that just arrived.
   - [ ] **Upload.** When the segment closes, a multipart upload (`CreateMultipartUpload`, `UploadPart`, `CompleteMultipartUpload`), then the key written on the rows of that segment. On failure: `AbortMultipartUpload`, leave the key empty, and mark the segment `FAILED`.
   - [ ] **Live read.** The server `LISTEN`s on the new channel, reads the cursor, and publishes the digest on the SSE stream that already exists. A query by device and `recorded_at` returns the key.
