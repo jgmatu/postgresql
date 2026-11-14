@@ -2,6 +2,8 @@
 
 Project `pgdemo` is the stack that stays. Bridges, container namespaces and private-key custody are drawn only in this file. [docker/README.md](../README.md) is the virtualization of both projects and links here.
 
+![Operational Network](./architecture.svg)
+
 PostgreSQL is one container. SeaweedFS is one container. Both are shared by zone A and zone B: each store has one volume and two addresses, one on each bridge. The server, in analysis and operations, uses the zone A address. The controller, in robotics, uses the zone B address. They open the same process and the same files. A worker is its own container. It joins the robotics bridge and the factory bridge, and it mounts its own PUF volume. It does not mount the database or the object store.
 
 Three bridges, and no new one for the object store. `zone_a` and `zone_b` are declared in [`compose.yaml`](../compose.yaml). `zone_factory` is declared in [`compose.yaml`](compose.yaml).
