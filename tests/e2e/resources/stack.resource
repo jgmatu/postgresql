@@ -90,7 +90,17 @@ Copy Service Logs
     Create File    ${destination}${/}controller.log    ${controller.stdout}${controller.stderr}
 
 Destroy Stack
+    [Documentation]    ``down -v`` and remove the generated env. Safe when the suite never started:
+    ...                a placeholder env file is enough for Compose to interpolate.
+    Create Directory    ${WORK}
+    ${exists}=    Run Keyword And Return Status    File Should Exist    ${ENV_FILE}
+    IF    not $exists
+        Create File    ${ENV_FILE}    POSTGRES_PASSWORD=x\nDEMO_ADMIN_PASSWORD=x\n
+    END
     ${result}=    Run Compose    logs    --no-color
-    Create File    ${OUTPUT DIR}${/}compose.log    ${result.stdout}
-    Compose    down    -v    --remove-orphans
+    Append To File    ${OUTPUT DIR}${/}compose.log
+    ...    \n===== ${SUITE NAME} =====\n${result.stdout}${result.stderr}
+    ${down}=    Run Compose    down    -v    --remove-orphans
+    Should Be Equal As Integers    ${down.rc}    0
+    ...    docker compose down failed:\n${down.stdout}\n${down.stderr}    values=False
     Remove Directory    ${WORK}    recursive=True

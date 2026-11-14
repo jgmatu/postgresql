@@ -1,7 +1,8 @@
 *** Settings ***
 Documentation     SIGTERM reaches both processes, and each listener thread exits cleanly.
-Resource          resources/stack.resource
+Resource          resources/api.resource
 Suite Setup       Stop And Collect Logs
+Suite Teardown    Destroy Stack
 
 
 *** Variables ***
@@ -20,5 +21,6 @@ Controller logged a clean listener exit
 
 *** Keywords ***
 Stop And Collect Logs
+    Arm Fleet
     Stop Services    server    controller
     Copy Service Logs    ${LOGS}

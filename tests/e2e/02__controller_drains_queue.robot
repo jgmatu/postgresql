@@ -2,7 +2,8 @@
 Documentation     The controller starts: the seeds and the enrollment queued while it was down get their
 ...               certificates, and a configuration queued while it is stopped is applied on restart.
 Resource          resources/api.resource
-Suite Setup       Start Service    controller
+Suite Setup       Queue An Enrollment And Start The Controller
+Suite Teardown    Destroy Stack
 
 
 *** Test Cases ***
@@ -30,7 +31,7 @@ Device keys stay in the controller zone
     Should Not Be Equal As Integers    ${result.rc}    0    the server container sees device keys
 
 Enrollment queued while the controller was down is issued
-    Wait Until Keyword Succeeds    30s    0.5s    Enrollment Status Should Be    ${EARLY_ID}    ISSUED
+    Wait Until Keyword Succeeds    30s    0.5s    Enrollment Status Should Be    ${QUEUED_ID}    ISSUED
     Client Should Succeed    devices    del    early-1
 
 Config queued while the controller is stopped is applied on restart
@@ -42,3 +43,17 @@ Config queued while the controller is stopped is applied on restart
     ${rate}=    Device Field    dummy1    applied_rate_ms
     Should Be Equal As Integers    ${rate}    300
     Wait Until Keyword Succeeds    30s    0.5s    Seeds Should Be Online
+
+
+*** Keywords ***
+Queue An Enrollment And Start The Controller
+    [Documentation]    The enrollment is inserted while the controller is stopped, then the controller
+    ...                starts and drains it together with the seed devices.
+    Start Stack
+    Login As    admin    ${ADMIN_PASSWORD}
+    ${headers}=    Auth Headers
+    &{body}=    Create Dictionary    name=early-1    type=sine
+    ${response}=    HTTP Status Should Be    202    POST    /api/devices    headers=${headers}    json=${body}
+    Set Suite Variable    ${QUEUED_ID}    ${response.json()}[request_id]
+    Start Service    controller
+    Wait Until Keyword Succeeds    60s    0.5s    Seeds Should Be Online

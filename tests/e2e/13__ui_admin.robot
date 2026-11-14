@@ -5,9 +5,10 @@ Documentation     The administration panel as the admin, on a device of its own 
 ...               of the superseded certificate, a permanent revocation, and the removal. Then a user
 ...               is created and deleted, and the last admin cannot be. The suite leaves the fleet
 ...               and the users as it found them; the teardown cleans up after a failure too.
+Resource          resources/api.resource
 Resource          resources/ui.resource
-Suite Setup       Open Panel As Admin
-Suite Teardown    Clean Up
+Suite Setup       Open Administration
+Suite Teardown    Finish Administration
 Test Tags         admin
 
 
@@ -163,14 +164,21 @@ The last admin cannot be deleted
 
 
 *** Keywords ***
+Open Administration
+    Arm Fleet
+    Open Panel As Admin
+
+Finish Administration
+    Run Keyword And Ignore Error    Close Browser    ALL
+    Run Keyword And Ignore Error    Remove Admin Leftovers
+    Destroy Stack
+
 Open Panel As Admin
     Open Panel
-    Login As    admin    ${ADMIN_PASSWORD}
+    Sign In    admin    ${ADMIN_PASSWORD}
 
-Clean Up
-    [Documentation]    Whatever a failed test left behind, removed through the API with the admin
-    ...                token of the earlier suites; 404 means there was nothing to remove.
-    Close Browser    ALL
+Remove Admin Leftovers
+    [Documentation]    Whatever a failed test left behind. 404 means there was nothing to remove.
     ${line}=    Get File    ${TOKEN_FILE}
     ${value}=    Evaluate    $line.strip().split(': ', 1)[1]
     &{headers}=    Create Dictionary    Authorization=${value}

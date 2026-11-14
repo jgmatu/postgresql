@@ -1,6 +1,8 @@
 *** Settings ***
 Documentation     Desired/applied configuration through the Dispatcher, and controller-side rejection.
 Resource          resources/api.resource
+Suite Setup       Arm Fleet
+Suite Teardown    Destroy Stack
 
 
 *** Test Cases ***

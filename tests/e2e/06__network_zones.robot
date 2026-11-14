@@ -1,7 +1,8 @@
 *** Settings ***
 Documentation     The controller (zone_b) cannot reach the server (zone_a); PostgreSQL is the only shared host.
-Resource          resources/stack.resource
-Suite Setup       Compose    exec    -T    controller    true
+Resource          resources/api.resource
+Suite Setup       Arm Fleet
+Suite Teardown    Destroy Stack
 
 
 *** Test Cases ***

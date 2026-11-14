@@ -1,7 +1,8 @@
 *** Settings ***
 Documentation     Seeded devices, monthly-partitioned telemetry and the SSE stream of both telemetry channels.
 Resource          resources/api.resource
-Suite Setup       Wait For Data And Capture SSE
+Suite Setup       Collect Telemetry
+Suite Teardown    Destroy Stack
 
 
 *** Test Cases ***
@@ -65,6 +66,10 @@ Device Should Have A Sample
     [Arguments]    ${device}
     ${dev}=    Client Json    data    ${device}
     Should Not Be Equal    ${dev}[seq]    ${None}
+
+Collect Telemetry
+    Arm Fleet
+    Wait For Data And Capture SSE
 
 Wait For Data And Capture SSE
     Wait Until Keyword Succeeds    15s    0.5s    Device Should Have A Sample    dummy1

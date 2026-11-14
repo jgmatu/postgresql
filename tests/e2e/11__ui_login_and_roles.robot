@@ -4,9 +4,10 @@ Documentation     The panel in a browser: the login page is the way in, a normal
 ...               appears for the admin alone. Hiding it is presentation: the AdminGate sends a
 ...               normal user back, and 10__panel showed the API refusing the writes anyway.
 ...               A token the server no longer accepts ends the session.
+Resource          resources/api.resource
 Resource          resources/ui.resource
-Suite Setup       Open Panel
-Suite Teardown    Close Browser    ALL
+Suite Setup       Open A Fresh Panel
+Suite Teardown    Close The Panel
 
 
 *** Test Cases ***
@@ -29,7 +30,7 @@ Wrong password is refused
     Capture Screen    login-error
 
 A normal user sees the visualization tabs only
-    Login As    ${NORMAL_USER}    ${NORMAL_PASSWORD}
+    Sign In    ${NORMAL_USER}    ${NORMAL_PASSWORD}
     FOR    ${tab}    IN    devices    config    map    pki    events    system    history
         Wait For Elements State    data-testid=nav-${tab}    visible
     END
@@ -59,7 +60,7 @@ Logout ends the session
     Wait For Elements State    data-testid=login-form    visible
 
 The admin sees the administration entry
-    Login As    admin    ${ADMIN_PASSWORD}
+    Sign In    admin    ${ADMIN_PASSWORD}
     Get Text    data-testid=nav-admin    contains    Administración
     Get Text    data-testid=nav-admin    contains    admin
     Wait For Elements State    data-testid=manage-devices    visible
@@ -91,3 +92,11 @@ A token the server rejects ends the session
     ${stored}=    Evaluate JavaScript    ${None}    () => sessionStorage.getItem('pgdemo.session')
     Should Be Equal    ${stored}    ${None}
     Capture Screen    login-expired
+
+
+*** Keywords ***
+Open A Fresh Panel
+    Start Stack
+    Login As    admin    ${ADMIN_PASSWORD}
+    Ensure Alice
+    Open Panel

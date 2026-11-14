@@ -6,7 +6,8 @@ Documentation     The control panel on the server's own origin: every page is pu
 ...               panel response carries the security headers. Unknown paths are 404: HTML for
 ...               the panel, JSON under ``/api``.
 Resource          resources/api.resource
-Suite Setup       Find A Bundle
+Suite Setup       Open The Panel Files
+Suite Teardown    Destroy Stack
 
 
 *** Variables ***
@@ -98,6 +99,11 @@ A normal token loads the admin pages but every admin write is 403
 
 
 *** Keywords ***
+Open The Panel Files
+    Arm Fleet
+    Ensure Alice
+    Find A Bundle
+
 Find A Bundle
     [Documentation]    A hashed script that ``/devices/`` loads; its name changes with every build.
     ${response}=    HTTP Status Should Be    200    GET    /devices/

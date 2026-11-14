@@ -22,6 +22,10 @@ ${NORMAL_PASSWORD}    normal-user-password
 
 
 *** Keywords ***
+Close The Panel
+    Run Keyword And Ignore Error    Close Browser    ALL
+    Destroy Stack
+
 Open Panel
     [Documentation]    A fresh browser at the login page, 1440x900 and in Spanish. The server
     ...                certificate is the stack's self-signed one, so HTTPS errors are ignored.
@@ -31,7 +35,7 @@ Open Panel
     New Page    ${BASE_URL}/
     Wait For Elements State    data-testid=login-form    visible
 
-Login As
+Sign In
     [Documentation]    Sign in through the form and land on Dispositivos.
     [Arguments]    ${user}    ${password}
     Go To    ${BASE_URL}/

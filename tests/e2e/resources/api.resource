@@ -68,6 +68,27 @@ Login As
     ${result}=    Run Client With    ${extra}    login    ${user}
     Should Be Equal As Integers    ${result.rc}    0    login ${user} failed:\n${result.stdout}    values=False
 
+Arm Server
+    [Documentation]    A new database, the server, and an admin token. No controller.
+    Start Stack
+    Login As    admin    ${ADMIN_PASSWORD}
+
+Arm Fleet
+    [Documentation]    ``Arm Server``, then the controller, then the three seed devices online.
+    Arm Server
+    Start Service    controller
+    Wait Until Keyword Succeeds    60s    0.5s    Seeds Should Be Online
+
+Ensure Alice
+    [Documentation]    The normal user ``alice``. The admin token is put back afterwards.
+    ${headers}=    Auth Headers
+    &{body}=    Create Dictionary    username=alice    password=normal-user-password    role=normal
+    ${response}=    POST    ${BASE_URL}/api/users    json=${body}    headers=${headers}
+    ...    verify=${TLS_CERT}    expected_status=any
+    Should Be True    $response.status_code in (201, 409)
+    ...    alice: HTTP ${response.status_code} ${response.text}
+    Login As    admin    ${ADMIN_PASSWORD}
+
 Normal User Headers
     [Documentation]    A token of ``alice``, created in 05__users_and_roles; the admin token stays in place.
     ${body}=    Create Dictionary    username=alice    password=normal-user-password

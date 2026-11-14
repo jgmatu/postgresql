@@ -5,8 +5,8 @@ Documentation     A device enrolled through the API: the controller starts its p
 ...               and its removal keeps the telemetry. No schema change, no restart.
 Resource          resources/api.resource
 Library           Process
-Suite Setup       Login And Watch Device
-Suite Teardown    Terminate All Processes
+Suite Setup       Watch A New Device
+Suite Teardown    Drop The Device Suite
 
 
 *** Variables ***
@@ -93,6 +93,14 @@ Removed device loses its process and its key
 
 
 *** Keywords ***
+Watch A New Device
+    Arm Fleet
+    Login And Watch Device
+
+Drop The Device Suite
+    Run Keyword And Ignore Error    Terminate All Processes
+    Destroy Stack
+
 Login And Watch Device
     [Documentation]    Admin token, then an SSE stream filtered to a device that does not exist yet.
     Login As    admin    ${ADMIN_PASSWORD}

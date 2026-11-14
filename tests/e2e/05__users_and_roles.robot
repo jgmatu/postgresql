@@ -1,6 +1,8 @@
 *** Settings ***
 Documentation     User management by the admin, and role enforcement for a normal user (HTTP and PostgreSQL).
 Resource          resources/api.resource
+Suite Setup       Arm Fleet
+Suite Teardown    Destroy Stack
 
 
 *** Variables ***

@@ -5,7 +5,8 @@ Documentation     Device identity: a certificateHold suspends a device and can b
 ...               device and deleting the current one deletes it. The signed CRL lists the revoked
 ...               serials, and ``--max-devices`` leaves the devices beyond it UNMANAGED.
 Resource          resources/api.resource
-Suite Setup       Login And Enroll
+Suite Setup       Enroll The Identity Device
+Suite Teardown    Destroy Stack
 
 
 *** Variables ***
@@ -116,6 +117,11 @@ Raising the limit starts every device again
 
 
 *** Keywords ***
+Enroll The Identity Device
+    Arm Fleet
+    Ensure Alice
+    Login And Enroll
+
 Login And Enroll
     Login As    admin    ${ADMIN_PASSWORD}
     ${result}=    Client Json    devices    add    ${DEVICE}    sine

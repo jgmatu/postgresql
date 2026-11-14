@@ -3,9 +3,10 @@ Documentation     Every visualization tab as the normal user: the live device li
 ...               chart and history, configuration, the GPS map, PKI with the CRL, the event stream
 ...               with server-side filters, the system status, and the read-only audit history.
 ...               Read-only: no "Gestionar" links.
+Resource          resources/api.resource
 Resource          resources/ui.resource
-Suite Setup       Open Panel And Login
-Suite Teardown    Close Browser    ALL
+Suite Setup       Open Visualization
+Suite Teardown    Close The Panel
 
 
 *** Test Cases ***
@@ -43,10 +44,15 @@ The device detail draws the chart and the history
     Capture Screen    device-detail
 
 The history size can be changed
-    [Documentation]    The chart plots the whole window; the table lists the latest rows of it.
-    Select Options By    data-testid=history-limit    value    200
+    [Documentation]    The window opens at 200 samples and the chart plots every sample in it, so it
+    ...                passes 50 points once dummy1 (500 ms) has been emitting for long enough. The
+    ...                table lists at most the latest 15 rows of that window. 50 is the short window.
     Get Selected Options    data-testid=history-limit    value    ==    200
-    Get Attribute    data-testid=chart    data-points    validate    int(value) > 50
+    Wait Until Keyword Succeeds    40s    0.5s    Chart Has At Least    51
+    Select Options By    data-testid=history-limit    value    50
+    Get Selected Options    data-testid=history-limit    value    ==    50
+    Count Should Be    data-testid=history-table >> tbody tr    <=    15
+    Count Should Be    data-testid=history-table >> tbody tr    >    0
 
 A GPS device shows its track
     Go To    ${BASE_URL}/device/?name=dummy3
@@ -68,11 +74,15 @@ Configuración shows applied and desired state
     Capture Screen    config
 
 A configuration request can be looked up by id
-    ${id}=    Get Attribute    css=[data-testid="config-table"] [data-request-id] >> nth=0    data-request-id
+    [Documentation]    A fresh fleet is in sync, so the table has no request id (the history rows
+    ...                are the enrollment, labelled "alta"). The lookup reads whatever id the API returns.
+    ${result}=    Client Json    config    set    dummy1    rate_ms=800
+    Should Be Equal    ${result}[status]    SUCCESS
+    ${id}=    Convert To String    ${result}[request_id]
     Fill Text    data-testid=request-id    ${id}
     Click    data-testid=request-find
     Get Text    data-testid=request-result    contains    Petición #${id}
-    Get Attribute    data-testid=request-result    data-state    validate    value in ('PENDING', 'SUCCESS', 'ERROR', 'TIMEOUT')
+    Get Attribute    data-testid=request-result    data-state    ==    SUCCESS
     Fill Text    data-testid=request-id    999999999
     Click    data-testid=request-find
     Wait For Elements State    data-testid=request-not-found    visible
@@ -155,9 +165,19 @@ Histórico reads dummy1 samples for the session role
 
 
 *** Keywords ***
+Chart Has At Least
+    [Arguments]    ${minimum}
+    ${points}=    Get Attribute    data-testid=chart    data-points
+    Should Be True    int($points) >= int($minimum)
+
+Open Visualization
+    Arm Fleet
+    Ensure Alice
+    Open Panel And Login
+
 Open Panel And Login
     Open Panel
-    Login As    ${NORMAL_USER}    ${NORMAL_PASSWORD}
+    Sign In    ${NORMAL_USER}    ${NORMAL_PASSWORD}
 
 Published CA
     [Documentation]    ``GET /api/pki/ca`` straight from the API, to compare with what the page shows.

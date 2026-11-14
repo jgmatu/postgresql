@@ -3,6 +3,8 @@ Documentation     Server alone: authentication, and the seed devices waiting for
 ...               A device exists only once its certificate does, and only the controller's
 ...               device processes can produce the CSRs.
 Resource          resources/api.resource
+Suite Setup       Start Stack
+Suite Teardown    Destroy Stack
 
 
 *** Test Cases ***
