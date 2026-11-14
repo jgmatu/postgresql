@@ -1,5 +1,6 @@
 # The stack that stays. Its volumes are external: `down` and `down -v` leave
 # them. scripts/run-all.sh creates them. Removing one is `docker volume rm`.
+# The network scheme is README.md. SeaweedFS keeps its bytes in pgdemo_seaweed.
 #
 #   docker compose -f docker/operational/compose.yaml --env-file docker/operational/.env up --build
 
@@ -9,8 +10,31 @@ include:
   - path: ../compose.yaml
 
 # The factory is not in the shared file. The end-to-end project does not
-# include this one, so its enrollment stays on the demo CA.
+# include this one, so its enrollment stays on the demo CA. SeaweedFS is
+# the same: one weed mini on both zones, and the end-to-end project has none.
 services:
+  # One process: master, volume, filer and the S3 gateway on 8333.
+  # Both zones, no published port. The filer keeps its index in the volume.
+  seaweed:
+    image: chrislusf/seaweedfs
+    command: ["mini", "-dir=/data"]
+    restart: unless-stopped
+    volumes:
+      - seaweed:/data
+    healthcheck:
+      # curl exits 0 when the gateway answers, including its 403, and
+      # non-zero while port 8333 is still closed.
+      test: ["CMD", "curl", "-s", "-o", "/dev/null", "http://127.0.0.1:8333/"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+    networks:
+      zone_a:
+        ipv4_address: 172.28.10.11
+      zone_b:
+        ipv4_address: 172.28.20.11
+
   factory:
     image: pgdemo:latest
     init: true
@@ -93,6 +117,9 @@ volumes:
     external: true
   manager-keys:
     name: pgdemo_manager-keys
+    external: true
+  seaweed:
+    name: pgdemo_seaweed
     external: true
 
 networks:

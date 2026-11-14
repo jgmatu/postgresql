@@ -7,51 +7,58 @@ Two projects include [`compose.yaml`](compose.yaml), each for a different use. T
 | Operational | [`operational/compose.yaml`](operational/compose.yaml) | `pgdemo` | Development. External volumes survive `stop`, `down` and `down -v` |
 | End to end | [`e2e/compose.yaml`](e2e/compose.yaml) | `pgdemo-e2e` | Stateless tests. Each run starts empty; `down -v` removes only the `pgdemo-e2e_` volumes |
 
-The operational project is the one that stays. It runs four containers. PostgreSQL is the only path between the server and the controller. The factory is a fourth container on a network of its own. Compose is the supervisor: each process is the container's main program, and a stop sends `SIGTERM` to that program. The end-to-end project does not start the factory.
+The operational project is the one that stays. It runs five containers: PostgreSQL, SeaweedFS, the server, the controller and the factory. PostgreSQL is the only path between the server and the controller. SeaweedFS is the second shared service, on the same two bridges, and the two processes do not meet there. The factory is on a network of its own. Compose is the supervisor: each process is the container's main program, and a stop sends `SIGTERM` to that program. The end-to-end project does not start the factory or SeaweedFS.
 
 ## Services
 
-[`Dockerfile`](Dockerfile) builds one image, `pgdemo:latest`. The controller forks `pgdemo-device`, so that binary lives in the same image. PostgreSQL is `postgis/postgis:18-3.7`, not this image.
+[`Dockerfile`](Dockerfile) builds one image, `pgdemo:latest`. The controller forks `pgdemo-device`, so that binary lives in the same image. PostgreSQL is `postgis/postgis:18-3.7`, not this image. SeaweedFS is `chrislusf/seaweedfs`, not this image and not the PostgreSQL image.
 
 | Service | Role | Stays up |
 |---|---|---|
 | `postgres` | The database, attached to both zones | yes |
+| `seaweed` | `weed mini`, the object store, attached to both zones. S3 on port 8333, not published | yes, `restart: unless-stopped` |
 | `init` | [`scripts/db-init.sh`](../scripts/db-init.sh): schema, device CA, admin user, `run/demo.env` | no, it exits |
 | `server` | `pgdemo-server` on HTTPS port 8443 | yes, `restart: unless-stopped` |
 | `controller` | `pgdemo-controller` and one device process per enrolled device | yes, `restart: unless-stopped` |
 | `factory` | `pgdemo-factory`, operational project only | yes, `restart: unless-stopped` |
 | `worker` | declared so Compose follows the containers the controller creates; `scale: 0`, no container of its own | no |
 
-[`entrypoint.sh`](entrypoint.sh) is the command of `server`, `controller` and `factory`. The server and the controller read `run/demo.env`. The server generates the JWT key and the TLS certificate. The factory generates its root and copies only `root.crt` out. Each one then `exec`s its binary. Tini is pid 1 (`init: true`) and forwards the signal to that process. `init` does not use the entrypoint: its command is `scripts/db-init.sh`.
+[`entrypoint.sh`](entrypoint.sh) is the command of `server`, `controller` and `factory`. The server and the controller read `run/demo.env`. The server generates the JWT key and the TLS certificate. The factory generates its root and copies only `root.crt` out. Each one then `exec`s its binary. Tini is pid 1 (`init: true`) and forwards the signal to that process. `init` does not use the entrypoint: its command is `scripts/db-init.sh`. `seaweed` does not use it either: the image starts `weed mini`.
 
-The end-to-end project does not define `factory`, so the workers there still enroll with the demo CA.
+The end-to-end project does not define `factory` or `seaweed`, so the workers there still enroll with the demo CA.
 
 ## Networks
 
 ```mermaid
 flowchart LR
-    subgraph zoneA ["zone_a 172.28.10.0/24"]
+    subgraph zoneA ["zone_a bridge 172.28.10.0/24"]
         pgA["postgres 172.28.10.10"]
+        swA["seaweed 172.28.10.11"]
         server["server 172.28.10.20"]
     end
-    subgraph zoneB ["zone_b internal 172.28.20.0/24"]
+    subgraph zoneB ["zone_b bridge internal 172.28.20.0/24"]
         pgB["postgres 172.28.20.10"]
+        swB["seaweed 172.28.20.11"]
         controller["controller 172.28.20.20"]
     end
-    subgraph zoneF ["zone_factory internal 172.28.30.0/24"]
+    subgraph zoneF ["zone_factory bridge internal 172.28.30.0/24"]
         factory["factory 172.28.30.10"]
         controllerF["controller 172.28.30.20"]
     end
     server --> pgA
+    server --> swA
     controller --> pgB
+    controller --> swB
     controllerF --> factory
 ```
+
+The operational scheme is [`operational/README.md`](operational/README.md). PostgreSQL and SeaweedFS sit on both zone bridges, and a container with two interfaces does not open a route between the zones. SeaweedFS listens on port 8333, and that port is not published. The end-to-end project does not define this service.
 
 `zone_b` and `zone_factory` are `internal: true`. The controller has no route to `zone_a`. The factory is not on `zone_a` or `zone_b`, and its port is not published, so the server and the host cannot open it. The process binds `0.0.0.0` inside that one network. When `PGDEMO_DOCKER_SPAWN` is set, each worker is its own container on `zone_b` and `zone_factory`. It publishes on the ROS domain and asks the factory at `172.28.30.10:9443`. The bridge does not carry DDS multicast, so the worker lists the controller (`172.28.20.20`) as a static peer. The end-to-end project does not set that variable: its workers stay children of the controller. The host publishes one port, bound to loopback: `127.0.0.1:8080` forwards to the server's 8443. The end-to-end suite checks that the controller cannot open a TCP connection to the server and that it can open one to PostgreSQL on `172.28.20.10:5432`. The end-to-end project has no `zone_factory`.
 
 ## Volumes
 
-Operational volumes are external and named `pgdemo_pgdata`, `pgdemo_demo-run`, `pgdemo_ca-keys`, `pgdemo_device-keys`, `pgdemo_factory-key`, `pgdemo_factory-cert` and `pgdemo_manager-keys`. `scripts/run-all.sh` creates any that are missing. Compose does not delete them. A test run uses its own `pgdemo-e2e_` volumes, and those do go away with `down -v`.
+Operational volumes are external and named `pgdemo_pgdata`, `pgdemo_seaweed`, `pgdemo_demo-run`, `pgdemo_ca-keys`, `pgdemo_device-keys`, `pgdemo_factory-key`, `pgdemo_factory-cert` and `pgdemo_manager-keys`. `scripts/run-all.sh` creates any that are missing. Compose does not delete them. A test run uses its own `pgdemo-e2e_` volumes, and those do go away with `down -v`.
 
 Project `pgdemo` is the persistent virtual environment. In this flowchart a rectangle is a container and a cylinder is an external volume. The edge is the mount path inside the container. The cylinders sit outside the containers: `stop`, `down` and `down -v` leave them. `ca-keys` covers `/app/run/ca` on top of `demo-run`. The factory writes `factory-cert` and the controller mounts it read only.
 
@@ -59,6 +66,7 @@ Project `pgdemo` is the persistent virtual environment. In this flowchart a rect
 flowchart LR
   subgraph containers [pgdemo containers]
     postgres[postgres]
+    seaweed[seaweed]
     init[init]
     server[server]
     controller[controller]
@@ -66,6 +74,7 @@ flowchart LR
   end
   subgraph persistent [external volumes]
     pgdata[("pgdemo_pgdata")]
+    seaweedData[("pgdemo_seaweed")]
     demoRun[("pgdemo_demo-run")]
     caKeys[("pgdemo_ca-keys")]
     deviceKeys[("pgdemo_device-keys")]
@@ -74,6 +83,7 @@ flowchart LR
     managerKeys[("pgdemo_manager-keys")]
   end
   postgres -->|"/var/lib/postgresql"| pgdata
+  seaweed -->|"/data"| seaweedData
   init -->|"/app/run"| demoRun
   server -->|"/app/run"| demoRun
   controller -->|"/app/run"| demoRun
@@ -89,6 +99,7 @@ flowchart LR
 | Volume | Mounted by | Contents |
 |---|---|---|
 | `pgdata` | `postgres` | the database |
+| `seaweed` | `seaweed` | the object store, mounted at `/data` |
 | `demo-run` | `init`, `server`, `controller` | `run/demo.env`, JWT keys, the TLS certificate |
 | `ca-keys` | `init`, `server` | the device CA. The controller never sees the key |
 | `device-keys` | `controller` | one directory per device, and the controller lock |
@@ -117,7 +128,7 @@ Fill `webroot/` before the first build. The image copies it, and the entrypoint 
 
 ```bash
 cp docker/operational/.env.example docker/operational/.env   # set both passwords
-scripts/run-all.sh                 # postgres, server and controller
+scripts/run-all.sh                 # postgres, seaweed, server, controller and factory
 scripts/run-all.sh server          # the API, plus the database and init
 scripts/run-all.sh controller      # the manager and the factory, plus the database and init
 scripts/run-all.sh --factory-reset # drop and recreate the pgdemo database; volumes stay
@@ -127,7 +138,9 @@ scripts/stop-all.sh server         # only the server (also: controller)
 
 `docker/operational/.env` is gitignored. It is not `run/demo.env`. `POSTGRES_PASSWORD` is the container's database superuser. `DEMO_ADMIN_PASSWORD` is the API user `admin`. The role passwords of `demo_server` and `demo_controller` are generated by `init` and stay in the `demo-run` volume.
 
-`--factory-reset` stops the server and the controller, then runs [`scripts/db-init.sh --reset`](../scripts/db-init.sh). That drops the `pgdemo` database and loads the schema again, including the `dummy1`, `dummy2` and `dummy3` enrollments, and seeds `admin`. No volume is removed: the cluster, `run/demo.env`, the device CA, device directories, the factory key and certificate, and the manager key stay. A later enrollment can fail when a device directory from the previous database is still on `device-keys`. The factory keeps running. The server and the controller then start again, without a rebuild. A normal `up` does not run `init` again, because Compose treats the exited container as finished; the reset uses `compose run`.
+`scripts/run-all.sh` with no arguments starts SeaweedFS with the rest. `scripts/run-all.sh server` does not start it, because nothing depends on it yet.
+
+`--factory-reset` stops the server and the controller, then runs [`scripts/db-init.sh --reset`](../scripts/db-init.sh). That drops the `pgdemo` database and loads the schema again, including the `dummy1`, `dummy2` and `dummy3` enrollments, and seeds `admin`. No volume is removed: the cluster, `run/demo.env`, the device CA, device directories, the factory key and certificate, the manager key and the SeaweedFS data stay. A later enrollment can fail when a device directory from the previous database is still on `device-keys`. The factory and SeaweedFS keep running. The server and the controller then start again, without a rebuild. A normal `up` does not run `init` again, because Compose treats the exited container as finished; the reset uses `compose run`.
 
 The client talks to the published port. Copy the certificate out of the server container:
 
@@ -144,7 +157,7 @@ Logs are `docker compose -f docker/operational/compose.yaml logs`. Ctrl-C on `sc
 
 ## End to end
 
-[`e2e/compose.yaml`](e2e/compose.yaml) is the stateless stack the Robot suite creates and destroys. The project name is `pgdemo-e2e`. Setup runs `down -v` and teardown runs it again, so every execution starts with an empty database, a new device CA and no device keys. The factory is not defined, and enrollment stays on the demo CA. The volumes removed are `pgdemo-e2e_pgdata`, `pgdemo-e2e_demo-run`, `pgdemo-e2e_ca-keys` and `pgdemo-e2e_device-keys`. The operational `pgdemo_` volumes stay.
+[`e2e/compose.yaml`](e2e/compose.yaml) is the stateless stack the Robot suite creates and destroys. The project name is `pgdemo-e2e`. Setup runs `down -v` and teardown runs it again, so every execution starts with an empty database, a new device CA and no device keys. The factory is not defined, and neither is `seaweed`. Enrollment stays on the demo CA. The volumes removed are `pgdemo-e2e_pgdata`, `pgdemo-e2e_demo-run`, `pgdemo-e2e_ca-keys` and `pgdemo-e2e_device-keys`. The operational `pgdemo_` volumes stay, including `pgdemo_seaweed`.
 
 Stop the operational stack first (`scripts/stop-all.sh`): the port and the subnets collide. A build in either project replaces the local `pgdemo:latest` image the other one would start.
 

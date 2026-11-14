@@ -75,7 +75,7 @@ Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design: sequence diagr
 | [`scripts/`](scripts) | `db-init.sh`, `run-all.sh` (start the operational compose project), `stop-all.sh` (stop it), `fetch-webroot.sh` (download the built panel), `capture.sh` (network captures), key and certificate generation, including the device CA (`gen-device-ca.sh`) and the factory root (`gen-factory.sh`). |
 | [`data/`](data) | Network captures of the client over HTTPS and over plain HTTP. |
 | [`patches/`](patches) | libpqxx 8.0.0 patch that adds a truly blocking `wait_notification()`. |
-| [`docker/`](docker) | Virtualization: one image and two compose projects. The operational project runs PostgreSQL, the server, the controller and the factory; the controller then creates one worker container per device. [docker/README.md](docker/README.md). |
+| [`docker/`](docker) | Virtualization: one image and two compose projects. The operational project runs PostgreSQL, SeaweedFS, the server, the controller and the factory; the controller then creates one worker container per device. [docker/README.md](docker/README.md). |
 | [`tests/`](tests) | GoogleTest (auth, dispatcher, static files, database) and a Robot Framework end-to-end suite on docker compose, API and browser. |
 
 ## Quick start (Ubuntu 26.04)
@@ -103,11 +103,11 @@ PGHOST=/var/run/postgresql scripts/db-init.sh       # add --reset to start over
 
 `db-init.sh` creates the roles and the `pgdemo` database, loads `sql/`, generates the device root CA in `run/ca/` (once) and registers it, queues the enrollment of the three seed devices, creates the API user `admin`, and writes generated passwords to `run/demo.env` (mode 0600, gitignored). A database created with an earlier schema needs `--reset`; it is not migrated. After a reset, also remove `run/devices/`: the device keys there belong to certificates the new database does not know. Database tests connect over TCP to `127.0.0.1:5432` with those passwords (`scram-sha-256` in the default Ubuntu `pg_hba.conf`).
 
-Start the demo with the operational project. It runs PostgreSQL, the server, the controller and the factory. The server and the controller each log in with their own role. `init` runs once and exits: it loads the schema, creates the device CA and writes `run/demo.env` inside the volume.
+Start the demo with the operational project. It runs PostgreSQL, SeaweedFS, the server, the controller and the factory. `scripts/run-all.sh` with no arguments starts SeaweedFS with the rest. `scripts/run-all.sh server` does not start it, because nothing depends on it yet. The server and the controller each log in with their own role. `init` runs once and exits: it loads the schema, creates the device CA and writes `run/demo.env` inside the volume.
 
 ```bash
 cp docker/operational/.env.example docker/operational/.env   # set both passwords
-scripts/run-all.sh                 # postgres, server, controller and factory
+scripts/run-all.sh                 # postgres, seaweed, server, controller and factory
 scripts/run-all.sh server          # the API, plus the database and init
 scripts/run-all.sh controller      # the manager and the factory, plus the database and init
 scripts/stop-all.sh                # stop the project; volumes stay
@@ -154,7 +154,7 @@ Stop the controller and post a configuration: the API answers `202` with the req
 
 ## Two compose projects
 
-[docker/README.md](docker/README.md) is the layout: one image and two compose projects. [`docker/operational`](docker/operational) is the project `scripts/run-all.sh` starts. It runs PostgreSQL, the server, the controller and the factory, and the controller creates one worker container per device, with that worker's PUF volume. [`docker/e2e`](docker/e2e) is the throwaway project the end-to-end suite uses. It has no factory, and its workers are processes the controller forks. The two projects cannot run at the same time.
+[docker/README.md](docker/README.md) is the layout: one image and two compose projects. [`docker/operational`](docker/operational) is the project `scripts/run-all.sh` starts. It runs PostgreSQL, SeaweedFS, the server, the controller and the factory, and the controller creates one worker container per device, with that worker's PUF volume. [docker/operational/README.md](docker/operational/README.md) is the network scheme. [`docker/e2e`](docker/e2e) is the throwaway project the end-to-end suite uses. It has no factory and no SeaweedFS, and its workers are processes the controller forks. The two projects cannot run at the same time.
 
 ## Control panel
 

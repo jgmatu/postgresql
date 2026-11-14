@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Start the operational stack: PostgreSQL, the server and the controller.
+# Start the operational stack: PostgreSQL, SeaweedFS, the server and the controller.
 #
 # Usage: scripts/run-all.sh [server|controller|all]
 #        scripts/run-all.sh --factory-reset
@@ -60,7 +60,8 @@ if [[ -z "${POSTGRES_PASSWORD:-}" || -z "${DEMO_ADMIN_PASSWORD:-}" ]]; then
 fi
 
 for volume in pgdemo_pgdata pgdemo_demo-run pgdemo_ca-keys pgdemo_device-keys \
-             pgdemo_factory-key pgdemo_factory-cert pgdemo_manager-keys; do
+             pgdemo_factory-key pgdemo_factory-cert pgdemo_manager-keys \
+             pgdemo_seaweed; do
     docker volume create --label pgdemo.stack=operational "${volume}" >/dev/null
 done
 
