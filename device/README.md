@@ -118,6 +118,6 @@ A container keeps one seed file, `seed`, at `/var/lib/pgdemo/puf/seed`. The firs
 
 [`DeviceKey::from_seed`](../libs/pki/src/DeviceKey.cpp) expands those 32 bytes with HKDF-SHA384, info `pgdemo/worker-key/v1`, to 64 bytes. The integer modulo `n - 1`, plus one, is the secp384r1 scalar. The same seed is the same P-384 key. The ECDSA nonce stays random. On the container path the derived key is stored as `factory.key`. On the fork path it is stored as `key.pem`.
 
-What crosses the trust boundary is public. The worker sends the public key and a CSR. The factory returns a signed certificate (`cert.pem` or `factory.crt`). At run time the manager sends a challenge nonce. The worker answers with the ECDSA signature and the certificate. A later CRL that lists this certificate's serial, and whose signature checks, ends the process with exit `1`.
+What crosses the trust boundary is public. The worker sends the public key and a CSR. The factory returns a signed certificate (`cert.pem` or `factory.crt`). At run time the manager sends a challenge nonce. The worker answers with the ECDSA signature and the certificate. A later CRL that lists this certificate's serial, and whose signature checks, ends the process with exit `1`. The factory also provisions its root certificate on the manager. With that anchor the manager validates the worker's chain in the application challenge and in SROS2.
 
 ![PUF Cryptographic Identity](puf-identity.svg)

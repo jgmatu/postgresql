@@ -70,4 +70,7 @@
 
   <path d="M 760 452 H 1000" fill="none" stroke="#334155" stroke-width="1.75" marker-end="url(#arrow)"/>
   <text x="880" y="444" text-anchor="middle" fill="#334155" font-family="Inter, system-ui, sans-serif" font-size="12" font-weight="600">ECDSA signature + certificate</text>
+
+  <path d="M 1040 252 V 340" fill="none" stroke="#047857" stroke-width="1.75" marker-end="url(#arrow-green)"/>
+  <text x="1052" y="292" fill="#047857" font-family="Inter, system-ui, sans-serif" font-size="12" font-weight="600"><tspan x="1052">factory root cert</tspan><tspan x="1052" dy="16">(SROS2 / trust anchor)</tspan></text>
 </svg>
